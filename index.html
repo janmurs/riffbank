@@ -1,28 +1,72 @@
 <!doctype html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta
+  name="viewport"
+  content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no"
+/>
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="theme-color" content="#0b0b0f" />
+
   <link rel="manifest" href="./manifest.json" />
   <title>RiffBank</title>
+
+  <!-- IMPORTANT: make sure this matches your file name -->
   <link rel="stylesheet" href="./styles.css" />
 </head>
+
 <body>
+
   <div class="app">
-    <header class="topbar">
-      <div class="titleblock">
-        <div class="kicker">RiffBank</div>
-        <h1 id="headerTitle">Songs</h1>
-      </div>
-      <div class="top-actions">
-        <button id="exportBtn" class="ghost">Export</button>
-        <label class="ghost filelabel">
-          Import
-          <input id="importFile" type="file" accept="application/json" />
-        </label>
-      </div>
-    </header>
+
+<header class="topbar">
+  <div class="left-actions">
+    <button id="menuBtn" class="ghost iconbtn" aria-label="Open menu">☰</button>
+  </div>
+
+  <div class="titleblock">
+    <div class="kicker">RiffBank</div>
+    <h1 id="headerTitle">Songs</h1>
+  </div>
+
+  <div class="top-actions">
+    <button id="exportBtn" class="ghost">Export</button>
+    <label class="ghost filelabel">
+      Import
+      <input id="importFile" type="file" accept="application/json" />
+    </label>
+  </div>
+</header>
+
+<!-- Drawer overlay + panel -->
+<div id="drawerOverlay" class="drawerOverlay" aria-hidden="true"></div>
+
+<aside id="drawer" class="drawer" aria-hidden="true">
+  <div class="drawerHeader">
+    <div class="drawerTitle">Menu</div>
+    <button id="drawerCloseBtn" class="ghost iconbtn" aria-label="Close menu">✕</button>
+  </div>
+
+  <div class="drawerSection">
+    <div class="drawerLabel">Library</div>
+    <button class="drawerItem" data-drawer="projects">Projects</button>
+    <button class="drawerItem" data-drawer="eps">EPs</button>
+    <button class="drawerItem" data-drawer="collabs">Collaborators</button>
+  </div>
+
+  <div class="drawerSection">
+    <div class="drawerLabel">Tools</div>
+    <button class="drawerItem" data-drawer="importExport">Import / Export</button>
+  </div>
+
+  <div class="drawerSection">
+    <div class="drawerLabel">About</div>
+    <button class="drawerItem" data-drawer="about">About</button>
+  </div>
+</aside>
 
     <main id="view" class="view"></main>
 
@@ -32,10 +76,12 @@
       <button class="tab" data-tab="dashboard">Dashboard</button>
       <button class="tab" data-tab="settings">Settings</button>
     </nav>
+
   </div>
 
   <div id="toast" class="toast" aria-live="polite"></div>
 
   <script src="./app.js"></script>
+
 </body>
 </html>

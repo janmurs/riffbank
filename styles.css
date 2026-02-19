@@ -10,6 +10,37 @@
   --r:18px;
 }
 
+/* App container */
+.app {
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+button {
+  min-height: 44px;
+  padding: 12px 16px;
+  border-radius: 12px;
+}
+
+h1 {
+  font-size: clamp(28px, 5vw, 36px);
+}
+
+body {
+  font-size: 16px;
+}
+
+.bottom-nav {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  max-width: 480px;
+  margin: auto;
+  backdrop-filter: blur(12px);
+}
+
 *{box-sizing:border-box}
 html,body{height:100%}
 body{
@@ -163,6 +194,7 @@ textarea{min-height:100px; resize:vertical}
   backdrop-filter: blur(10px);
   border-top: 1px solid rgba(255,255,255,.08);
   display:flex; gap:8px; justify-content:center;
+  z-index: 40;
 }
 .tab{
   flex:1; max-width:170px;
@@ -197,3 +229,136 @@ textarea{min-height:100px; resize:vertical}
 
 .filelabel input{display:none}
 .mono{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;}
+
+/* =========================
+   iPhone / PWA App Feel
+   ========================= */
+
+/* 1) Prevent iOS from zooming into inputs */
+input, textarea, select, button {
+  font-size: 16px;
+}
+
+/* 2) Make the "app" a fixed screen, not a scrolling webpage */
+html, body {
+  height: 100%;
+  overflow: hidden; /* prevents body scroll */
+}
+
+/* 3) Allow scrolling ONLY inside the main content area */
+.view {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch; /* smooth iOS momentum scroll */
+}
+
+/* 4) Remove ugly tap highlight + make taps feel native */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* 5) Prevent random text selection, but still allow typing/selecting in inputs */
+body {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input, textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Fix iOS flex scrolling */
+.app {
+  height: 100vh;      /* gives the flex container a real height */
+}
+
+.view {
+  flex: 1;
+  min-height: 0;      /* IMPORTANT: allows the flex child to be scrollable */
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+/* =========================
+   Drawer (slide-left menu)
+   ========================= */
+
+.left-actions { display:flex; align-items:center; gap:10px; }
+.iconbtn { padding: 10px 12px; min-height: 44px; border-radius: 14px; }
+
+.drawerOverlay{
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.45);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .2s ease;
+  z-index: 50;
+}
+
+.drawer{
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 100vh;
+  width: min(320px, 86vw);
+  background: rgba(12,12,18,.92);
+  backdrop-filter: blur(14px);
+  border-right: 1px solid rgba(255,255,255,.10);
+  transform: translateX(-105%);
+  transition: transform .22s ease;
+  z-index: 51;
+  padding: env(safe-area-inset-top) 14px 14px;
+  display:flex;
+  flex-direction:column;
+  gap: 14px;
+}
+
+.drawerHeader{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  padding: 8px 4px;
+}
+
+.drawerTitle{
+  font-weight: 800;
+  letter-spacing: -.3px;
+  font-size: 16px;
+}
+
+.drawerSection{
+  padding: 10px;
+  border: 1px solid rgba(255,255,255,.08);
+  background: rgba(255,255,255,.04);
+  border-radius: 16px;
+  display:flex;
+  flex-direction:column;
+  gap: 8px;
+}
+
+.drawerLabel{
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+
+.drawerItem{
+  width:100%;
+  text-align:left;
+  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(0,0,0,.20);
+  color: var(--text);
+  padding: 12px 12px;
+  border-radius: 14px;
+  cursor:pointer;
+}
+
+.drawerItem:hover{ filter: brightness(1.07); }
+
+/* Open state */
+.drawerOpen .drawer{ transform: translateX(0); }
+.drawerOpen .drawerOverlay{ opacity: 1; pointer-events: auto; }
+.drawerOpen .view{
+  overflow: hidden;
+}

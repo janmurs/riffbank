@@ -37,6 +37,7 @@ function slug(s) {
     .trim();
 }
 
+// For HTML attributes / innerHTML
 function escapeHtml(str) {
   return String(str ?? "")
     .replaceAll("&", "&amp;")
@@ -44,6 +45,27 @@ function escapeHtml(str) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+// For textarea inner content (don't escape quotes)
+function escapeTextarea(str) {
+  return String(str ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+// ✅ UUID helper (fixes crypto.randomUUID not supported on some browsers/PWA contexts)
+function uid() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return (
+    "id-" +
+    Date.now().toString(36) +
+    "-" +
+    Math.random().toString(36).slice(2, 10) +
+    "-" +
+    Math.random().toString(36).slice(2, 10)
+  );
 }
 
 function loadState() {
@@ -85,6 +107,31 @@ const TAB_TITLES = {
 
 let currentTab = "songs";
 let selectedSongId = null;
+
+let drawerView = null;     // "projects" | "eps" | "collabs" | "importExport" | "about" | null
+let drawerOpen = false;
+
+function openDrawer() {
+  drawerOpen = true;
+  document.body.classList.add("drawerOpen");
+  $("#drawer")?.setAttribute("aria-hidden", "false");
+  $("#drawerOverlay")?.setAttribute("aria-hidden", "false");
+}
+
+function closeDrawer() {
+  drawerOpen = false;
+  document.body.classList.remove("drawerOpen");
+  $("#drawer")?.setAttribute("aria-hidden", "true");
+  $("#drawerOverlay")?.setAttribute("aria-hidden", "true");
+}
+
+function setDrawerView(v) {
+  drawerView = v;
+  closeDrawer();
+  selectedSongId = null;
+  // Header title will be set inside the renderers
+  render();
+}
 
 function setHeader(t) {
   if (headerTitle) headerTitle.textContent = t;
@@ -135,8 +182,10 @@ function copyText(txt) {
 
 function badgeForStatus(status) {
   const s = (status || "Idea").toLowerCase();
-  if (s === "done" || s === "released") return `<span class="badge good">✅ ${escapeHtml(status)}</span>`;
-  if (s === "mix" || s === "master" || s === "ready") return `<span class="badge warn">⚡ ${escapeHtml(status)}</span>`;
+  if (s === "done" || s === "released")
+    return `<span class="badge good">✅ ${escapeHtml(status)}</span>`;
+  if (s === "mix" || s === "master" || s === "ready")
+    return `<span class="badge warn">⚡ ${escapeHtml(status)}</span>`;
   return `<span class="badge">🎧 ${escapeHtml(status || "Idea")}</span>`;
 }
 
@@ -145,9 +194,40 @@ document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
     currentTab = btn.dataset.tab;
     selectedSongId = null;
-    document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b === btn));
+    document
+      .querySelectorAll(".tab")
+      .forEach((b) => b.classList.toggle("active", b === btn));
     setHeader(TAB_TITLES[currentTab] || "RiffBank");
     render();
+  });
+});
+
+// Drawer open/close
+$("#menuBtn")?.addEventListener("click", openDrawer);
+$("#drawerCloseBtn")?.addEventListener("click", closeDrawer);
+$("#drawerOverlay")?.addEventListener("click", closeDrawer);
+
+// Tabs
+document.querySelectorAll(".tab").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    drawerView = null; // ✅ if you were in a drawer screen, return to normal tabs
+    currentTab = btn.dataset.tab;
+    selectedSongId = null;
+
+    document
+      .querySelectorAll(".tab")
+      .forEach((b) => b.classList.toggle("active", b === btn));
+
+    setHeader(TAB_TITLES[currentTab] || "RiffBank");
+    render();
+  });
+});
+
+// Drawer menu items
+document.querySelectorAll(".drawerItem").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const v = btn.dataset.drawer;
+    setDrawerView(v);
   });
 });
 
@@ -176,7 +256,8 @@ $("#importFile")?.addEventListener("change", async (e) => {
       alert("That file doesn't look like a RiffBank backup.");
       return;
     }
-    if (!confirm("Import will replace your current data on this device. Continue?")) return;
+    if (!confirm("Import will replace your current data on this device. Continue?"))
+      return;
     state = incoming;
     saveState();
     toast("Imported ✅");
@@ -190,6 +271,15 @@ $("#importFile")?.addEventListener("change", async (e) => {
 
 function render() {
   if (!view) return;
+
+  // Drawer screens take precedence
+  if (drawerView === "projects") return renderProjects();
+  if (drawerView === "eps") return renderEPs();
+  if (drawerView === "collabs") return renderCollaborators();
+  if (drawerView === "importExport") return renderImportExport();
+  if (drawerView === "about") return renderAbout();
+
+  // Normal tabs
   if (currentTab === "songs") {
     if (selectedSongId) return renderSongDetail(selectedSongId);
     return renderSongsList();
@@ -199,11 +289,274 @@ function render() {
   if (currentTab === "settings") return renderSettings();
 }
 
+function renderProjects() {
+  setHeader("Projects");
+
+  // safer:
+  const projects = Array.from(
+    new Set([
+      ...(state.settings?.defaultProject ? [state.settings.defaultProject.trim()] : []),
+      ...state.songs.map(s => (s.project || "").trim()).filter(Boolean)
+    ])
+  ).sort((a,b) => a.localeCompare(b));
+
+  const rows = projects.map(p => {
+    const count = state.songs.filter(s => (s.project || "").trim() === p).length;
+    const isDefault = (state.settings.defaultProject || "").trim() === p;
+    return `
+      <div class="item" style="cursor:default">
+        <div class="row" style="justify-content:space-between; align-items:center">
+          <div class="title"><b>${escapeHtml(p)}</b></div>
+          <div class="row" style="gap:8px; justify-content:flex-end">
+            ${isDefault ? `<span class="badge good">Default</span>` : `<span class="badge">—</span>`}
+          </div>
+        </div>
+        <div class="meta">${count} song${count === 1 ? "" : "s"}</div>
+        <div class="row" style="margin-top:10px; gap:8px; flex-wrap:wrap">
+          <button class="btn" data-set-default="${escapeHtml(p)}">Set default</button>
+          <button class="btn" data-filter="${escapeHtml(p)}">View songs</button>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  view.innerHTML = `
+    <div class="card">
+      <div class="row" style="justify-content:space-between; align-items:center">
+        <h2>Projects</h2>
+        <button id="closeDrawerView" class="ghost">Close</button>
+      </div>
+
+      <div class="hr"></div>
+
+      <h2>New project</h2>
+      <div class="row">
+        <div class="col">
+          <div class="label">Name</div>
+          <input id="newProjName" type="text" placeholder="e.g. SkeletonDanceParty" />
+        </div>
+        <div class="col" style="display:flex; align-items:flex-end; gap:10px">
+          <button id="createProj" class="btn primary">Create</button>
+        </div>
+      </div>
+
+      <div class="hr"></div>
+
+      <h2>All projects (${projects.length})</h2>
+      <div class="list">
+        ${rows || `<div class="small">No projects yet. Create one above.</div>`}
+      </div>
+    </div>
+  `;
+
+  $("#closeDrawerView").addEventListener("click", () => {
+    drawerView = null;
+    setHeader(TAB_TITLES[currentTab] || "RiffBank");
+    render();
+  });
+
+  $("#createProj").addEventListener("click", () => {
+    const name = ($("#newProjName").value || "").trim();
+    if (!name) return toast("Give it a name 🙂");
+    state.settings.defaultProject = name; // this “creates” it by making it default
+    saveState();
+    toast("Project added ✅");
+    renderProjects();
+  });
+
+  view.querySelectorAll("[data-set-default]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const p = btn.getAttribute("data-set-default");
+      state.settings.defaultProject = p;
+      saveState();
+      toast("Default set ✅");
+      renderProjects();
+    });
+  });
+
+  view.querySelectorAll("[data-filter]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const p = btn.getAttribute("data-filter");
+
+      // Jump to songs tab and prefill search with project name
+      drawerView = null;
+      currentTab = "songs";
+      document.querySelectorAll(".tab").forEach(t =>
+        t.classList.toggle("active", t.dataset.tab === "songs")
+      );
+      setHeader("Songs");
+      renderSongsList();
+
+      // after render, fill search box
+      setTimeout(() => {
+        const q = $("#q");
+        if (q) {
+          q.value = p;
+          q.dispatchEvent(new Event("input"));
+          toast(`Showing: ${p}`);
+        }
+      }, 0);
+    });
+  });
+}
+
+function renderEPs() {
+  setHeader("EPs");
+
+  view.innerHTML = `
+    <div class="card">
+      <div class="row" style="justify-content:space-between; align-items:center">
+        <h2>EPs</h2>
+        <button id="closeDrawerView" class="ghost">Close</button>
+      </div>
+      <div class="small">This is ready for the next step: define EPs and assign songs to them.</div>
+      <div class="hr"></div>
+      <div class="small">Want EPs to be:</div>
+      <ul class="small">
+        <li>A named collection of songs</li>
+        <li>With artwork + track order</li>
+        <li>And a “release status”</li>
+      </ul>
+    </div>
+  `;
+
+  $("#closeDrawerView").addEventListener("click", () => {
+    drawerView = null;
+    setHeader(TAB_TITLES[currentTab] || "RiffBank");
+    render();
+  });
+}
+
+function renderCollaborators() {
+  setHeader("Collaborators");
+
+  // Parse collaborators from songs.collaborators (comma separated)
+  const counts = {};
+  state.songs.forEach(s => {
+    const raw = (s.collaborators || "").split(",").map(x => x.trim()).filter(Boolean);
+    raw.forEach(name => counts[name] = (counts[name] || 0) + 1);
+  });
+
+  const rows = Object.entries(counts)
+    .sort((a,b) => b[1] - a[1])
+    .map(([name, count]) => `
+      <div class="item" style="cursor:default">
+        <div class="row" style="justify-content:space-between; align-items:center">
+          <div class="title"><b>${escapeHtml(name)}</b></div>
+          <span class="badge">${count} song${count === 1 ? "" : "s"}</span>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn" data-filter-collab="${escapeHtml(name)}">View songs</button>
+        </div>
+      </div>
+    `).join("");
+
+  view.innerHTML = `
+    <div class="card">
+      <div class="row" style="justify-content:space-between; align-items:center">
+        <h2>Collaborators</h2>
+        <button id="closeDrawerView" class="ghost">Close</button>
+      </div>
+      <div class="small">Pulled automatically from your song “Collaborators” field (comma-separated).</div>
+      <div class="hr"></div>
+
+      <div class="list">
+        ${rows || `<div class="small">No collaborators yet. Add names on songs (ex: "Darian, Mason").</div>`}
+      </div>
+    </div>
+  `;
+
+  $("#closeDrawerView").addEventListener("click", () => {
+    drawerView = null;
+    setHeader(TAB_TITLES[currentTab] || "RiffBank");
+    render();
+  });
+
+  view.querySelectorAll("[data-filter-collab]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const name = btn.getAttribute("data-filter-collab");
+      drawerView = null;
+      currentTab = "songs";
+      document.querySelectorAll(".tab").forEach(t =>
+        t.classList.toggle("active", t.dataset.tab === "songs")
+      );
+      setHeader("Songs");
+      renderSongsList();
+      setTimeout(() => {
+        const q = $("#q");
+        if (q) {
+          q.value = name;
+          q.dispatchEvent(new Event("input"));
+          toast(`Showing: ${name}`);
+        }
+      }, 0);
+    });
+  });
+}
+
+function renderImportExport() {
+  setHeader("Import / Export");
+
+  view.innerHTML = `
+    <div class="card">
+      <div class="row" style="justify-content:space-between; align-items:center">
+        <h2>Import / Export</h2>
+        <button id="closeDrawerView" class="ghost">Close</button>
+      </div>
+      <div class="small">Use the top-right buttons anytime. This screen is just a friendly hub.</div>
+      <div class="hr"></div>
+      <div class="row" style="gap:10px">
+        <button id="doExport" class="btn primary">Export backup</button>
+        <button id="doImport" class="btn">Import backup</button>
+      </div>
+      <div class="small" style="margin-top:10px">
+        Import replaces local data on this device. Export first if you care.
+      </div>
+    </div>
+  `;
+
+  $("#closeDrawerView").addEventListener("click", () => {
+    drawerView = null;
+    setHeader(TAB_TITLES[currentTab] || "RiffBank");
+    render();
+  });
+
+  $("#doExport").addEventListener("click", () => $("#exportBtn")?.click());
+  $("#doImport").addEventListener("click", () => $("#importFile")?.click());
+}
+
+function renderAbout() {
+  setHeader("About");
+
+  view.innerHTML = `
+    <div class="card">
+      <div class="row" style="justify-content:space-between; align-items:center">
+        <h2>RiffBank</h2>
+        <button id="closeDrawerView" class="ghost">Close</button>
+      </div>
+      <div class="small">Local-only PWA. Your data lives in localStorage on this device.</div>
+      <div class="hr"></div>
+      <div class="small">
+        <div><b>Storage key:</b> ${escapeHtml(LS_KEY)}</div>
+        <div style="margin-top:6px"><b>Total songs:</b> ${state.songs.length}</div>
+      </div>
+    </div>
+  `;
+
+  $("#closeDrawerView").addEventListener("click", () => {
+    drawerView = null;
+    setHeader(TAB_TITLES[currentTab] || "RiffBank");
+    render();
+  });
+}
+
 // ----------------------
 // Songs list + creation
 // ----------------------
 function renderSongsList() {
-  const songs = [...state.songs].sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+  const songs = [...state.songs].sort((a, b) =>
+    (b.updatedAt || "").localeCompare(a.updatedAt || "")
+  );
 
   view.innerHTML = `
     <div class="card">
@@ -215,17 +568,23 @@ function renderSongsList() {
         </div>
         <div class="col">
           <div class="label">Project</div>
-          <input id="newProject" type="text" value="${escapeHtml(state.settings.defaultProject)}" />
+          <input id="newProject" type="text" value="${escapeHtml(
+            state.settings.defaultProject
+          )}" />
         </div>
       </div>
       <div class="row" style="margin-top:10px">
         <div class="col">
           <div class="label">Genre</div>
-          <input id="newGenre" type="text" value="${escapeHtml(state.settings.defaultGenre)}" />
+          <input id="newGenre" type="text" value="${escapeHtml(
+            state.settings.defaultGenre
+          )}" />
         </div>
         <div class="col">
           <div class="label">Sprint</div>
-          <input id="newSprint" type="text" value="${escapeHtml(state.settings.defaultSprint)}" />
+          <input id="newSprint" type="text" value="${escapeHtml(
+            state.settings.defaultSprint
+          )}" />
         </div>
       </div>
       <div class="row" style="margin-top:10px">
@@ -243,7 +602,9 @@ function renderSongsList() {
         <div class="col">
           <select id="statusFilter">
             <option value="">All statuses</option>
-            ${["Idea","Demo","Arrange","Mix","Master","Ready","Done","Released"].map(s => `<option value="${s}">${s}</option>`).join("")}
+            ${["Idea","Demo","Arrange","Mix","Master","Ready","Done","Released"]
+              .map((s) => `<option value="${s}">${s}</option>`)
+              .join("")}
           </select>
         </div>
       </div>
@@ -260,7 +621,7 @@ function renderSongsList() {
     if (!title) return toast("Give it a title 🙂");
 
     const song = {
-      id: crypto.randomUUID(),
+      id: uid(), // ✅ fixed
       title,
       project: $("#newProject").value.trim() || "Project",
       genre: $("#newGenre").value.trim() || "",
@@ -299,14 +660,17 @@ function renderSongsList() {
     });
 
     listEl.innerHTML = filtered.length
-      ? filtered.map((s) => {
-          const vCount = s.versions?.length || 0;
-          const stuckBadge =
-            s.stuckState === "Stuck" ? `<span class="badge bad">🧊 Stuck</span>` :
-            s.stuckState === "Parked" ? `<span class="badge warn">💤 Parked</span>` :
-            `<span class="badge">✅ Active</span>`;
+      ? filtered
+          .map((s) => {
+            const vCount = s.versions?.length || 0;
+            const stuckBadge =
+              s.stuckState === "Stuck"
+                ? `<span class="badge bad">🧊 Stuck</span>`
+                : s.stuckState === "Parked"
+                ? `<span class="badge warn">💤 Parked</span>`
+                : `<span class="badge">✅ Active</span>`;
 
-          return `
+            return `
             <div class="item" data-id="${s.id}">
               <div class="row" style="justify-content:space-between; align-items:center">
                 <div class="title"><b>${escapeHtml(s.title)}</b></div>
@@ -315,10 +679,13 @@ function renderSongsList() {
                   ${stuckBadge}
                 </div>
               </div>
-              <div class="meta">${escapeHtml(s.project)} • ${escapeHtml(s.genre || "—")} • Sprint: ${escapeHtml(s.sprint || "—")} • Versions: ${vCount}</div>
+              <div class="meta">${escapeHtml(s.project)} • ${escapeHtml(
+              s.genre || "—"
+            )} • Sprint: ${escapeHtml(s.sprint || "—")} • Versions: ${vCount}</div>
             </div>
           `;
-        }).join("")
+          })
+          .join("")
       : `<div class="small">No matches.</div>`;
 
     listEl.querySelectorAll("[data-id]").forEach((el) => {
@@ -340,7 +707,10 @@ function renderSongsList() {
 // ----------------------
 function renderSongDetail(id) {
   const song = getSong(id);
-  if (!song) { selectedSongId = null; return renderSongsList(); }
+  if (!song) {
+    selectedSongId = null;
+    return renderSongsList();
+  }
 
   const bv = bestVersion(song);
   const drivePath = drivePathFor(song);
@@ -382,11 +752,15 @@ function renderSongDetail(id) {
       <div class="row" style="margin-top:10px">
         <div class="col">
           <div class="label">Instrumentation</div>
-          <input id="inst" type="text" placeholder="e.g. Drop G# 7-string, synth pads" value="${escapeHtml(song.instrumentation)}"/>
+          <input id="inst" type="text" placeholder="e.g. Drop G# 7-string, synth pads" value="${escapeHtml(
+            song.instrumentation
+          )}"/>
         </div>
         <div class="col">
           <div class="label">Collaborators</div>
-          <input id="collab" type="text" placeholder="e.g. Darian, Mason" value="${escapeHtml(song.collaborators)}"/>
+          <input id="collab" type="text" placeholder="e.g. Darian, Mason" value="${escapeHtml(
+            song.collaborators
+          )}"/>
         </div>
       </div>
 
@@ -394,13 +768,17 @@ function renderSongDetail(id) {
         <div class="col">
           <div class="label">Status</div>
           <select id="status">
-            ${["Idea","Demo","Arrange","Mix","Master","Ready","Done","Released"].map(s => `<option ${song.status===s?'selected':''}>${s}</option>`).join("")}
+            ${["Idea","Demo","Arrange","Mix","Master","Ready","Done","Released"]
+              .map((s) => `<option ${song.status === s ? "selected" : ""}>${s}</option>`)
+              .join("")}
           </select>
         </div>
         <div class="col">
           <div class="label">Stuck state</div>
           <select id="stuck">
-            ${["Active","Stuck","Parked"].map(s => `<option ${song.stuckState===s?'selected':''}>${s}</option>`).join("")}
+            ${["Active","Stuck","Parked"]
+              .map((s) => `<option ${song.stuckState === s ? "selected" : ""}>${s}</option>`)
+              .join("")}
           </select>
         </div>
       </div>
@@ -408,7 +786,9 @@ function renderSongDetail(id) {
       <div class="row" style="margin-top:10px">
         <div class="col">
           <div class="label">Next action</div>
-          <input id="nextAction" type="text" placeholder="e.g. Write verse 2 / re-track guitars" value="${escapeHtml(song.nextAction||"")}"/>
+          <input id="nextAction" type="text" placeholder="e.g. Write verse 2 / re-track guitars" value="${escapeHtml(
+            song.nextAction || ""
+          )}"/>
         </div>
       </div>
 
@@ -419,13 +799,19 @@ function renderSongDetail(id) {
 
     <div class="card">
       <h2>Vibes</h2>
-      <textarea id="vibes" placeholder="What should this feel like?">${escapeHtml(song.vibes)}</textarea>
+      <textarea id="vibes" placeholder="What should this feel like?">${escapeTextarea(
+        song.vibes
+      )}</textarea>
       <div class="hr"></div>
       <h2>Lyrics</h2>
-      <textarea id="lyrics" placeholder="Draft lyrics / fragments…">${escapeHtml(song.lyrics)}</textarea>
+      <textarea id="lyrics" placeholder="Draft lyrics / fragments…">${escapeTextarea(
+        song.lyrics
+      )}</textarea>
       <div class="hr"></div>
       <h2>Notes</h2>
-      <textarea id="notes" placeholder="Mix notes, arrangement notes…">${escapeHtml(song.notes)}</textarea>
+      <textarea id="notes" placeholder="Mix notes, arrangement notes…">${escapeTextarea(
+        song.notes
+      )}</textarea>
       <div class="row" style="margin-top:10px">
         <button id="saveText" class="btn primary">Save text</button>
       </div>
@@ -433,7 +819,9 @@ function renderSongDetail(id) {
 
     <div class="card">
       <h2>Versions</h2>
-      <div class="small">Drive folder suggestion: <span class="mono">${escapeHtml(drivePath)}</span></div>
+      <div class="small">Drive folder suggestion: <span class="mono">${escapeHtml(
+        drivePath
+      )}</span></div>
       <div class="row" style="margin-top:10px">
         <button class="btn" id="copyPath">Copy Drive path</button>
       </div>
@@ -482,17 +870,31 @@ function renderSongDetail(id) {
 
     <div class="card">
       <h2>Best version preview</h2>
-      ${bv ? `
+      ${
+        bv
+          ? `
         <div class="small">Best: <b>${escapeHtml(bv.label)}</b></div>
         <div style="margin-top:10px">
-          <audio controls style="width:100%" ${bv.link ? `src="${escapeHtml(bv.link)}"` : ""}></audio>
+          <audio controls style="width:100%" ${
+            bv.link ? `src="${escapeHtml(bv.link)}"` : ""
+          }></audio>
         </div>
-        <div class="small" style="margin-top:10px">${bv.link ? "If it doesn’t play, use a direct audio URL." : "Paste a link on the version to enable playback."}</div>
-      ` : `<div class="small">No versions yet.</div>`}
+        <div class="small" style="margin-top:10px">${
+          bv.link
+            ? "If it doesn’t play, use a direct audio URL."
+            : "Paste a link on the version to enable playback."
+        }</div>
+      `
+          : `<div class="small">No versions yet.</div>`
+      }
     </div>
   `;
 
-  $("#back").addEventListener("click", () => { selectedSongId = null; setHeader("Songs"); render(); });
+  $("#back").addEventListener("click", () => {
+    selectedSongId = null;
+    setHeader("Songs");
+    render();
+  });
 
   $("#delSong").addEventListener("click", () => {
     if (!confirm(`Delete "${song.title}"?`)) return;
@@ -541,8 +943,9 @@ function renderSongDetail(id) {
   makeBestEl.addEventListener("click", () => {
     makeBest = !makeBest;
     makeBestEl.classList.toggle("on", makeBest);
-    makeBestEl.querySelector("span:last-child").textContent = makeBest ? "Yes" : "No";
-    // refresh suggested filename if file already chosen
+    makeBestEl.querySelector("span:last-child").textContent = makeBest
+      ? "Yes"
+      : "No";
     const f = pickFileEl.files?.[0];
     if (f) suggestedNameEl.value = suggestedFileName(song, f.name, makeBest);
   });
@@ -560,10 +963,12 @@ function renderSongDetail(id) {
     const link = $("#driveLink").value.trim();
     const notes = $("#vNotes").value.trim();
 
-    const label = f ? suggestedFileName(song, f.name, makeBest) : `Version - ${nowStamp()}${makeBest ? " (BEST)" : ""}`;
+    const label = f
+      ? suggestedFileName(song, f.name, makeBest)
+      : `Version - ${nowStamp()}${makeBest ? " (BEST)" : ""}`;
 
     const v = {
-      id: crypto.randomUUID(),
+      id: uid(), // ✅ fixed
       createdAt: nowStamp(),
       label,
       notes,
@@ -573,17 +978,14 @@ function renderSongDetail(id) {
 
     song.versions = song.versions || [];
 
-    // if this is best, clear best from others
     if (makeBest) song.versions.forEach((x) => (x.isBest = false));
     song.versions.unshift(v);
 
-    // ensure at least one best exists
     if (!song.versions.some((x) => x.isBest)) song.versions[0].isBest = true;
 
     song.updatedAt = nowStamp();
     saveState();
 
-    // reset UI
     $("#vNotes").value = "";
     $("#driveLink").value = "";
     pickFileEl.value = "";
@@ -601,7 +1003,9 @@ function renderVersionsList(song) {
   const versions = song.versions || [];
 
   listEl.innerHTML = versions.length
-    ? versions.map((v) => `
+    ? versions
+        .map(
+          (v) => `
         <div class="item" style="cursor:default">
           <div class="row" style="justify-content:space-between; align-items:center">
             <div class="title">${escapeHtml(v.label)}</div>
@@ -609,22 +1013,28 @@ function renderVersionsList(song) {
               ${v.isBest ? `<span class="badge good">⭐ Best</span>` : `<span class="badge">—</span>`}
             </div>
           </div>
-          <div class="meta">Created: ${escapeHtml(v.createdAt)}${v.notes ? ` • Notes: ${escapeHtml(v.notes)}` : ""}</div>
+          <div class="meta">Created: ${escapeHtml(v.createdAt)}${
+            v.notes ? ` • Notes: ${escapeHtml(v.notes)}` : ""
+          }</div>
           <div class="row" style="margin-top:10px; gap:8px; flex-wrap:wrap">
             <button class="btn" data-best="${v.id}">${v.isBest ? "Best ✅" : "Set Best ⭐"}</button>
             <button class="btn" data-copy="${v.id}">Copy name</button>
             <button class="btn" data-open="${v.id}" ${v.link ? "" : "disabled"}>Open link</button>
             <button class="btn" data-del="${v.id}">Delete</button>
           </div>
-          ${v.link
-            ? `<div class="small" style="margin-top:8px">Link: <span class="mono">${escapeHtml(v.link)}</span></div>`
-            : `<div class="small" style="margin-top:8px"><i>No link yet</i> (paste after uploading)</div>`
+          ${
+            v.link
+              ? `<div class="small" style="margin-top:8px">Link: <span class="mono">${escapeHtml(
+                  v.link
+                )}</span></div>`
+              : `<div class="small" style="margin-top:8px"><i>No link yet</i> (paste after uploading)</div>`
           }
         </div>
-      `).join("")
+      `
+        )
+        .join("")
     : `<div class="small">No versions yet. Add one above.</div>`;
 
-  // handlers
   listEl.querySelectorAll("[data-best]").forEach((b) =>
     b.addEventListener("click", () => {
       const id = b.getAttribute("data-best");
@@ -659,7 +1069,8 @@ function renderVersionsList(song) {
       if (!v) return;
       if (!confirm(`Delete version "${v.label}"?`)) return;
       song.versions = song.versions.filter((x) => x.id !== id);
-      if (song.versions.length && !song.versions.some((x) => x.isBest)) song.versions[0].isBest = true;
+      if (song.versions.length && !song.versions.some((x) => x.isBest))
+        song.versions[0].isBest = true;
       song.updatedAt = nowStamp();
       saveState();
       toast("Deleted 🗑️");
@@ -681,20 +1092,32 @@ function renderPlayer() {
       <h2>Best-only player</h2>
       <div class="small">Plays the best version links you’ve pasted.</div>
       <div class="hr"></div>
-      ${bests.length ? `
+      ${
+        bests.length
+          ? `
         <div class="list">
-          ${bests.map(({song, best}) => `
+          ${bests
+            .map(
+              ({ song, best }) => `
             <div class="item">
               <div class="row" style="justify-content:space-between; align-items:center">
                 <div class="title"><b>${escapeHtml(song.title)}</b></div>
                 <button class="btn" data-open-song="${song.id}">Open</button>
               </div>
-              <div class="meta">${escapeHtml(song.project)} • ${escapeHtml(song.genre || "—")} • ${escapeHtml(best.label)}</div>
-              <audio controls style="width:100%; margin-top:10px" src="${escapeHtml(best.link)}"></audio>
+              <div class="meta">${escapeHtml(song.project)} • ${escapeHtml(
+                song.genre || "—"
+              )} • ${escapeHtml(best.label)}</div>
+              <audio controls style="width:100%; margin-top:10px" src="${escapeHtml(
+                best.link
+              )}"></audio>
             </div>
-          `).join("")}
+          `
+            )
+            .join("")}
         </div>
-      ` : `<div class="small">No playable best versions yet. Add a link to a version.</div>`}
+      `
+          : `<div class="small">No playable best versions yet. Add a link to a version.</div>`
+      }
     </div>
   `;
 
@@ -702,7 +1125,9 @@ function renderPlayer() {
     b.addEventListener("click", () => {
       selectedSongId = b.getAttribute("data-open-song");
       currentTab = "songs";
-      document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === "songs"));
+      document
+        .querySelectorAll(".tab")
+        .forEach((t) => t.classList.toggle("active", t.dataset.tab === "songs"));
       setHeader("Song");
       render();
     })
@@ -724,8 +1149,16 @@ function renderDashboard() {
     stuck[s.stuckState || "Active"] = (stuck[s.stuckState || "Active"] || 0) + 1;
   });
 
-  const rows = (obj) => Object.entries(obj).sort((a,b) => b[1]-a[1])
-    .map(([k,v]) => `<div class="row" style="justify-content:space-between"><div>${escapeHtml(k)}</div><div><b>${v}</b></div></div>`).join("");
+  const rows = (obj) =>
+    Object.entries(obj)
+      .sort((a, b) => b[1] - a[1])
+      .map(
+        ([k, v]) =>
+          `<div class="row" style="justify-content:space-between"><div>${escapeHtml(
+            k
+          )}</div><div><b>${v}</b></div></div>`
+      )
+      .join("");
 
   view.innerHTML = `
     <div class="card">
@@ -756,7 +1189,9 @@ function renderSettings() {
       <h2>Settings</h2>
 
       <div class="label">Drive root folder name</div>
-      <input id="driveRoot" type="text" value="${escapeHtml(state.settings.driveRoot || "RiffBank")}" />
+      <input id="driveRoot" type="text" value="${escapeHtml(
+        state.settings.driveRoot || "RiffBank"
+      )}" />
       <div class="small">Used to suggest where files should live in Google Drive/iCloud/etc.</div>
 
       <div class="hr"></div>
@@ -765,18 +1200,24 @@ function renderSettings() {
       <div class="row">
         <div class="col">
           <div class="label">Default project</div>
-          <input id="defProject" type="text" value="${escapeHtml(state.settings.defaultProject || "")}" />
+          <input id="defProject" type="text" value="${escapeHtml(
+            state.settings.defaultProject || ""
+          )}" />
         </div>
         <div class="col">
           <div class="label">Default genre</div>
-          <input id="defGenre" type="text" value="${escapeHtml(state.settings.defaultGenre || "")}" />
+          <input id="defGenre" type="text" value="${escapeHtml(
+            state.settings.defaultGenre || ""
+          )}" />
         </div>
       </div>
 
       <div class="row" style="margin-top:10px">
         <div class="col">
           <div class="label">Default sprint</div>
-          <input id="defSprint" type="text" value="${escapeHtml(state.settings.defaultSprint || "")}" />
+          <input id="defSprint" type="text" value="${escapeHtml(
+            state.settings.defaultSprint || ""
+          )}" />
         </div>
       </div>
 
