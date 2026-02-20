@@ -417,17 +417,6 @@ function goBack({ animate = false } = {}) {
       return;
     }
 
-      if (selectedSongId) {
-      selectedSongId = null;
-      selectedVersionId = null; // ✅
-      currentTab = "songs";
-      songsView = "list";
-      setHeader("Songs");
-      syncTabs();
-      render();
-      return;
-    }
-
     if (currentTab === "songs" && songsView === "create") {
       songsView = "list";
       setHeader("Songs");
@@ -542,12 +531,16 @@ document.addEventListener("touchend", () => {
 const sheet = $("#createSheet");
 const sheetOverlay = $("#sheetOverlay");
 const sheetContent = $("#sheetContent");
-let sheetMode = "chooser"; // chooser | song | lyrics
+let sheetMode = "chooser"; // chooser | song | lyrics | songMenu | versionMenu | songFilters
 let sheetSongMenuId = null;
 
 function openSongMenu(songId){
   sheetSongMenuId = songId;
   openSheet("songMenu");
+}
+
+function openSongFilters(){
+  openSheet("songFilters");
 }
 
 function openSheet(mode = "chooser") {
@@ -716,6 +709,61 @@ function renderSheet() {
 
     $("#songMenuCancel")?.addEventListener("click", () => {
       closeSheet();
+    });
+
+    return;
+  }
+
+      if (sheetMode === "songFilters") {
+    // Build project list from settings + songs
+    const projects = Array.from(
+      new Set([
+        ...(state.settings?.defaultProject ? [state.settings.defaultProject.trim()] : []),
+        ...state.songs.map(s => (s.project || "").trim()).filter(Boolean)
+      ])
+    ).sort((a,b) => a.localeCompare(b));
+
+    sheetContent.innerHTML = `
+      <div class="sheetTitle">Filters</div>
+
+      <div class="sheetForm">
+        <label class="label" style="margin:0">Status</label>
+        <select id="sfStatus">
+          <option value="">All statuses</option>
+          ${["Idea","Demo","Arrange","Mix","Master","Ready","Done","Released"].map(
+            s => `<option value="${s}" ${songsListState.statusFilter === s ? "selected" : ""}>${s}</option>`
+          ).join("")}
+        </select>
+
+        <label class="label" style="margin:8px 0 0">Project</label>
+        <select id="sfProject">
+          <option value="">All projects</option>
+          ${projects.map(
+            p => `<option value="${escapeHtml(p)}" ${songsListState.projectFilter === p ? "selected" : ""}>${escapeHtml(p)}</option>`
+          ).join("")}
+        </select>
+      </div>
+
+      <div class="sheetActions" style="margin-top:12px">
+        <button class="sheetBtn ghost" id="sfClear">Clear</button>
+        <button class="sheetBtn primary" id="sfApply">Apply</button>
+      </div>
+    `;
+
+    $("#sfClear")?.addEventListener("click", () => {
+      songsListState.statusFilter = "";
+      songsListState.projectFilter = "";
+      toast("Cleared 🧼");
+      closeSheet();
+      renderSongsList();
+    });
+
+    $("#sfApply")?.addEventListener("click", () => {
+      songsListState.statusFilter = ($("#sfStatus")?.value || "");
+      songsListState.projectFilter = ($("#sfProject")?.value || "");
+      closeSheet();
+      toast("Applied ✅");
+      renderSongsList();
     });
 
     return;
@@ -1524,26 +1572,16 @@ function renderSongsList() {
 
   view.innerHTML = `
     <div class="songsHead">
-      <div class="segTabs" role="tablist" aria-label="Sort">
-        <button class="segTab ${songsListState.sortMode === "updated" ? "active" : ""}" data-sort="updated">updated</button>
-        <button class="segTab ${songsListState.sortMode === "title" ? "active" : ""}" data-sort="title">title</button>
-        <button class="segTab ${songsListState.sortMode === "status" ? "active" : ""}" data-sort="status">status</button>
-      </div>
-
-      <div class="songsFilters">
-        <input id="q" type="text" placeholder="Search title / lyrics / notes / collaborators..." value="${escapeHtml(songsListState.query)}" />
-        <select id="statusFilter">
-          <option value="">All statuses</option>
-          ${["Idea","Demo","Arrange","Mix","Master","Ready","Done","Released"].map(
-            (s) => `<option value="${s}" ${songsListState.statusFilter === s ? "selected" : ""}>${s}</option>`
-          ).join("")}
-        </select>
-        <select id="projectFilter">
-          <option value="">All projects</option>
-          ${projects.map(
-            (p) => `<option value="${escapeHtml(p)}" ${songsListState.projectFilter === p ? "selected" : ""}>${escapeHtml(p)}</option>`
-          ).join("")}
-        </select>
+      <div class="songsBar">
+        <input
+          id="q"
+          type="text"
+          placeholder="Search songs..."
+          value="${escapeHtml(songsListState.query)}"
+        />
+        <button class="filterBtn" id="openSongFilters" aria-label="Filters">
+          ${iconFilter()}
+        </button>
       </div>
     </div>
 
@@ -1554,14 +1592,14 @@ function renderSongsList() {
   const listEl = $("#songList");
 
   const applyFilter = () => {
-    const qValue = $("#q").value || "";
+    const qValue = $("#q")?.value || "";
     const q = qValue.toLowerCase();
-    const sf = $("#statusFilter").value;
-    const pf = $("#projectFilter").value;
+
+    // filters now come from state (set by the filter sheet)
+    const sf = songsListState.statusFilter || "";
+    const pf = songsListState.projectFilter || "";
 
     songsListState.query = qValue;
-    songsListState.statusFilter = sf;
-    songsListState.projectFilter = pf;
 
     const filtered = songs
       .filter((s) => {
@@ -1653,17 +1691,9 @@ function renderSongsList() {
     });
   };
 
-  view.querySelectorAll(".segTab").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      songsListState.sortMode = btn.getAttribute("data-sort") || "updated";
-      view.querySelectorAll(".segTab").forEach((t) => t.classList.toggle("active", t === btn));
-      applyFilter();
-    });
-  });
-
   $("#q").addEventListener("input", applyFilter);
-  $("#statusFilter").addEventListener("change", applyFilter);
-  $("#projectFilter").addEventListener("change", applyFilter);
+
+  $("#openSongFilters")?.addEventListener("click", openSongFilters);
 
   applyFilter();
 }
@@ -1676,6 +1706,14 @@ function renderSongCreate() {
       <div class="small">Use the center New Record button instead — this screen is legacy.</div>
     </div>
   `;
+}
+
+function iconFilter(){
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 6h16"></path>
+    <path d="M7 12h10"></path>
+    <path d="M10 18h4"></path>
+  </svg>`;
 }
 
 // ---------------------
@@ -2203,24 +2241,38 @@ function preventRubberBandScroll(container) {
   if (!container) return;
   let startY = 0;
 
-  container.addEventListener("touchstart", (e) => {
-    if (e.touches && e.touches.length > 1) return;
-    startY = e.touches?.[0]?.clientY ?? 0;
-  }, { passive: true });
+  container.addEventListener(
+    "touchstart",
+    (e) => {
+      if (e.touches && e.touches.length > 1) return;
+      startY = e.touches?.[0]?.clientY ?? 0;
+    },
+    { passive: true }
+  );
 
-  container.addEventListener("touchmove", (e) => {
-    const tag = (e.target?.tagName || "").toLowerCase();
-    if (tag === "textarea" || tag === "input" || tag === "select") return;
+  container.addEventListener(
+    "touchmove",
+    (e) => {
+      // ✅ Never block touches on Home (otherwise taps can die)
+      if (document.body.classList.contains("isHome")) return;
 
-    const y = e.touches?.[0]?.clientY ?? 0;
-    const dy = y - startY;
+      const tag = (e.target?.tagName || "").toLowerCase();
+      if (tag === "textarea" || tag === "input" || tag === "select") return;
 
-    const atTop = container.scrollTop <= 0;
-    const atBottom =
-      Math.ceil(container.scrollTop + container.clientHeight) >= container.scrollHeight;
+      const y = e.touches?.[0]?.clientY ?? 0;
+      const dy = y - startY;
 
-    if ((atTop && dy > 0) || (atBottom && dy < 0)) e.preventDefault();
-  }, { passive: false });
+      // ✅ Allow small finger wiggles so taps still register
+      if (Math.abs(dy) < 10) return;
+
+      const atTop = container.scrollTop <= 0;
+      const atBottom =
+        Math.ceil(container.scrollTop + container.clientHeight) >= container.scrollHeight;
+
+      if ((atTop && dy > 0) || (atBottom && dy < 0)) e.preventDefault();
+    },
+    { passive: false }
+  );
 }
 
 // ---------------------
