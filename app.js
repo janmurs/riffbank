@@ -89,6 +89,19 @@ function loadState() {
 
 let state = loadState();
 
+function normalizeState() {
+  state.settings = state.settings || {};
+  state.songs = Array.isArray(state.songs) ? state.songs : [];
+  state.songs.forEach((song) => {
+    song.versions = Array.isArray(song.versions) ? song.versions : [];
+    song.versions.forEach((v) => {
+      if (typeof v.isActive !== "boolean") v.isActive = false;
+    });
+  });
+}
+
+normalizeState();
+
 function saveState() {
   localStorage.setItem(LS_KEY, JSON.stringify(state));
 }
@@ -99,13 +112,13 @@ if ("serviceWorker" in navigator) {
 }
 
 const TAB_TITLES = {
+  home: "Home",
   songs: "Songs",
   player: "Player",
-  dashboard: "Dashboard",
   settings: "Settings",
 };
 
-let currentTab = "songs";
+let currentTab = "home";
 let selectedSongId = null;
 let songsView = "list"; // "list" | "create"
 let pendingScrollToUpload = false;
@@ -143,6 +156,12 @@ function setDrawerView(v) {
 
 function setHeader(t) {
   if (headerTitle) headerTitle.textContent = t;
+}
+
+function syncTabs() {
+  document
+    .querySelectorAll(".tab")
+    .forEach((b) => b.classList.toggle("active", b.dataset.tab === currentTab));
 }
 
 function getSong(id) {
@@ -209,9 +228,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
     selectedSongId = null;
     songsView = "list";
 
-    document
-      .querySelectorAll(".tab")
-      .forEach((b) => b.classList.toggle("active", b === btn));
+    syncTabs();
 
     setHeader(TAB_TITLES[currentTab] || "RiffBank");
     render();
@@ -223,9 +240,6 @@ $("#uploadSongBtn")?.addEventListener("click", () => {
   selectedSongId = null;
   songsView = "create";
   currentTab = "songs";
-  document
-    .querySelectorAll(".tab")
-    .forEach((b) => b.classList.toggle("active", b.dataset.tab === "songs"));
   setHeader("Upload Song");
   render();
 });
@@ -329,6 +343,7 @@ $("#importFile")?.addEventListener("change", async (e) => {
 
 function render() {
   if (!view) return;
+  syncTabs();
 
   const uploadSongBtn = $("#uploadSongBtn");
   if (uploadSongBtn) {
@@ -337,7 +352,8 @@ function render() {
       !drawerView &&
       !selectedSongId &&
       songsView === "list";
-    uploadSongBtn.style.display = onSongsListScreen ? "none" : "";
+    const onHomeScreen = currentTab === "home" && !drawerView;
+    uploadSongBtn.style.display = onSongsListScreen || onHomeScreen ? "none" : "";
   }
 
   // Drawer screens take precedence
@@ -348,13 +364,13 @@ function render() {
   if (drawerView === "about") return renderAbout();
 
   // Normal tabs
+  if (currentTab === "home") return renderHome();
   if (currentTab === "songs") {
     if (selectedSongId) return renderSongDetail(selectedSongId);
     if (songsView === "create") return renderSongCreate();
     return renderSongsList();
   }
   if (currentTab === "player") return renderPlayer();
-  if (currentTab === "dashboard") return renderDashboard();
   if (currentTab === "settings") return renderSettings();
 }
 
@@ -451,9 +467,6 @@ function renderProjects() {
       drawerView = null;
       currentTab = "songs";
       songsView = "list";
-      document.querySelectorAll(".tab").forEach(t =>
-        t.classList.toggle("active", t.dataset.tab === "songs")
-      );
       setHeader("Songs");
       renderSongsList();
 
@@ -548,9 +561,6 @@ function renderCollaborators() {
       drawerView = null;
       currentTab = "songs";
       songsView = "list";
-      document.querySelectorAll(".tab").forEach(t =>
-        t.classList.toggle("active", t.dataset.tab === "songs")
-      );
       setHeader("Songs");
       renderSongsList();
       setTimeout(() => {
@@ -619,6 +629,123 @@ function renderAbout() {
     setHeader(TAB_TITLES[currentTab] || "RiffBank");
     render();
   });
+}
+
+function renderHome() {
+  setHeader("Home");
+  view.innerHTML = `
+    <div class="homeWrap">
+      <div class="tileGrid">
+        <button class="tile" data-home="songs"><div class="tileIcon">🎵</div><div class="tileLabel">Songs</div></button>
+        <button class="tile" data-home="projects"><div class="tileIcon">📁</div><div class="tileLabel">Projects</div></button>
+        <button class="tile" data-home="browse"><div class="tileIcon">🔎</div><div class="tileLabel">Browse</div></button>
+        <button class="tile" data-home="lyrics"><div class="tileIcon">✍️</div><div class="tileLabel">Lyrics</div></button>
+      </div>
+      <button class="tile tileCenter" data-home="next"><div class="tileIcon">✅</div><div class="tileLabel">Next Actions</div></button>
+      <div class="homeActions">
+        <button class="ctaSmall" id="quickLogBtn">⚡ Quick log</button>
+        <button class="ctaBig" id="startSessionBtn">Start a session</button>
+      </div>
+    </div>
+  `;
+
+  view.querySelectorAll('[data-home]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const target = btn.getAttribute('data-home');
+      if (target === 'songs') {
+        currentTab = 'songs';
+        songsView = 'list';
+        selectedSongId = null;
+        setHeader('Songs');
+        render();
+        return;
+      }
+      if (target === 'projects') {
+        setDrawerView('projects');
+        return;
+      }
+      if (target === 'browse') {
+        currentTab = 'songs';
+        songsView = 'list';
+        selectedSongId = null;
+        setHeader('Songs');
+        render();
+        setTimeout(() => $('#q')?.focus(), 0);
+        return;
+      }
+      if (target === 'lyrics') {
+        renderLyricsScratch();
+        return;
+      }
+      if (target === 'next') {
+        renderNextActions();
+      }
+    });
+  });
+
+  $('#quickLogBtn')?.addEventListener('click', () => {
+    const val = prompt('Quick log');
+    if (!val || !val.trim()) return;
+    state.quickLog = Array.isArray(state.quickLog) ? state.quickLog : [];
+    state.quickLog.unshift({ id: uid(), text: val.trim(), at: nowStamp() });
+    saveState();
+    toast('Logged ⚡');
+  });
+
+  $('#startSessionBtn')?.addEventListener('click', () => {
+    const active = [...state.songs]
+      .filter((song) => (song.stuckState || 'Active') === 'Active')
+      .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))[0];
+    const pick = active || [...state.songs].sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))[0];
+    if (!pick) return toast('Add a song first 🎵');
+    currentTab = 'songs';
+    selectedSongId = pick.id;
+    songsView = 'list';
+    render();
+  });
+}
+
+function renderLyricsScratch() {
+  setHeader('Lyrics');
+  const value = state.settings.lyricsScratch || '';
+  view.innerHTML = `
+    <div class="card">
+      <div class="row" style="justify-content:space-between; align-items:center">
+        <h2>Lyrics scratch</h2>
+        <button id="closeLyrics" class="ghost">Close</button>
+      </div>
+      <textarea id="lyricsScratch" placeholder="Capture lyric ideas...">${escapeTextarea(value)}</textarea>
+      <div class="row" style="margin-top:10px"><button id="saveLyricsScratch" class="btn primary">Save</button></div>
+    </div>
+  `;
+  $('#closeLyrics')?.addEventListener('click', renderHome);
+  $('#saveLyricsScratch')?.addEventListener('click', () => {
+    state.settings.lyricsScratch = $('#lyricsScratch').value;
+    saveState();
+    toast('Lyrics saved ✍️');
+  });
+}
+
+function renderNextActions() {
+  setHeader('Next Actions');
+  const songs = state.songs.filter((s) => (s.nextAction || '').trim());
+  view.innerHTML = `
+    <div class="card">
+      <div class="row" style="justify-content:space-between; align-items:center">
+        <h2>Next Actions</h2>
+        <button id="closeNextActions" class="ghost">Close</button>
+      </div>
+      <div class="songsList">
+        ${songs.length ? songs.map((s) => `<div class="songRow" data-open-song="${s.id}"><div class="title">${escapeHtml(s.title)}</div><div class="meta">${escapeHtml(s.nextAction || '')}</div></div>`).join('') : '<div class="small" style="padding:12px 0">No next actions yet.</div>'}
+      </div>
+    </div>
+  `;
+  $('#closeNextActions')?.addEventListener('click', renderHome);
+  view.querySelectorAll('[data-open-song]').forEach((el) => el.addEventListener('click', () => {
+    currentTab = 'songs';
+    selectedSongId = el.getAttribute('data-open-song');
+    render();
+  }));
 }
 
 // ----------------------
@@ -760,9 +887,6 @@ function renderSongsList() {
     selectedSongId = null;
     songsView = "create";
     currentTab = "songs";
-    document
-      .querySelectorAll(".tab")
-      .forEach((b) => b.classList.toggle("active", b.dataset.tab === "songs"));
     setHeader("Upload Song");
     render();
   });
@@ -1154,6 +1278,7 @@ function renderSongDetail(id) {
       notes,
       link,
       isBest: makeBest,
+      isActive: true,
     };
 
     song.versions = song.versions || [];
@@ -1205,6 +1330,7 @@ function renderVersionsList(song) {
           }</div>
           <div class="row" style="margin-top:10px; gap:8px; flex-wrap:wrap">
             <button class="btn" data-best="${v.id}">${v.isBest ? "Best ✅" : "Set Best ⭐"}</button>
+            <button class="btn" data-active="${v.id}">${v.isActive ? "Active ✅" : "Set Active 🎧"}</button>
             <button class="btn" data-copy="${v.id}">Copy name</button>
             <button class="btn" data-open="${v.id}" ${v.link ? "" : "disabled"}>Open link</button>
             <button class="btn" data-del="${v.id}">Delete</button>
@@ -1229,6 +1355,19 @@ function renderVersionsList(song) {
       song.updatedAt = nowStamp();
       saveState();
       toast("Best updated ⭐");
+      renderSongDetail(song.id);
+    })
+  );
+
+  listEl.querySelectorAll("[data-active]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const id = b.getAttribute("data-active");
+      const v = song.versions.find((x) => x.id === id);
+      if (!v) return;
+      v.isActive = !v.isActive;
+      song.updatedAt = nowStamp();
+      saveState();
+      toast("Active updated 🎧");
       renderSongDetail(song.id);
     })
   );
@@ -1270,40 +1409,33 @@ function renderVersionsList(song) {
 // Player (best-only)
 // ----------------------
 function renderPlayer() {
-  const bests = state.songs
-    .map((s) => ({ song: s, best: bestVersion(s) }))
-    .filter((x) => x.best && x.best.link);
+  const activeVersions = state.songs
+    .flatMap((song) => (song.versions || []).map((v) => ({ song, v })))
+    .filter(({ v }) => v.link && v.isActive === true);
 
   view.innerHTML = `
     <div class="card">
-      <h2>Best-only player</h2>
-      <div class="small">Plays the best version links you’ve pasted.</div>
+      <h2>Active versions player</h2>
+      <div class="small">Your personal Spotify fed by active versions.</div>
       <div class="hr"></div>
       ${
-        bests.length
-          ? `
-        <div class="list">
-          ${bests
-            .map(
-              ({ song, best }) => `
-            <div class="item">
-              <div class="row" style="justify-content:space-between; align-items:center">
-                <div class="title"><b>${escapeHtml(song.title)}</b></div>
-                <button class="btn" data-open-song="${song.id}">Open</button>
-              </div>
-              <div class="meta">${escapeHtml(song.project)} • ${escapeHtml(
-                song.genre || "—"
-              )} • ${escapeHtml(best.label)}</div>
-              <audio controls style="width:100%; margin-top:10px" src="${escapeHtml(
-                best.link
-              )}"></audio>
-            </div>
-          `
-            )
-            .join("")}
-        </div>
-      `
-          : `<div class="small">No playable best versions yet. Add a link to a version.</div>`
+        activeVersions.length
+          ? `<div class="list">
+            ${activeVersions
+              .map(
+                ({ song, v }) => `
+              <div class="item">
+                <div class="row" style="justify-content:space-between; align-items:center">
+                  <div class="title"><b>${escapeHtml(song.title)}</b></div>
+                  <button class="btn" data-open-song="${song.id}">Open</button>
+                </div>
+                <div class="meta">${escapeHtml(song.project || "—")} • ${escapeHtml(v.label || "Version")}</div>
+                <audio controls style="width:100%; margin-top:10px" src="${escapeHtml(v.link)}"></audio>
+              </div>`
+              )
+              .join("")}
+          </div>`
+          : `<div class="small">No active versions yet. Mark versions Active in a song.</div>`
       }
     </div>
   `;
@@ -1312,9 +1444,6 @@ function renderPlayer() {
     b.addEventListener("click", () => {
       selectedSongId = b.getAttribute("data-open-song");
       currentTab = "songs";
-      document
-        .querySelectorAll(".tab")
-        .forEach((t) => t.classList.toggle("active", t.dataset.tab === "songs"));
       setHeader("Song");
       render();
     })
@@ -1438,6 +1567,6 @@ function renderSettings() {
 }
 
 // Boot
-setHeader("Songs");
+setHeader("Home");
 render();
 preventRubberBandScroll(view);
