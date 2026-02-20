@@ -763,6 +763,14 @@ textarea{ min-height:100px; resize:vertical; }
   transition: opacity 420ms ease, transform 420ms ease;
 }
 
+body.splashing .bottomNav,
+body.splashing .miniPlayer,
+body.splashing .topbar,
+body.splashing .view,
+body.splashing #toast {
+  visibility: hidden;
+}
+
 #splash.hide{
   opacity: 0;
   pointer-events: none;
@@ -877,19 +885,6 @@ textarea{ min-height:100px; resize:vertical; }
     opacity: 1;
     transform: translateY(-2px);
   }
-}
-
-/* Spinner: JS controls show */
-#splashSpinner{
-  width: 84px;
-  height: 18px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-
-  opacity: 0;
-  transform: translateY(6px);
 }
 
 #splashSpinner.show{

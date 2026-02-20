@@ -2441,7 +2441,7 @@ function renderVersionDetail(songId, versionId) {
   setHeader("Version");
 
   const isFeatured = song.featuredVersionId === v.id;
-  const hasPlayable = !!(v.link || v.fileId);
+  const hasPlayable = !!(v.link || v.fileId || v.localAudioId);
 
   view.innerHTML = `
     <div class="card">
@@ -2472,12 +2472,12 @@ function renderVersionDetail(songId, versionId) {
 
       <div class="row" style="margin-top:10px; gap:10px; flex-wrap:wrap">
         <button class="btn" id="importAudioBtn">Import audio (Files) 📁</button>
-        <button class="btn" id="clearLocalBtn" ${v.fileId ? "" : "disabled"}>Remove local file</button>
+        <button class="btn" id="clearLocalBtn" ${(v.fileId || v.localAudioId) ? "" : "disabled"}>Remove local file</button>
       </div>
 
-      ${v.fileId ? `
+      ${(v.fileId || v.localAudioId) ? `
         <div class="small" style="margin-top:8px">
-          Local: <b>${escapeHtml(v.fileName || "audio file")}</b>
+          Local: <b>${escapeHtml(v.fileName || v.originalFileName || "audio file")}</b>
           ${v.fileSize ? ` • ${(v.fileSize/1024/1024).toFixed(1)} MB` : ""}
         </div>
       ` : `<div class="small" style="margin-top:8px">No local file attached.</div>`}
@@ -2505,12 +2505,124 @@ function renderVersionDetail(songId, versionId) {
   $("#saveVersion")?.addEventListener("click", () => {
     v.label = ($("#vLabel")?.value || "").trim();
     v.notes = ($("#vNotesEdit")?.value || "").trim();
-    v.link = ($("#vLink")?.value || "").trim();
+    v.link  = ($("#vLink")?.value || "").trim();
 
     song.updatedAt = nowStamp();
     saveState();
     toast("Saved ✅");
     renderVersionDetail(songId, versionId);
+  });
+
+  // Import audio (local file)
+  $("#importAudioBtn")?.addEventListener("click", async () => {
+    try {
+      const file = await pickAudioFile();
+      if (!file) return;
+
+      const id = uid();
+
+      // store into IndexedDB (your audioPut)
+      await audioPut({
+        id,
+        name: file.name || "audio",
+        type: file.type || "audio/*",
+        size: file.size || 0,
+        blob: file,
+        createdAt: nowStamp(),
+      });
+
+      // use fileId path for this screen
+      v.fileId = id;
+      v.fileName = file.name || "audio";
+      v.fileType = file.type || "audio/*";
+      v.fileSize = file.size || 0;
+
+      // clear old localAudioId if you want (optional)
+      // v.localAudioId = null;
+
+      song.updatedAt = nowStamp();
+      saveState();
+      toast("Imported ✅");
+      renderVersionDetail(songId, versionId);
+    } catch (err) {
+      console.error(err);
+      toast("Import failed 😅");
+    }
+  });
+
+  // Remove local file
+  $("#clearLocalBtn")?.addEventListener("click", async () => {
+    if (!confirm("Remove local audio from this device?")) return;
+
+    // if it was stored under fileId
+    if (v.fileId) {
+      try { await audioDelete(v.fileId); } catch {}
+      v.fileId = null;
+      v.fileName = "";
+      v.fileType = "";
+      v.fileSize = 0;
+    }
+
+    // if it was stored under localAudioId (your other system)
+    if (v.localAudioId) {
+      // you used putAudioBlob/getAudioBlob for this path,
+      // but you don't have a delete wrapper there — so just clear pointer:
+      v.localAudioId = null;
+      v.originalFileName = "";
+    }
+
+    song.updatedAt = nowStamp();
+    saveState();
+    toast("Removed 🧼");
+    renderVersionDetail(songId, versionId);
+  });
+
+  // Play / Queue
+  $("#playThis")?.addEventListener("click", () => playVersion(songId, versionId, { goPlayer: true }));
+  $("#queueThis")?.addEventListener("click", () => addToQueue(songId, versionId));
+
+  // Featured / Active / Best
+  $("#setFeaturedBtn")?.addEventListener("click", () => {
+    setFeatured(songId, versionId);
+    renderVersionDetail(songId, versionId);
+  });
+
+  $("#toggleActiveBtn")?.addEventListener("click", () => {
+    v.isActive = !v.isActive;
+    song.updatedAt = nowStamp();
+    saveState();
+    toast("Active updated 🎧");
+    renderVersionDetail(songId, versionId);
+  });
+
+  $("#setBestBtn")?.addEventListener("click", () => {
+    song.versions.forEach(x => x.isBest = (x.id === versionId));
+    song.updatedAt = nowStamp();
+    saveState();
+    toast("Best updated ⭐");
+    renderVersionDetail(songId, versionId);
+  });
+
+  // Open link
+  $("#openLinkBtn")?.addEventListener("click", () => {
+    if (v.link) window.open(v.link, "_blank");
+  });
+
+  // Delete
+  $("#deleteVersionBtn")?.addEventListener("click", () => {
+    if (!confirm("Delete this version?")) return;
+
+    song.versions = (song.versions || []).filter(x => x.id !== versionId);
+
+    if (song.featuredVersionId === versionId) song.featuredVersionId = null;
+    if (song.versions.length && !song.versions.some(x => x.isBest)) song.versions[0].isBest = true;
+
+    song.updatedAt = nowStamp();
+    saveState();
+    toast("Deleted 🗑️");
+
+    selectedVersionId = null;
+    renderSongDetail(songId);
   });
 }
 
