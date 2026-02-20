@@ -1,77 +1,122 @@
 <!doctype html>
 <html lang="en">
-
 <head>
   <meta charset="UTF-8" />
-<meta
-  name="viewport"
-  content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no"
-/>
-<meta name="apple-mobile-web-app-capable" content="yes" />
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no"
+  />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="theme-color" content="#0b0b0f" />
 
   <link rel="manifest" href="./manifest.json" />
   <title>RiffBank</title>
 
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800;900&display=swap" rel="stylesheet" />
-  
-  <!-- IMPORTANT: make sure this matches your file name -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700;800;900&display=swap"
+    rel="stylesheet"
+  />
+
   <link rel="stylesheet" href="./styles.css" />
 </head>
 
 <body>
+  <!-- Splash -->
+  <div id="splash" class="splash" aria-hidden="false">
+    <div class="splashInner">
+      <div class="splashLogo">RiffBank</div>
+      <div class="splashSub">loading…</div>
+    </div>
+  </div>
 
   <div class="app">
+    <header class="topbar">
+      <div class="titleblock">
+        <h1 id="headerTitle">RiffBank</h1>
+      </div>
+      <div class="top-actions"></div>
+    </header>
 
-<header class="topbar">
-  <div class="titleblock">
-    <div class="kicker">RiffBank</div>
-    <h1 id="headerTitle">Home</h1>
-  </div>
+    <!-- Drawer overlay + panel -->
+    <div id="drawerOverlay" class="drawerOverlay" aria-hidden="true"></div>
 
-  <div class="top-actions">
-    <button id="uploadSongBtn" class="btn primary">Upload Song</button>
-  </div>
-</header>
+    <aside id="drawer" class="drawer" aria-hidden="true">
+      <div class="drawerHeader">
+        <div class="drawerTitle">Menu</div>
+        <button id="drawerCloseBtn" class="ghost iconbtn" aria-label="Close menu">✕</button>
+      </div>
 
-<!-- Drawer overlay + panel -->
-<div id="drawerOverlay" class="drawerOverlay" aria-hidden="true"></div>
+      <div class="drawerSection">
+        <div class="drawerLabel">Library</div>
+        <button class="drawerItem" data-drawer="projects">Projects</button>
+        <button class="drawerItem" data-drawer="eps">EPs</button>
+        <button class="drawerItem" data-drawer="collabs">Collaborators</button>
+      </div>
 
-<aside id="drawer" class="drawer" aria-hidden="true">
-  <div class="drawerHeader">
-    <div class="drawerTitle">Menu</div>
-    <button id="drawerCloseBtn" class="ghost iconbtn" aria-label="Close menu">✕</button>
-  </div>
+      <div class="drawerSection">
+        <div class="drawerLabel">Tools</div>
+        <button class="drawerItem" data-drawer="importExport">Import / Export</button>
+      </div>
 
-  <div class="drawerSection">
-    <div class="drawerLabel">Library</div>
-    <button class="drawerItem" data-drawer="projects">Projects</button>
-    <button class="drawerItem" data-drawer="eps">EPs</button>
-    <button class="drawerItem" data-drawer="collabs">Collaborators</button>
-  </div>
-
-  <div class="drawerSection">
-    <div class="drawerLabel">Tools</div>
-    <button class="drawerItem" data-drawer="importExport">Import / Export</button>
-  </div>
-
-  <div class="drawerSection">
-    <div class="drawerLabel">About</div>
-    <button class="drawerItem" data-drawer="about">About</button>
-  </div>
-</aside>
+      <div class="drawerSection">
+        <div class="drawerLabel">About</div>
+        <button class="drawerItem" data-drawer="about">About</button>
+      </div>
+    </aside>
 
     <main id="view" class="view"></main>
 
-    <nav class="tabs">
-      <button class="tab" data-tab="player">Player</button>
-      <button class="tab active" data-tab="home">Home</button>
-      <button class="tab" data-tab="settings">Settings</button>
-    </nav>
+    <!-- Create bottom sheet -->
+    <div id="sheetOverlay" class="sheetOverlay" aria-hidden="true"></div>
 
+    <section id="createSheet" class="sheet" aria-hidden="true">
+      <div class="sheetHandle" aria-hidden="true"></div>
+      <div id="sheetContent" class="sheetContent"></div>
+    </section>
+
+    <!-- Suno-style bottom nav -->
+    <nav class="bottomNav" aria-label="Bottom navigation">
+      <button class="navBtn tab" data-tab="player" aria-label="Player">
+        <span class="navIcon" aria-hidden="true">
+          <!-- YouTube-ish icon -->
+          <svg viewBox="0 0 24 24" fill="none">
+            <rect x="3" y="7" width="18" height="12" rx="3" stroke="currentColor" stroke-width="2"></rect>
+            <path d="M11 10.5L15 13L11 15.5V10.5Z" fill="currentColor"></path>
+          </svg>
+        </span>
+        <span class="navLabel">Player</span>
+      </button>
+
+      <!-- CENTER: new record -->
+      <button id="createFab" class="navCreate" aria-label="New record">
+        <span class="navIcon big" aria-hidden="true">
+          <!-- Music note + overlay plus -->
+          <svg viewBox="0 0 24 24" fill="none">
+            <path d="M10 18a2 2 0 1 1-2-2h2v2Z" fill="currentColor"></path>
+            <path d="M10 16V6l10-2v10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+            <path d="M20 14a2 2 0 1 1-2-2h2v2Z" fill="currentColor"></path>
+
+            <circle cx="18.5" cy="6.5" r="3.2" fill="currentColor"></circle>
+            <path d="M18.5 4.9v3.2M16.9 6.5h3.2" stroke="#0b0b0f" stroke-width="1.8" stroke-linecap="round"></path>
+          </svg>
+        </span>
+      </button>
+
+      <button class="navBtn tab" data-tab="settings" aria-label="Settings">
+        <span class="navIcon" aria-hidden="true">
+          <!-- Cog -->
+          <svg viewBox="0 0 24 24" fill="none">
+            <path d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4Z" stroke="currentColor" stroke-width="2"></path>
+            <path d="M19.4 13.5c.04-.5.04-1 0-1.5l2-1.5-2-3.4-2.4 1a8.7 8.7 0 0 0-1.3-.8l-.4-2.6H10l-.4 2.6c-.45.23-.9.5-1.3.8l-2.4-1-2 3.4 2 1.5c-.04.5-.04 1 0 1.5l-2 1.5 2 3.4 2.4-1c.4.3.85.56 1.3.8L10 21h4l.4-2.6c.45-.23.9-.5 1.3-.8l2.4 1 2-3.4-2-1.5Z"
+              stroke="currentColor" stroke-width="2" stroke-linejoin="round"></path>
+          </svg>
+        </span>
+        <span class="navLabel">Settings</span>
+      </button>
+    </nav>
   </div>
 
   <div id="toast" class="toast" aria-live="polite"></div>
@@ -82,6 +127,5 @@
   </div>
 
   <script src="./app.js"></script>
-
 </body>
 </html>
