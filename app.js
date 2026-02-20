@@ -13,6 +13,15 @@ const view = $("#view");
 const headerTitle = $("#headerTitle");
 const toastEl = $("#toast");
 
+function isHomeRoot() {
+  return (
+    currentTab === "home" &&
+    !drawerView &&
+    !overlayView &&
+    !selectedSongId
+  );
+}
+
 function toast(msg) {
   if (!toastEl) return;
   toastEl.textContent = msg;
@@ -95,7 +104,13 @@ function normalizeState() {
     song.versions.forEach((v) => {
       if (typeof v.isActive !== "boolean") v.isActive = false;
     });
+        // ✅ new: featured version pointer
+    if (song.featuredVersionId === undefined) song.featuredVersionId = null;
   });
+    // Player state (queue)
+  state.player = state.player || {};
+  state.player.queue = Array.isArray(state.player.queue) ? state.player.queue : [];
+  state.player.nowPlaying = state.player.nowPlaying || null;
 }
 
 normalizeState();
@@ -120,6 +135,7 @@ let currentTab = "home";
 let selectedSongId = null;
 let songsView = "list";
 let pendingScrollToUpload = false;
+let selectedVersionId = null; // ✅ new: when you tap a specific version row
 
 const songsListState = {
   sortMode: "updated",
@@ -129,6 +145,7 @@ const songsListState = {
 };
 
 let drawerView = null;
+let songsBackTarget = null; // e.g. "projects" | "collabs"
 let drawerOpen = false;
 let overlayView = null;
 
@@ -173,6 +190,72 @@ function getSong(id) {
 function bestVersion(song) {
   if (!song?.versions?.length) return null;
   return song.versions.find((v) => v.isBest) || song.versions[0];
+}
+
+function getVersion(song, versionId){
+  return (song?.versions || []).find(v => v.id === versionId) || null;
+}
+
+function featuredVersion(song){
+  if (!song) return null;
+
+  // 1) Explicit featured
+  if (song.featuredVersionId) {
+    const fv = getVersion(song, song.featuredVersionId);
+    if (fv) return fv;
+  }
+
+  // 2) Best
+  const bv = bestVersion(song);
+  if (bv) return bv;
+
+  // 3) Most recent active
+  const av = (song.versions || []).find(v => v.isActive);
+  if (av) return av;
+
+  // 4) Anything
+  return (song.versions || [])[0] || null;
+}
+
+function playVersion(songId, versionId, { goPlayer = true } = {}) {
+  const song = getSong(songId);
+  const v = getVersion(song, versionId);
+  if (!song || !v || !v.link) return toast("No playable link for that version 😅");
+
+  state.player.nowPlaying = { songId, versionId };
+  saveState();
+  toast("Playing ▶️");
+
+  if (goPlayer) {
+    drawerView = null;
+    overlayView = null;
+    selectedSongId = null;
+    selectedVersionId = null;
+    currentTab = "player";
+    setHeader("Player");
+    syncTabs();
+    render();
+  }
+}
+
+function addToQueue(songId, versionId) {
+  const song = getSong(songId);
+  const v = getVersion(song, versionId);
+  if (!song || !v || !v.link) return toast("No playable link for that version 😅");
+
+  state.player.queue.push({ songId, versionId });
+  saveState();
+  toast("Queued ➕");
+}
+
+function setFeatured(songId, versionId){
+  const song = getSong(songId);
+  const v = getVersion(song, versionId);
+  if (!song || !v) return;
+  song.featuredVersionId = versionId;
+  song.updatedAt = nowStamp();
+  saveState();
+  toast("Featured ⭐");
 }
 
 function drivePathFor(song) {
@@ -227,15 +310,25 @@ document.querySelectorAll(".drawerItem").forEach((btn) => {
   btn.addEventListener("click", () => setDrawerView(btn.dataset.drawer));
 });
 
-// Tabs (Player + Settings only)
+// Tabs (Player + Home + Settings)
 document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
+    const targetTab = btn.dataset.tab || "home";
+    songsBackTarget = null;
+
+    // If you tap Home while already on the true Home root, open Create sheet
+    if (targetTab === "home" && isHomeRoot()) {
+      openSheet("chooser");
+      return;
+    }
+
+    // Otherwise: normal navigation
     drawerView = null;
     overlayView = null;
     selectedSongId = null;
     songsView = "list";
 
-    currentTab = btn.dataset.tab || "home";
+    currentTab = targetTab;
     syncTabs();
     setHeader(TAB_TITLES[currentTab] || "RiffBank");
     render();
@@ -249,6 +342,7 @@ headerTitle?.addEventListener("click", () => {
   selectedSongId = null;
   songsView = "list";
   currentTab = "home";
+  songsBackTarget = null;
   syncTabs();
   setHeader("RiffBank");
   render();
@@ -303,8 +397,29 @@ function goBack({ animate = false } = {}) {
       return;
     }
 
+        // ✅ If you're in a version detail view, back goes to the song page
+    if (selectedSongId && selectedVersionId) {
+      selectedVersionId = null;
+      currentTab = "songs";
+      setHeader("Song");
+      syncTabs();
+      render();
+      return;
+    }
+
     if (selectedSongId) {
       selectedSongId = null;
+      currentTab = "songs";
+      songsView = "list";
+      setHeader("Songs");
+      syncTabs();
+      render();
+      return;
+    }
+
+      if (selectedSongId) {
+      selectedSongId = null;
+      selectedVersionId = null; // ✅
       currentTab = "songs";
       songsView = "list";
       setHeader("Songs");
@@ -316,6 +431,26 @@ function goBack({ animate = false } = {}) {
     if (currentTab === "songs" && songsView === "create") {
       songsView = "list";
       setHeader("Songs");
+      syncTabs();
+      render();
+      return;
+    }
+
+        // If Songs list was opened from a drawer view (e.g. Projects -> View songs),
+    // going back from the Songs list should return to that drawer view.
+    if (
+      currentTab === "songs" &&
+      songsView === "list" &&
+      !selectedSongId &&
+      songsBackTarget
+    ) {
+      const target = songsBackTarget;
+      songsBackTarget = null;
+
+      overlayView = null;
+      drawerView = target;     // ✅ back to Projects screen
+      currentTab = "home";     // keep bottom nav unselected
+      setHeader(TAB_TITLES[currentTab] || "RiffBank");
       syncTabs();
       render();
       return;
@@ -408,6 +543,12 @@ const sheet = $("#createSheet");
 const sheetOverlay = $("#sheetOverlay");
 const sheetContent = $("#sheetContent");
 let sheetMode = "chooser"; // chooser | song | lyrics
+let sheetSongMenuId = null;
+
+function openSongMenu(songId){
+  sheetSongMenuId = songId;
+  openSheet("songMenu");
+}
 
 function openSheet(mode = "chooser") {
   sheetMode = mode;
@@ -529,9 +670,163 @@ function renderSheet() {
 
     setTimeout(() => $("#sheetLyrics")?.focus(), 0);
   }
+
+    if (sheetMode === "songMenu") {
+    const song = getSong(sheetSongMenuId);
+    const title = song?.title || "Song";
+
+    sheetContent.innerHTML = `
+      <div class="sheetTitle">${escapeHtml(title)}</div>
+
+      <div class="sheetForm" style="gap:10px">
+        <button class="sheetChoice" id="songMenuOpen">Open song</button>
+        <button class="sheetChoice" id="songMenuDelete" style="background: rgba(255,92,119,.12); border-color: rgba(255,92,119,.25);">
+          Delete song
+          <span class="sub">this can’t be undone</span>
+        </button>
+        <button class="sheetChoice" id="songMenuCancel">Cancel</button>
+      </div>
+    `;
+
+    $("#songMenuOpen")?.addEventListener("click", () => {
+      if (!song) return closeSheet();
+      closeSheet();
+      currentTab = "songs";
+      songsView = "list";
+      selectedSongId = song.id;
+      setHeader("Song");
+      syncTabs();
+      render();
+    });
+
+    $("#songMenuDelete")?.addEventListener("click", () => {
+      if (!song) return closeSheet();
+      if (!confirm(`Delete "${song.title}"?`)) return;
+      state.songs = state.songs.filter(s => s.id !== song.id);
+      saveState();
+      toast("Deleted 🗑️");
+      closeSheet();
+      currentTab = "songs";
+      songsView = "list";
+      selectedSongId = null;
+      setHeader("Songs");
+      syncTabs();
+      render();
+    });
+
+    $("#songMenuCancel")?.addEventListener("click", () => {
+      closeSheet();
+    });
+
+    return;
+  }
+
+      if (sheetMode === "versionMenu") {
+    const song = getSong(sheetVersionMenu.songId);
+    const v = getVersion(song, sheetVersionMenu.versionId);
+
+    if (!song || !v) {
+      closeSheet();
+      return;
+    }
+
+    const playable = !!v.link;
+
+    sheetContent.innerHTML = `
+      <div class="sheetTitle">${escapeHtml(song.title)}</div>
+      <div class="small" style="margin-top:-6px; opacity:.75">${escapeHtml(v.label || "Version")}</div>
+
+      <div class="sheetForm" style="gap:10px; margin-top:12px">
+        <button class="sheetChoice" id="vmPlay" ${playable ? "" : "disabled"}>Play</button>
+        <button class="sheetChoice" id="vmQueue" ${playable ? "" : "disabled"}>Add to Queue</button>
+        <button class="sheetChoice" id="vmFeatured">Set as Featured ⭐</button>
+        <button class="sheetChoice" id="vmToggleActive">${v.isActive ? "Active ✅ (toggle)" : "Set Active 🎧"}</button>
+        <button class="sheetChoice" id="vmSetBest">${v.isBest ? "Best ✅" : "Set Best ⭐"}</button>
+        <button class="sheetChoice" id="vmOpen" ${playable ? "" : "disabled"}>Open link</button>
+        <button class="sheetChoice" id="vmCopy">Copy name</button>
+
+        <button class="sheetChoice" id="vmDelete" style="background: rgba(255,92,119,.12); border-color: rgba(255,92,119,.25);">
+          Delete version
+          <span class="sub">this can’t be undone</span>
+        </button>
+
+        <button class="sheetChoice" id="vmCancel">Cancel</button>
+      </div>
+    `;
+
+    $("#vmPlay")?.addEventListener("click", () => {
+      closeSheet();
+      playVersion(song.id, v.id, { goPlayer: true });
+    });
+
+    $("#vmQueue")?.addEventListener("click", () => {
+      addToQueue(song.id, v.id);
+      closeSheet();
+    });
+
+    $("#vmFeatured")?.addEventListener("click", () => {
+      setFeatured(song.id, v.id);
+      closeSheet();
+      render(); // refresh UI
+    });
+
+    $("#vmToggleActive")?.addEventListener("click", () => {
+      v.isActive = !v.isActive;
+      song.updatedAt = nowStamp();
+      saveState();
+      toast("Active updated 🎧");
+      closeSheet();
+      render();
+    });
+
+    $("#vmSetBest")?.addEventListener("click", () => {
+      song.versions.forEach(x => x.isBest = (x.id === v.id));
+      song.updatedAt = nowStamp();
+      saveState();
+      toast("Best updated ⭐");
+      closeSheet();
+      render();
+    });
+
+    $("#vmOpen")?.addEventListener("click", () => {
+      if (v.link) window.open(v.link, "_blank");
+      closeSheet();
+    });
+
+    $("#vmCopy")?.addEventListener("click", () => {
+      copyText(v.label || "");
+      closeSheet();
+    });
+
+    $("#vmDelete")?.addEventListener("click", () => {
+      if (!confirm(`Delete this version?`)) return;
+      song.versions = (song.versions || []).filter(x => x.id !== v.id);
+
+      // If featured got deleted, clear it
+      if (song.featuredVersionId === v.id) song.featuredVersionId = null;
+
+      // Ensure at least one best remains if versions exist
+      if (song.versions.length && !song.versions.some(x => x.isBest)) song.versions[0].isBest = true;
+
+      song.updatedAt = nowStamp();
+      saveState();
+      toast("Deleted 🗑️");
+      closeSheet();
+      render();
+    });
+
+    $("#vmCancel")?.addEventListener("click", closeSheet);
+    return;
+  }
 }
 
-$("#createFab")?.addEventListener("click", () => openSheet("chooser"));
+let sheetVersionMenu = { songId: null, versionId: null };
+
+function openVersionMenu(songId, versionId){
+  sheetVersionMenu = { songId, versionId };
+  openSheet("versionMenu");
+}
+
 sheetOverlay?.addEventListener("click", closeSheet);
 
 // Swipe down to dismiss sheet
@@ -621,6 +916,7 @@ function render() {
   // Normal screens
   if (currentTab === "home") return renderHome();
   if (currentTab === "songs") {
+    if (selectedSongId && selectedVersionId) return renderVersionDetail(selectedSongId, selectedVersionId);
     if (selectedSongId) return renderSongDetail(selectedSongId);
     if (songsView === "create") return renderSongCreate();
     return renderSongsList();
@@ -716,26 +1012,30 @@ function renderProjects() {
     });
   });
 
-  view.querySelectorAll("[data-filter]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const p = btn.getAttribute("data-filter");
-      drawerView = null;
-      currentTab = "songs";
-      songsView = "list";
-      selectedSongId = null;
-      setHeader("Songs");
-      syncTabs();
-      renderSongsList();
-      setTimeout(() => {
-        const q = $("#q");
-        if (q) {
-          q.value = p;
-          q.dispatchEvent(new Event("input"));
-          toast(`Showing: ${p}`);
-        }
-      }, 0);
-    });
+view.querySelectorAll("[data-filter]").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const p = btn.getAttribute("data-filter");
+
+    songsBackTarget = "projects"; // ✅ remember where we came from
+
+    drawerView = null;
+    currentTab = "songs";
+    songsView = "list";
+    selectedSongId = null;
+    setHeader("Songs");
+    syncTabs();
+    renderSongsList();
+
+    setTimeout(() => {
+      const q = $("#q");
+      if (q) {
+        q.value = p;
+        q.dispatchEvent(new Event("input"));
+        toast(`Showing: ${p}`);
+      }
+    }, 0);
   });
+});
 }
 
 function renderEPs() {
@@ -875,6 +1175,15 @@ function renderAbout() {
   });
 }
 
+function resetSongsFilters({ keepSort = true } = {}) {
+  const sort = songsListState.sortMode || "updated";
+  songsListState.query = "";
+  songsListState.statusFilter = "";
+  songsListState.projectFilter = "";
+  if (!keepSort) songsListState.sortMode = "updated";
+  else songsListState.sortMode = sort;
+}
+
 // ---------------------
 // Home
 // ---------------------
@@ -882,6 +1191,7 @@ function renderHome() {
   overlayView = null;
   currentTab = "home";
   setHeader("RiffBank");
+  
 
   const songCount = state.songs.length;
 
@@ -925,6 +1235,9 @@ function renderHome() {
     btn.addEventListener("click", () => {
       const target = btn.getAttribute("data-home");
       if (target === "songs") {
+        resetSongsFilters({ keepSort: true }); // ✅ clear filters when opening Songs fresh
+        songsBackTarget = null;               // optional: prevents weird “back target” reuse
+
         currentTab = "songs";
         songsView = "list";
         selectedSongId = null;
@@ -935,6 +1248,9 @@ function renderHome() {
       }
       if (target === "projects") return setDrawerView("projects");
       if (target === "browse") {
+        resetSongsFilters({ keepSort: true }); // ✅ browse starts clean too
+        songsBackTarget = null;
+
         currentTab = "songs";
         songsView = "list";
         selectedSongId = null;
@@ -1054,6 +1370,144 @@ function renderNextActions() {
   );
 }
 
+function clamp(n, a, b){ return Math.max(a, Math.min(b, n)); }
+
+function hashStr(str){
+  str = String(str || "");
+  let h = 2166136261;
+  for (let i=0;i<str.length;i++){
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0);
+}
+
+function makeRng(seed){
+  let t = seed >>> 0;
+  return () => {
+    // xorshift32
+    t ^= t << 13; t >>>= 0;
+    t ^= t >> 17; t >>>= 0;
+    t ^= t << 5;  t >>>= 0;
+    return (t >>> 0) / 4294967296;
+  };
+}
+
+function coverSvg(song){
+  const seed = hashStr(`${song.id}|${song.title}|${song.project}|${song.genre}`);
+  const r = makeRng(seed);
+
+  // Neon palette via HSL
+  const h1 = Math.floor(r()*360);
+  const h2 = (h1 + 90 + Math.floor(r()*90)) % 360;
+  const h3 = (h2 + 90 + Math.floor(r()*90)) % 360;
+
+  const c1 = `hsl(${h1} 95% 60%)`;
+  const c2 = `hsl(${h2} 95% 58%)`;
+  const c3 = `hsl(${h3} 95% 62%)`;
+
+  // Blob positions/sizes
+  const b = Array.from({length: 3}).map(() => ({
+    x: Math.floor(r()*120),
+    y: Math.floor(r()*120),
+    rad: Math.floor(40 + r()*55),
+    col: [c1,c2,c3][Math.floor(r()*3)]
+  }));
+
+  // Streak
+  const sx1 = Math.floor(r()*40);
+  const sy1 = Math.floor(30 + r()*60);
+  const sx2 = Math.floor(90 + r()*40);
+  const sy2 = Math.floor(20 + r()*80);
+
+  return `
+  <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="${c1}" stop-opacity=".95"/>
+        <stop offset=".55" stop-color="${c2}" stop-opacity=".85"/>
+        <stop offset="1" stop-color="${c3}" stop-opacity=".9"/>
+      </linearGradient>
+
+      <filter id="blur">
+        <feGaussianBlur stdDeviation="12" />
+      </filter>
+
+      <filter id="grain">
+        <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch" />
+        <feColorMatrix type="matrix" values="
+          1 0 0 0 0
+          0 1 0 0 0
+          0 0 1 0 0
+          0 0 0 .12 0"/>
+      </filter>
+
+      <filter id="glow">
+        <feGaussianBlur stdDeviation="3" result="b"/>
+        <feMerge>
+          <feMergeNode in="b"/>
+          <feMergeNode in="SourceGraphic"/>
+        </feMerge>
+      </filter>
+    </defs>
+
+    <!-- Base -->
+    <rect width="120" height="120" fill="url(#g)"/>
+
+    <!-- Neon blobs -->
+    <g filter="url(#blur)" opacity=".9">
+      ${b.map(x => `<circle cx="${x.x}" cy="${x.y}" r="${x.rad}" fill="${x.col}" opacity=".55"/>`).join("")}
+    </g>
+
+    <!-- Light streak -->
+    <path d="M ${sx1} ${sy1} C ${sx1+35} ${sy1-30}, ${sx2-35} ${sy2+30}, ${sx2} ${sy2}"
+          stroke="rgba(255,255,255,.65)" stroke-width="6" stroke-linecap="round" opacity=".22" filter="url(#glow)"/>
+
+    <!-- Subtle vignette -->
+    <radialGradient id="vig" cx="50%" cy="45%" r="70%">
+      <stop offset="55%" stop-color="rgba(0,0,0,0)"/>
+      <stop offset="100%" stop-color="rgba(0,0,0,.35)"/>
+    </radialGradient>
+    <rect width="120" height="120" fill="url(#vig)"/>
+
+    <!-- Grain -->
+    <rect width="120" height="120" filter="url(#grain)" opacity=".55"/>
+  </svg>`;
+}
+
+function parseStamp(stamp){
+  // "YYYY-MM-DD HHMM"
+  if (!stamp) return null;
+  const [d, hm] = String(stamp).split(" ");
+  if (!d || !hm || hm.length < 4) return null;
+  const [yyyy, mm, dd] = d.split("-").map(Number);
+  const hh = Number(hm.slice(0,2));
+  const mi = Number(hm.slice(2,4));
+  if (!yyyy || !mm || !dd) return null;
+  return new Date(yyyy, mm-1, dd, hh, mi, 0, 0);
+}
+
+function timeAgo(stamp){
+  const dt = parseStamp(stamp);
+  if (!dt) return "—";
+  const sec = Math.max(0, Math.floor((Date.now() - dt.getTime()) / 1000));
+  const min = Math.floor(sec/60);
+  const hr = Math.floor(min/60);
+  const day = Math.floor(hr/24);
+  if (day >= 1) return `${day}d`;
+  if (hr >= 1) return `${hr}h`;
+  if (min >= 1) return `${min}m`;
+  return "now";
+}
+
+function shortBestLabel(song){
+  const bv = bestVersion(song);
+  if (!bv?.label) return "—";
+  const m = bv.label.match(/\bv(\d+(\.\d+)?)\b/i);
+  if (m) return `v${m[1]}`;
+  return "Best";
+}
+
 // ---------------------
 // Songs list + create
 // ---------------------
@@ -1129,25 +1583,54 @@ function renderSongsList() {
 
     listEl.innerHTML = filtered.length
       ? filtered.map((s) => {
-          const vCount = s.versions?.length || 0;
-          const stuckBadge =
-            s.stuckState === "Stuck"
-              ? `<span class="badge bad">🧊 Stuck</span>`
-              : s.stuckState === "Parked"
-              ? `<span class="badge warn">💤 Parked</span>`
-              : `<span class="badge">✅ Active</span>`;
+                    const vCount = s.versions?.length || 0;
+          const bestLbl = shortBestLabel(s);
+          const updated = timeAgo(s.updatedAt || s.createdAt);
+
+          const statusPill =
+            (s.status || "").toLowerCase() === "done" || (s.status || "").toLowerCase() === "released"
+              ? `pill good`
+              : (s.status || "").toLowerCase() === "mix" || (s.status || "").toLowerCase() === "master" || (s.status || "").toLowerCase() === "ready"
+              ? `pill warn`
+              : `pill`;
+
+          const stuckPill =
+            s.stuckState === "Stuck" ? `pill bad`
+            : s.stuckState === "Parked" ? `pill warn`
+            : `pill`;
+
+          const sub = `${s.genre || "—"} • ${(s.vibes || "").trim() ? (s.vibes || "").trim() : (s.nextAction || "").trim() ? `Next: ${s.nextAction}` : (s.project || "")}`.trim();
 
           return `
             <div class="songRow" data-id="${s.id}">
-              <div class="row" style="justify-content:space-between; align-items:center">
-                <div class="title"><b>${escapeHtml(s.title)}</b></div>
-                <div class="row" style="gap:8px; justify-content:flex-end">
-                  ${badgeForStatus(s.status)}
-                  ${stuckBadge}
+              <div class="songThumb" aria-hidden="true">
+                ${coverSvg(s)}
+                <div class="songDur">—:—</div>
+              </div>
+
+              <div class="songMain">
+                <div class="songTop">
+                  <div class="songTitleRow">
+                    <div class="songTitle">${escapeHtml(s.title)}</div>
+                    <div class="songPills">
+                      <span class="${statusPill}">${escapeHtml(s.status || "Idea")}</span>
+                      <span class="${stuckPill}">${escapeHtml(s.stuckState || "Active")}</span>
+                    </div>
+                  </div>
+
+                  <button class="songMore" data-more="${s.id}" aria-label="Song menu">⋯</button>
+                </div>
+
+                <div class="songSub">${escapeHtml(sub)}</div>
+
+                <div class="songMetaRow">
+                  <span>🎧 ${vCount}</span>
+                  <span class="sep">•</span>
+                  <span>⭐ ${escapeHtml(bestLbl)}</span>
+                  <span class="sep">•</span>
+                  <span>🕒 ${escapeHtml(updated)}</span>
                 </div>
               </div>
-              <div class="meta">${escapeHtml(s.project)} • ${escapeHtml(s.genre || "—")} • Sprint: ${escapeHtml(s.sprint || "—")} • Versions: ${vCount}</div>
-              ${s.nextAction ? `<div class="meta">Next: ${escapeHtml(s.nextAction)}</div>` : ""}
             </div>
           `;
         }).join("")
@@ -1158,6 +1641,14 @@ function renderSongsList() {
         selectedSongId = el.getAttribute("data-id");
         setHeader("Song");
         render();
+      });
+    });
+
+        listEl.querySelectorAll("[data-more]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const id = btn.getAttribute("data-more");
+        if (id) openSongMenu(id);
       });
     });
   };
@@ -1194,272 +1685,254 @@ function renderSongDetail(id) {
   const song = getSong(id);
   if (!song) {
     selectedSongId = null;
+    selectedVersionId = null;
     return renderSongsList();
   }
 
-  const bv = bestVersion(song);
-  const drivePath = drivePathFor(song);
+  setHeader("Song");
+
+  const fv = featuredVersion(song);
+  const vCount = song.versions?.length || 0;
+
+  // hero cover uses your neon generator
+  const heroCover = coverSvg(song);
+
+  const featuredTag = fv?.isBest ? "⭐ Best" : fv?.isActive ? "🎧 Active" : "Featured";
+  const featuredSub = fv
+    ? `${escapeHtml(fv.label || "Version")} ${fv.notes ? `• ${escapeHtml(fv.notes)}` : ""}`
+    : "No versions yet — add one below";
+
+  view.innerHTML = `
+    <div class="songHero">
+      <button class="songHeroBack" id="songHeroBack" aria-label="Back">←</button>
+
+      <div class="songHeroCover">
+        ${heroCover}
+      </div>
+
+      <div class="songHeroTitle">${escapeHtml(song.title)}</div>
+      <div class="songHeroMeta">${escapeHtml(song.project || "—")} • ${escapeHtml(song.genre || "—")} • ${vCount} version${vCount===1?"":"s"}</div>
+
+      <div class="songFeatured">
+        <div class="songFeaturedTag">${escapeHtml(featuredTag)}</div>
+        <div class="songFeaturedSub">${featuredSub}</div>
+
+        <div class="songHeroActions">
+          <button class="songHeroPlay" id="songBigPlay" ${fv?.link ? "" : "disabled"}>
+            ▶ Play
+          </button>
+          <button class="songHeroQueue" id="songBigQueue" ${fv?.link ? "" : "disabled"}>
+            + Queue
+          </button>
+          <button class="songHeroDetails" id="songDetailsBtn">
+            Details
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="versionsWrap">
+      <div class="versionsHeader">
+        <div class="versionsTitle">Versions</div>
+        <button class="btn" id="addVersionJump">Add version</button>
+      </div>
+
+      <div id="versionsRows" class="versionsRows"></div>
+    </div>
+  `;
+
+  $("#songHeroBack")?.addEventListener("click", () => goBack({ animate: true }));
+
+  $("#songBigPlay")?.addEventListener("click", () => {
+    if (!fv?.link) return toast("No playable link yet 😅");
+    playVersion(song.id, fv.id, { goPlayer: true });
+  });
+
+  $("#songBigQueue")?.addEventListener("click", () => {
+    if (!fv?.link) return toast("No playable link yet 😅");
+    addToQueue(song.id, fv.id);
+  });
+
+  // For now, keep your existing “Details” as the old long form screen:
+  // We’ll implement it as: details = version detail of the featured? or a new view later.
+  // For today: send you to the existing song form by reusing your old renderSongDetail UI? (we replaced it)
+  // So: we’ll open the featured version detail as “Details” as a first step.
+  $("#songDetailsBtn")?.addEventListener("click", () => {
+    // Open featured version detail if exists, otherwise toast
+    if (!fv) return toast("Add a version first 🎧");
+    selectedVersionId = fv.id;
+    render();
+  });
+
+  // “Add version” jump: scroll to version detail upload helper (we’ll put it on the version detail screen)
+  $("#addVersionJump")?.addEventListener("click", () => {
+    if (!fv) return toast("Tap Details, then add your first version 🎧");
+    selectedVersionId = fv.id;
+    render();
+  });
+
+  // Render version rows
+  const rowsEl = $("#versionsRows");
+  const versions = (song.versions || []).slice();
+
+  rowsEl.innerHTML = versions.length
+    ? versions.map((v) => {
+        const pillBest = v.isBest ? `<span class="vPill good">Best</span>` : "";
+        const pillActive = v.isActive ? `<span class="vPill">Active</span>` : "";
+        const pillFeatured = song.featuredVersionId === v.id ? `<span class="vPill warn">Featured</span>` : "";
+
+        const sub = `${escapeHtml(v.createdAt || "")}${v.notes ? ` • ${escapeHtml(v.notes)}` : ""}`;
+
+        return `
+          <div class="vRow" data-vrow="${v.id}">
+            <div class="vThumb">${coverSvg(song)}<div class="vDur">—:—</div></div>
+
+            <div class="vMain">
+              <div class="vTop">
+                <div class="vTitle">${escapeHtml(v.label || "Version")}</div>
+                <div class="vPills">${pillFeatured}${pillBest}${pillActive}</div>
+              </div>
+              <div class="vSub">${sub}</div>
+            </div>
+
+            <button class="vMore" data-vmore="${v.id}" aria-label="Version menu">⋯</button>
+          </div>
+        `;
+      }).join("")
+    : `<div class="small" style="padding:12px 2px">No versions yet. Add one from Details.</div>`;
+
+  rowsEl.querySelectorAll("[data-vrow]").forEach((row) => {
+    row.addEventListener("click", () => {
+      selectedVersionId = row.getAttribute("data-vrow");
+      render();
+    });
+  });
+
+  rowsEl.querySelectorAll("[data-vmore]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const vid = btn.getAttribute("data-vmore");
+      openVersionMenu(song.id, vid);
+    });
+  });
+}
+
+function renderVersionDetail(songId, versionId){
+  const song = getSong(songId);
+  const v = getVersion(song, versionId);
+
+  if (!song || !v){
+    selectedVersionId = null;
+    return renderSongDetail(songId);
+  }
+
+  setHeader("Version");
+
+  const isFeatured = song.featuredVersionId === v.id;
 
   view.innerHTML = `
     <div class="card">
       <div class="row" style="justify-content:space-between; align-items:center">
         <h2>${escapeHtml(song.title)}</h2>
-        <div class="row" style="gap:8px; justify-content:flex-end">
-          <button id="back" class="ghost">Back</button>
-          <button id="delSong" class="btn">Delete</button>
-        </div>
+        <button class="ghost" id="backToSong">Back</button>
       </div>
-      <div class="small">Updated: <b>${escapeHtml(song.updatedAt || song.createdAt || "")}</b></div>
+      <div class="small">${escapeHtml(song.project || "—")} • ${escapeHtml(song.genre || "—")}</div>
+
       <div class="hr"></div>
 
-      <div class="row">
-        <div class="col">
-          <div class="label">Title</div>
-          <input id="title" type="text" value="${escapeHtml(song.title)}"/>
-        </div>
-        <div class="col">
-          <div class="label">Project</div>
-          <input id="project" type="text" value="${escapeHtml(song.project)}"/>
-        </div>
-      </div>
-
-      <div class="row" style="margin-top:10px">
-        <div class="col">
-          <div class="label">Genre</div>
-          <input id="genre" type="text" value="${escapeHtml(song.genre)}"/>
-        </div>
-        <div class="col">
-          <div class="label">Sprint</div>
-          <input id="sprint" type="text" value="${escapeHtml(song.sprint)}"/>
-        </div>
-      </div>
-
-      <div class="row" style="margin-top:10px">
-        <div class="col">
-          <div class="label">Instrumentation</div>
-          <input id="inst" type="text" placeholder="e.g. Drop G# 7-string, synth pads" value="${escapeHtml(song.instrumentation)}"/>
-        </div>
-        <div class="col">
-          <div class="label">Collaborators</div>
-          <input id="collab" type="text" placeholder="e.g. Darian, Mason" value="${escapeHtml(song.collaborators)}"/>
-        </div>
-      </div>
-
-      <div class="row" style="margin-top:10px">
-        <div class="col">
-          <div class="label">Status</div>
-          <select id="status">
-            ${["Idea","Demo","Arrange","Mix","Master","Ready","Done","Released"]
-              .map((s) => `<option ${song.status === s ? "selected" : ""}>${s}</option>`)
-              .join("")}
-          </select>
-        </div>
-        <div class="col">
-          <div class="label">Stuck state</div>
-          <select id="stuck">
-            ${["Active","Stuck","Parked"]
-              .map((s) => `<option ${song.stuckState === s ? "selected" : ""}>${s}</option>`)
-              .join("")}
-          </select>
-        </div>
-      </div>
-
-      <div class="row" style="margin-top:10px">
-        <div class="col">
-          <div class="label">Next action</div>
-          <input id="nextAction" type="text" placeholder="e.g. Write verse 2 / re-track guitars" value="${escapeHtml(song.nextAction || "")}"/>
-        </div>
-      </div>
-
-      <div class="row" style="margin-top:10px">
-        <button id="saveSong" class="btn primary">Save</button>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Vibes</h2>
-      <textarea id="vibes" placeholder="What should this feel like?">${escapeTextarea(song.vibes)}</textarea>
-      <div class="hr"></div>
-      <h2>Lyrics</h2>
-      <textarea id="lyrics" placeholder="Draft lyrics / fragments…">${escapeTextarea(song.lyrics)}</textarea>
-      <div class="hr"></div>
-      <h2>Notes</h2>
-      <textarea id="notes" placeholder="Mix notes, arrangement notes…">${escapeTextarea(song.notes)}</textarea>
-      <div class="row" style="margin-top:10px">
-        <button id="saveText" class="btn primary">Save text</button>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Versions</h2>
-      <div class="small">Drive folder suggestion: <span class="mono">${escapeHtml(drivePath)}</span></div>
-      <div class="row" style="margin-top:10px">
-        <button class="btn" id="copyPath">Copy Drive path</button>
+      <div class="row" style="gap:10px; align-items:center">
+        <div class="badge ${isFeatured ? "warn" : ""}">${isFeatured ? "⭐ Featured" : "—"}</div>
+        <div class="badge ${v.isBest ? "good" : ""}">${v.isBest ? "⭐ Best" : "—"}</div>
+        <div class="badge ${v.isActive ? "good" : ""}">${v.isActive ? "🎧 Active" : "—"}</div>
       </div>
 
       <div class="hr"></div>
 
-      <h2>Add version (Upload Helper)</h2>
-      <div class="row">
-        <div class="col">
-          <div class="label">Choose file (for extension + name)</div>
-          <input id="pickFile" type="file" />
-        </div>
-        <div class="col">
-          <div class="label">Make Best?</div>
-          <div id="makeBest" class="pill on"><span class="dot"></span><span>Yes</span></div>
-          <div class="small">Newest version defaults to Best.</div>
-        </div>
+      <div class="label">Label</div>
+      <input id="vLabel" type="text" value="${escapeHtml(v.label || "")}" />
+
+      <div class="label" style="margin-top:10px">Notes</div>
+      <input id="vNotesEdit" type="text" value="${escapeHtml(v.notes || "")}" />
+
+      <div class="label" style="margin-top:10px">Link (audio URL / Drive)</div>
+      <input id="vLink" type="text" value="${escapeHtml(v.link || "")}" placeholder="Paste direct audio URL" />
+
+      <div class="row" style="margin-top:12px; gap:10px">
+        <button class="btn primary" id="saveVersion">Save</button>
+        <button class="btn" id="playThis" ${v.link ? "" : "disabled"}>Play</button>
+        <button class="btn" id="queueThis" ${v.link ? "" : "disabled"}>Queue</button>
       </div>
 
-      <div class="row" style="margin-top:10px">
-        <div class="col">
-          <div class="label">Suggested filename</div>
-          <input id="suggestedName" type="text" readonly value="Pick a file…" />
-        </div>
-        <div class="col">
-          <div class="label">Drive link (optional)</div>
-          <input id="driveLink" type="text" placeholder="Paste Drive link (or direct audio URL)" />
-        </div>
+      <div class="row" style="margin-top:10px; gap:10px; flex-wrap:wrap">
+        <button class="btn" id="setFeaturedBtn">Set Featured ⭐</button>
+        <button class="btn" id="toggleActiveBtn">${v.isActive ? "Active ✅ (toggle)" : "Set Active 🎧"}</button>
+        <button class="btn" id="setBestBtn">${v.isBest ? "Best ✅" : "Set Best ⭐"}</button>
+        <button class="btn" id="openLinkBtn" ${v.link ? "" : "disabled"}>Open link</button>
+        <button class="btn" id="deleteVersionBtn">Delete</button>
       </div>
 
-      <div class="row" style="margin-top:10px">
-        <div class="col">
-          <div class="label">Version notes</div>
-          <input id="vNotes" type="text" placeholder="e.g. bass good, top end too sharp" />
-        </div>
-        <div class="col" style="display:flex; align-items:flex-end; gap:10px">
-          <button id="copyName" class="btn">Copy filename</button>
-          <button id="addVersion" class="btn primary">Add version</button>
-        </div>
-      </div>
-
-      <div class="hr"></div>
-      <h2>History</h2>
-      <div id="versionsList" class="list"></div>
-    </div>
-
-    <div class="card">
-      <h2>Best version preview</h2>
-      ${
-        bv ? `
-          <div class="small">Best: <b>${escapeHtml(bv.label)}</b></div>
-          <div style="margin-top:10px">
-            <audio controls style="width:100%" ${bv.link ? `src="${escapeHtml(bv.link)}"` : ""}></audio>
-          </div>
-          <div class="small" style="margin-top:10px">
-            ${bv.link ? "If it doesn’t play, use a direct audio URL." : "Paste a link on the version to enable playback."}
-          </div>
-        ` : `<div class="small">No versions yet.</div>`
-      }
+      ${v.link ? `
+        <div class="hr"></div>
+        <div class="small">Preview</div>
+        <audio controls style="width:100%; margin-top:10px" src="${escapeHtml(v.link)}"></audio>
+      ` : ""}
     </div>
   `;
 
-  $("#back").addEventListener("click", () => goBack({ animate: true }));
+  $("#backToSong")?.addEventListener("click", () => goBack({ animate: true }));
 
-  $("#delSong").addEventListener("click", () => {
-    if (!confirm(`Delete "${song.title}"?`)) return;
-    state.songs = state.songs.filter((s) => s.id !== song.id);
+  $("#saveVersion")?.addEventListener("click", () => {
+    v.label = ($("#vLabel")?.value || "").trim();
+    v.notes = ($("#vNotesEdit")?.value || "").trim();
+    v.link = ($("#vLink")?.value || "").trim();
+
+    song.updatedAt = nowStamp();
+    saveState();
+    toast("Saved ✅");
+    renderVersionDetail(songId, versionId);
+  });
+
+  $("#playThis")?.addEventListener("click", () => playVersion(songId, versionId, { goPlayer: true }));
+  $("#queueThis")?.addEventListener("click", () => addToQueue(songId, versionId));
+
+  $("#setFeaturedBtn")?.addEventListener("click", () => {
+    setFeatured(songId, versionId);
+    renderVersionDetail(songId, versionId);
+  });
+
+  $("#toggleActiveBtn")?.addEventListener("click", () => {
+    v.isActive = !v.isActive;
+    song.updatedAt = nowStamp();
+    saveState();
+    toast("Active updated 🎧");
+    renderVersionDetail(songId, versionId);
+  });
+
+  $("#setBestBtn")?.addEventListener("click", () => {
+    song.versions.forEach(x => x.isBest = (x.id === versionId));
+    song.updatedAt = nowStamp();
+    saveState();
+    toast("Best updated ⭐");
+    renderVersionDetail(songId, versionId);
+  });
+
+  $("#openLinkBtn")?.addEventListener("click", () => {
+    if (v.link) window.open(v.link, "_blank");
+  });
+
+  $("#deleteVersionBtn")?.addEventListener("click", () => {
+    if (!confirm("Delete this version?")) return;
+    song.versions = (song.versions || []).filter(x => x.id !== versionId);
+
+    if (song.featuredVersionId === versionId) song.featuredVersionId = null;
+    if (song.versions.length && !song.versions.some(x => x.isBest)) song.versions[0].isBest = true;
+
+    song.updatedAt = nowStamp();
     saveState();
     toast("Deleted 🗑️");
-    selectedSongId = null;
-    currentTab = "songs";
-    setHeader("Songs");
-    render();
+    selectedVersionId = null;
+    renderSongDetail(songId);
   });
-
-  $("#copyPath").addEventListener("click", () => copyText(drivePath));
-
-  const saveSongFields = () => {
-    song.title = $("#title").value.trim() || song.title;
-    song.project = $("#project").value.trim();
-    song.genre = $("#genre").value.trim();
-    song.sprint = $("#sprint").value.trim();
-    song.instrumentation = $("#inst").value.trim();
-    song.collaborators = $("#collab").value.trim();
-    song.status = $("#status").value;
-    song.stuckState = $("#stuck").value;
-    song.nextAction = $("#nextAction").value.trim();
-    song.updatedAt = nowStamp();
-    saveState();
-    toast("Saved ✅");
-  };
-
-  $("#saveSong").addEventListener("click", saveSongFields);
-
-  $("#saveText").addEventListener("click", () => {
-    song.vibes = $("#vibes").value;
-    song.lyrics = $("#lyrics").value;
-    song.notes = $("#notes").value;
-    song.updatedAt = nowStamp();
-    saveState();
-    toast("Saved ✅");
-  });
-
-  // Upload Helper
-  let makeBest = true;
-  const makeBestEl = $("#makeBest");
-  const suggestedNameEl = $("#suggestedName");
-  const pickFileEl = $("#pickFile");
-
-  makeBestEl.addEventListener("click", () => {
-    makeBest = !makeBest;
-    makeBestEl.classList.toggle("on", makeBest);
-    makeBestEl.querySelector("span:last-child").textContent = makeBest ? "Yes" : "No";
-    const f = pickFileEl.files?.[0];
-    if (f) suggestedNameEl.value = suggestedFileName(song, f.name, makeBest);
-  });
-
-  pickFileEl.addEventListener("change", () => {
-    const f = pickFileEl.files?.[0];
-    if (!f) return;
-    suggestedNameEl.value = suggestedFileName(song, f.name, makeBest);
-  });
-
-  $("#copyName").addEventListener("click", () => copyText(suggestedNameEl.value));
-
-  $("#addVersion").addEventListener("click", () => {
-    const f = pickFileEl.files?.[0];
-    const link = $("#driveLink").value.trim();
-    const notes = $("#vNotes").value.trim();
-
-    const label = f
-      ? suggestedFileName(song, f.name, makeBest)
-      : `Version - ${nowStamp()}${makeBest ? " (BEST)" : ""}`;
-
-    const v = {
-      id: uid(),
-      createdAt: nowStamp(),
-      label,
-      notes,
-      link,
-      isBest: makeBest,
-      isActive: true,
-    };
-
-    song.versions = song.versions || [];
-    if (makeBest) song.versions.forEach((x) => (x.isBest = false));
-    song.versions.unshift(v);
-    if (!song.versions.some((x) => x.isBest)) song.versions[0].isBest = true;
-
-    song.updatedAt = nowStamp();
-    saveState();
-
-    $("#vNotes").value = "";
-    $("#driveLink").value = "";
-    pickFileEl.value = "";
-    suggestedNameEl.value = "Pick a file…";
-
-    toast("Version added 🎧");
-    renderSongDetail(song.id);
-  });
-
-  renderVersionsList(song);
-
-  if (pendingScrollToUpload) {
-    pendingScrollToUpload = false;
-    setTimeout(() => $("#pickFile")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
-  }
 }
 
 function renderVersionsList(song) {
@@ -1553,42 +2026,107 @@ function renderVersionsList(song) {
 // ---------------------
 function renderPlayer() {
   setHeader("Player");
-  const activeVersions = state.songs
-    .flatMap((song) => (song.versions || []).map((v) => ({ song, v })))
-    .filter(({ v }) => v.link && v.isActive === true);
+
+  const now = state.player?.nowPlaying;
+  const queue = state.player?.queue || [];
+
+  const nowSong = now ? getSong(now.songId) : null;
+  const nowV = nowSong ? getVersion(nowSong, now.versionId) : null;
 
   view.innerHTML = `
     <div class="card">
-      <h2>Active versions player</h2>
-      <div class="small">Your personal Spotify fed by active versions.</div>
-      <div class="hr"></div>
+      <h2>Now playing</h2>
       ${
-        activeVersions.length
-          ? `<div class="list">
-              ${activeVersions.map(({ song, v }) => `
-                <div class="item">
-                  <div class="row" style="justify-content:space-between; align-items:center">
-                    <div class="title"><b>${escapeHtml(song.title)}</b></div>
-                    <button class="btn" data-open-song="${song.id}">Open</button>
+        nowSong && nowV && nowV.link
+          ? `
+            <div class="small"><b>${escapeHtml(nowSong.title)}</b> • ${escapeHtml(nowV.label || "Version")}</div>
+            <audio controls autoplay style="width:100%; margin-top:10px" src="${escapeHtml(nowV.link)}"></audio>
+            <div class="row" style="margin-top:10px; gap:10px">
+              <button class="btn" id="openNowSong">Open song</button>
+              <button class="btn" id="nextFromQueue" ${queue.length ? "" : "disabled"}>Next ▶</button>
+              <button class="btn" id="clearQueue">Clear queue</button>
+            </div>
+          `
+          : `<div class="small">Nothing playing yet. Play a version from a song.</div>`
+      }
+    </div>
+
+    <div class="card">
+      <h2>Queue</h2>
+      ${
+        queue.length
+          ? `<div class="list" id="queueList">
+              ${queue.map((q, idx) => {
+                const s = getSong(q.songId);
+                const v = s ? getVersion(s, q.versionId) : null;
+                return `
+                  <div class="item" data-qidx="${idx}" style="cursor:default">
+                    <div class="row" style="justify-content:space-between; align-items:center">
+                      <div>
+                        <div class="title"><b>${escapeHtml(s?.title || "—")}</b></div>
+                        <div class="meta">${escapeHtml(v?.label || "Version")}</div>
+                      </div>
+                      <div class="row" style="gap:8px">
+                        <button class="btn" data-qplay="${idx}">Play</button>
+                        <button class="btn" data-qrm="${idx}">Remove</button>
+                      </div>
+                    </div>
                   </div>
-                  <div class="meta">${escapeHtml(song.project || "—")} • ${escapeHtml(v.label || "Version")}</div>
-                  <audio controls style="width:100%; margin-top:10px" src="${escapeHtml(v.link)}"></audio>
-                </div>
-              `).join("")}
+                `;
+              }).join("")}
             </div>`
-          : `<div class="small">No active versions yet. Mark versions Active in a song.</div>`
+          : `<div class="small">Queue is empty.</div>`
       }
     </div>
   `;
 
-  view.querySelectorAll("[data-open-song]").forEach((b) =>
-    b.addEventListener("click", () => {
-      selectedSongId = b.getAttribute("data-open-song");
-      currentTab = "songs";
-      setHeader("Song");
-      render();
-    })
-  );
+  $("#openNowSong")?.addEventListener("click", () => {
+    if (!nowSong) return;
+    currentTab = "songs";
+    selectedSongId = nowSong.id;
+    selectedVersionId = null;
+    setHeader("Song");
+    syncTabs();
+    render();
+  });
+
+  $("#nextFromQueue")?.addEventListener("click", () => {
+    if (!queue.length) return;
+    const next = queue.shift();
+    state.player.nowPlaying = next;
+    saveState();
+    renderPlayer();
+  });
+
+  $("#clearQueue")?.addEventListener("click", () => {
+    state.player.queue = [];
+    saveState();
+    toast("Queue cleared 🧼");
+    renderPlayer();
+  });
+
+  view.querySelectorAll("[data-qplay]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const idx = Number(btn.getAttribute("data-qplay"));
+      const item = queue[idx];
+      if (!item) return;
+      state.player.nowPlaying = item;
+      // remove it from queue when you play it
+      state.player.queue = queue.filter((_, i) => i !== idx);
+      saveState();
+      renderPlayer();
+    });
+  });
+
+  view.querySelectorAll("[data-qrm]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const idx = Number(btn.getAttribute("data-qrm"));
+      state.player.queue = queue.filter((_, i) => i !== idx);
+      saveState();
+      toast("Removed");
+      renderPlayer();
+    });
+  });
 }
 
 // ---------------------

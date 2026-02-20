@@ -160,6 +160,56 @@ textarea{ min-height:100px; resize:vertical; }
   z-index: 40;
 }
 
+/* Suno-style center Home pill (icon-only) */
+.navHomePill{
+  flex: 0 0 auto;
+  width: 124px;
+  height: 46px;
+  border: 0;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  color: rgba(255,255,255,.92);
+  background: radial-gradient(120px 60px at 40% 30%, rgba(255,120,220,.35), rgba(0,0,0,0)),
+              radial-gradient(120px 60px at 70% 70%, rgba(80,180,255,.28), rgba(0,0,0,0)),
+              linear-gradient(180deg, rgba(255,255,255,.14), rgba(255,255,255,.06));
+  border: 1px solid rgba(255,255,255,.14);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  transform: translateY(-8px);
+  box-shadow:
+    0 16px 34px rgba(0,0,0,.55),
+    0 0 26px rgba(255,120,220,.12),
+    0 0 26px rgba(80,180,255,.10);
+}
+
+.navHomePill:active{
+  transform: translateY(-6px) scale(.985);
+}
+
+.navHomePill.active{
+  border-color: rgba(255,255,255,.22);
+  background: radial-gradient(120px 60px at 40% 30%, rgba(255,120,220,.45), rgba(0,0,0,0)),
+              radial-gradient(120px 60px at 70% 70%, rgba(80,180,255,.36), rgba(0,0,0,0)),
+              linear-gradient(180deg, rgba(255,255,255,.18), rgba(255,255,255,.07));
+  box-shadow:
+    0 18px 40px rgba(0,0,0,.62),
+    0 0 34px rgba(255,120,220,.16),
+    0 0 34px rgba(80,180,255,.14);
+}
+
+.navHomePill .navIcon{
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+}
+
+.navHomePill .navIcon svg{
+  width: 26px;
+  height: 26px;
+}
+
 .navBtn{
   flex: 1;
   border: 0;
@@ -199,26 +249,24 @@ textarea{ min-height:100px; resize:vertical; }
   opacity: .9;
 }
 
-.navCreate{
-  width: 64px;
-  height: 64px;
-  border-radius: 999px;
-  border: 0;
-  background: #fff;
-  color: #0b0b0f;
-  display:grid;
-  place-items:center;
-  transform: translateY(-14px);
-  box-shadow: 0 16px 38px rgba(0,0,0,.55);
+/* Center Home button: slightly emphasized but still "tab-like" */
+.navHome{
+  color: rgba(255,255,255,.78);
 }
 
-.navCreate:active{
-  transform: translateY(-12px) scale(.98);
+.navHome .navIcon{
+  width: 28px;
+  height: 28px;
 }
 
-.navCreate .navIcon.big svg{
-  width: 30px;
-  height: 30px;
+.navHome .navIcon svg{
+  width: 28px;
+  height: 28px;
+}
+
+/* When Home is active, match the active glow feel */
+.navBtn.active.navHome{
+  background: rgba(255,255,255,.08);
 }
 
 /* =========================
@@ -525,19 +573,136 @@ textarea{ min-height:100px; resize:vertical; }
   margin-top:2px;
 }
 
+/* Suno-style song rows */
 .songRow{
   width:100%;
-  padding:14px 2px;
-  border-bottom:1px solid rgba(255,255,255,.06);
+  padding: 12px 2px;
+  border-bottom: 1px solid rgba(255,255,255,.06);
   cursor:pointer;
+  display:flex;
+  align-items:center;
+  gap: 12px;
 }
+
 .songRow:hover{ background:rgba(255,255,255,.03); }
 
-.songRow .title{ font-size:18px; }
-.songRow .meta{
-  color:var(--muted);
-  font-size:12px;
-  margin-top:4px;
+.songThumb{
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  overflow: hidden;
+  position: relative;
+  flex: 0 0 auto;
+  box-shadow: 0 10px 24px rgba(0,0,0,.45);
+  border: 1px solid rgba(255,255,255,.10);
+}
+
+.songThumb svg{
+  width: 100%;
+  height: 100%;
+  display:block;
+}
+
+.songDur{
+  position:absolute;
+  left: 6px;
+  bottom: 6px;
+  font-size: 11px;
+  font-weight: 900;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(0,0,0,.55);
+  border: 1px solid rgba(255,255,255,.12);
+  color: rgba(255,255,255,.92);
+}
+
+.songMain{
+  flex: 1;
+  min-width: 0;
+  display:flex;
+  flex-direction:column;
+  gap: 4px;
+}
+
+.songTop{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap: 10px;
+}
+
+.songTitleRow{
+  display:flex;
+  align-items:center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.songTitle{
+  font-size: 16px;
+  font-weight: 900;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.songPills{
+  display:flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.pill{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 900;
+  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(255,255,255,.06);
+  color: rgba(255,255,255,.78);
+}
+
+.pill.good{ border-color: rgba(34,197,94,.28); background: rgba(34,197,94,.10); color: rgba(255,255,255,.92); }
+.pill.warn{ border-color: rgba(255,209,102,.28); background: rgba(255,209,102,.08); color: rgba(255,255,255,.92); }
+.pill.bad{  border-color: rgba(255,92,119,.28); background: rgba(255,92,119,.08); color: rgba(255,255,255,.92); }
+
+.songSub{
+  color: rgba(255,255,255,.58);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.songMetaRow{
+  display:flex;
+  gap: 10px;
+  align-items:center;
+  color: rgba(255,255,255,.55);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.songMetaRow .sep{ opacity:.35; }
+
+.songMore{
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: rgba(255,255,255,.65);
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  display:grid;
+  place-items:center;
+}
+
+.songMore:hover{
+  background: rgba(255,255,255,.06);
+  color: rgba(255,255,255,.92);
 }
 
 @media (max-width:720px){
@@ -627,4 +792,261 @@ textarea{ min-height:100px; resize:vertical; }
   font-weight: 600;
   font-size: 14px;
   letter-spacing: .2px;
+}
+
+.bottomNav{
+  max-width: 820px;
+  margin: 0 auto;
+}
+
+/* =========================
+   Suno-style Song page
+   ========================= */
+.songHero{
+  position: relative;
+  padding: 10px 0 16px;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap: 10px;
+}
+
+.songHeroBack{
+  position:absolute;
+  left: 0;
+  top: 6px;
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,.12);
+  background: rgba(255,255,255,.06);
+  color: rgba(255,255,255,.92);
+  font-weight: 900;
+  display:grid;
+  place-items:center;
+}
+
+.songHeroCover{
+  width: 140px;
+  height: 140px;
+  border-radius: 22px;
+  overflow:hidden;
+  border: 1px solid rgba(255,255,255,.12);
+  box-shadow: 0 18px 46px rgba(0,0,0,.6);
+}
+
+.songHeroCover svg{ width:100%; height:100%; display:block; }
+
+.songHeroTitle{
+  font-size: 28px;
+  font-weight: 1000;
+  letter-spacing: -.8px;
+  text-align:center;
+}
+
+.songHeroMeta{
+  color: rgba(255,255,255,.58);
+  font-weight: 800;
+  font-size: 13px;
+  text-align:center;
+}
+
+.songFeatured{
+  width: 100%;
+  max-width: 560px;
+  border-radius: 18px;
+  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(255,255,255,.05);
+  padding: 12px;
+  margin-top: 4px;
+}
+
+.songFeaturedTag{
+  display:inline-flex;
+  font-size: 12px;
+  font-weight: 900;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,.12);
+  background: rgba(255,255,255,.06);
+  color: rgba(255,255,255,.86);
+}
+
+.songFeaturedSub{
+  margin-top: 8px;
+  color: rgba(255,255,255,.62);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+  overflow:hidden;
+  text-overflow: ellipsis;
+}
+
+.songHeroActions{
+  display:flex;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.songHeroPlay{
+  flex: 1.4;
+  border-radius: 999px;
+  border: 0;
+  padding: 14px 14px;
+  font-weight: 1000;
+  background: rgba(255,255,255,.94);
+  color: #0b0b0f;
+}
+
+.songHeroQueue{
+  flex: 0.9;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,.14);
+  padding: 14px 14px;
+  font-weight: 1000;
+  background: rgba(255,255,255,.07);
+  color: rgba(255,255,255,.92);
+}
+
+.songHeroDetails{
+  flex: 0.8;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,.14);
+  padding: 14px 14px;
+  font-weight: 1000;
+  background: rgba(255,255,255,.04);
+  color: rgba(255,255,255,.9);
+}
+
+.songHeroPlay:disabled,
+.songHeroQueue:disabled,
+.songHeroDetails:disabled{
+  opacity: .45;
+}
+
+.versionsWrap{
+  margin-top: 10px;
+}
+
+.versionsHeader{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap: 10px;
+  padding: 6px 0 10px;
+}
+
+.versionsTitle{
+  font-weight: 1000;
+  letter-spacing: -.3px;
+  font-size: 16px;
+}
+
+.versionsRows{
+  border-top: 1px solid rgba(255,255,255,.06);
+}
+
+.vRow{
+  padding: 12px 2px;
+  border-bottom: 1px solid rgba(255,255,255,.06);
+  display:flex;
+  align-items:center;
+  gap: 12px;
+}
+
+.vRow:hover{ background: rgba(255,255,255,.03); }
+
+.vThumb{
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  overflow:hidden;
+  position: relative;
+  border: 1px solid rgba(255,255,255,.10);
+  box-shadow: 0 10px 22px rgba(0,0,0,.45);
+  flex: 0 0 auto;
+}
+.vThumb svg{ width:100%; height:100%; display:block; }
+
+.vDur{
+  position:absolute;
+  left: 6px;
+  bottom: 6px;
+  font-size: 11px;
+  font-weight: 900;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(0,0,0,.55);
+  border: 1px solid rgba(255,255,255,.12);
+  color: rgba(255,255,255,.92);
+}
+
+.vMain{
+  flex:1;
+  min-width:0;
+  display:flex;
+  flex-direction:column;
+  gap: 4px;
+}
+
+.vTop{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap: 10px;
+}
+
+.vTitle{
+  font-size: 14px;
+  font-weight: 1000;
+  white-space: nowrap;
+  overflow:hidden;
+  text-overflow: ellipsis;
+}
+
+.vSub{
+  color: rgba(255,255,255,.56);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+  overflow:hidden;
+  text-overflow: ellipsis;
+}
+
+.vPills{
+  display:flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content:flex-end;
+}
+
+.vPill{
+  display:inline-flex;
+  align-items:center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 1000;
+  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(255,255,255,.06);
+  color: rgba(255,255,255,.78);
+}
+
+.vPill.good{ border-color: rgba(34,197,94,.28); background: rgba(34,197,94,.10); color: rgba(255,255,255,.92); }
+.vPill.warn{ border-color: rgba(255,209,102,.28); background: rgba(255,209,102,.08); color: rgba(255,255,255,.92); }
+
+.vMore{
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  border: 0;
+  background: transparent;
+  color: rgba(255,255,255,.66);
+  display:grid;
+  place-items:center;
+  font-size: 22px;
+}
+.vMore:hover{
+  background: rgba(255,255,255,.06);
+  color: rgba(255,255,255,.92);
 }
