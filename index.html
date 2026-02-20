@@ -27,7 +27,7 @@
   <!-- Global audio element -->
   <audio id="globalAudio" playsinline preload="metadata"></audio>
 
-  <!-- Mini player bar (ONLY ONE, and fully inside body) -->
+  <!-- Mini player bar -->
   <div id="miniPlayer" class="miniPlayer hidden" aria-hidden="true">
     <div class="miniLeft">
       <div class="miniTitle" id="miniTitle">Nothing playing</div>
@@ -52,22 +52,22 @@
     <div class="splashInner">
       <div id="splashTitle">RiffBank</div>
 
-    <div id="splashSub" class="splashSub">
-      <span id="splashSubText" class="splashSubText">Indexing your universe…</span>
-      <span class="splashEllipsis" aria-hidden="true">
-        <span>.</span><span>.</span><span>.</span>
-      </span>
-    </div>
+      <div id="splashSub" class="splashSub">
+        <!-- ❌ No built-in ellipsis -->
+        <span id="splashSubText" class="splashSubText">
+          Indexing your universe
+        </span>
 
-      <!-- Horizontal dots spinner -->
-      <div id="splashSpinner" class="splashSpinner" aria-hidden="true">
-        <span></span><span></span><span></span><span></span>
-        <span></span><span></span><span></span><span></span>
-      </div>
+        <!-- ✔ Only animated dots (CSS handles animation) -->
+        <span class="splashEllipsis" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </span>
+
+      <!-- ❌ Removed big bottom spinner -->
     </div>
   </div>
 
-  <!-- App shell (ONLY ONE .app wrapper) -->
+  <!-- App shell -->
   <div class="app">
     <header class="topbar">
       <div class="titleblock">
