@@ -1,12 +1,16 @@
 :root{
-  --bg:#0b0b0f;
-  --card:#141420;
-  --text:#f2f2f7;
-  --muted:#b3b3c5;
-  --line:#24243a;
-  --accent:#7ee787;
-  --warn:#ffd166;
-  --bad:#ff5c77;
+  --bg:#0b0714;
+  --card:#130a1f;
+  --card2:#160c26;
+  --text:#f6f0ff;
+  --muted:#c9b7e6;
+  --line:rgba(255,255,255,.10);
+
+  --accent:#ff4aa2;
+  --accent2:#ff7a6b;
+  --warn:#ffb86b;
+  --bad:#ff3b6e;
+
   --r:18px;
 }
 
@@ -45,9 +49,11 @@ body {
 html,body{height:100%}
 body{
   margin:0;
-  background: radial-gradient(1200px 700px at 20% -10%, #1a1a2e 0%, transparent 60%),
-              radial-gradient(900px 600px at 120% 30%, #112233 0%, transparent 55%),
-              var(--bg);
+  background:
+    radial-gradient(900px 700px at 50% 10%, rgba(255,122,107,.45) 0%, transparent 55%),
+    radial-gradient(1000px 800px at 30% 35%, rgba(255,74,162,.22) 0%, transparent 60%),
+    radial-gradient(1100px 900px at 70% 70%, rgba(120,60,190,.18) 0%, transparent 65%),
+    linear-gradient(180deg, #170a1f 0%, #0b0714 45%, #070610 100%);
   color:var(--text);
   font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
 }
@@ -82,7 +88,7 @@ body{
 
 .top-actions{display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end; max-width:50%}
 
-.view{flex:1; padding: 8px 0 92px;}
+.view{flex:1; padding: 0 0 92px; overscroll-behavior: contain; touch-action: pan-y;}
 
 .card{
   background: linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.02));
@@ -104,7 +110,7 @@ body{
 
 input[type="number"], input[type="text"], textarea, select{
   width:100%;
-  background: rgba(0,0,0,.25);
+  background: rgba(7,6,16,.72);
   border:1px solid var(--line);
   color:var(--text);
   padding: 12px 12px;
@@ -124,8 +130,8 @@ textarea{min-height:100px; resize:vertical}
   background: rgba(255,255,255,.08);
 }
 .btn.primary{
-  background: rgba(126,231,135,.14);
-  border-color: rgba(126,231,135,.35);
+  background: rgba(255,74,162,.16);
+  border-color: rgba(255,74,162,.45);
 }
 .ghost{background:transparent}
 .btn:hover,.ghost:hover{filter:brightness(1.08)}
@@ -140,7 +146,7 @@ textarea{min-height:100px; resize:vertical}
   user-select:none;
 }
 .pill .dot{width:10px; height:10px; border-radius:50%; background: var(--muted);}
-.pill.on{border-color: rgba(126,231,135,.35); background: rgba(126,231,135,.10)}
+.pill.on{border-color: rgba(255,74,162,.45); background: rgba(255,74,162,.14)}
 .pill.on .dot{background: var(--accent)}
 .pill.bad{border-color: rgba(255,92,119,.35); background: rgba(255,92,119,.08)}
 .pill.bad .dot{background: var(--bad)}
@@ -183,7 +189,7 @@ textarea{min-height:100px; resize:vertical}
   gap:6px;
   align-items:center;
 }
-.badge.good{border-color: rgba(126,231,135,.35); color: var(--text); background: rgba(126,231,135,.10)}
+.badge.good{border-color: rgba(255,74,162,.45); color: var(--text); background: rgba(255,74,162,.14)}
 .badge.warn{border-color: rgba(255,209,102,.35); color: var(--text); background: rgba(255,209,102,.10)}
 .badge.bad{border-color: rgba(255,92,119,.35); color: var(--text); background: rgba(255,92,119,.10)}
 
@@ -207,8 +213,8 @@ textarea{min-height:100px; resize:vertical}
 }
 .tab.active{
   color: var(--text);
-  border-color: rgba(126,231,135,.30);
-  background: rgba(126,231,135,.10);
+  border-color: rgba(255,74,162,.40);
+  background: rgba(255,74,162,.16);
 }
 
 .toast{
@@ -243,6 +249,7 @@ input, textarea, select, button {
 html, body {
   height: 100%;
   overflow: hidden; /* prevents body scroll */
+  overscroll-behavior: none;
 }
 
 /* 3) Allow scrolling ONLY inside the main content area */
@@ -278,6 +285,99 @@ input, textarea {
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
 }
+
+
+.songsHead{
+  padding: 8px 0 12px;
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+}
+
+.segTabs{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  width:max-content;
+  padding:4px;
+  border-radius:999px;
+  background:rgba(0,0,0,.25);
+  border:1px solid rgba(255,255,255,.10);
+}
+
+.segTab{
+  border:1px solid transparent;
+  color:var(--muted);
+  padding:7px 12px;
+  border-radius:999px;
+  background:transparent;
+  text-transform:lowercase;
+}
+
+.segTab.active{
+  color:var(--text);
+  border-color:rgba(255,74,162,.45);
+  background:rgba(255,74,162,.18);
+}
+
+.songsFilters{
+  display:grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, .8fr) minmax(0, .8fr);
+  gap:10px;
+}
+
+.songsList{
+  width:100%;
+  border-top:1px solid rgba(255,255,255,.06);
+  margin-top:2px;
+}
+
+.songRow{
+  width:100%;
+  padding:14px 2px;
+  border-bottom:1px solid rgba(255,255,255,.06);
+  cursor:pointer;
+}
+
+.songRow:hover{
+  background:rgba(255,255,255,.03);
+}
+
+.songRow .title{
+  font-size:18px;
+}
+
+.songRow .meta{
+  color:var(--muted);
+  font-size:12px;
+  margin-top:4px;
+}
+
+.fab{
+  position:fixed;
+  right:16px;
+  bottom:calc(env(safe-area-inset-bottom) + 86px);
+  width:56px;
+  height:56px;
+  border-radius:999px;
+  border:1px solid rgba(255,74,162,.55);
+  background:linear-gradient(180deg, rgba(255,74,162,1), rgba(210,45,134,1));
+  color:#fff;
+  font-size:34px;
+  line-height:1;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  box-shadow:0 12px 28px rgba(255,74,162,.38);
+  z-index:35;
+}
+
+@media (max-width:720px){
+  .songsFilters{
+    grid-template-columns:1fr;
+  }
+}
+
 /* =========================
    Drawer (slide-left menu)
    ========================= */
