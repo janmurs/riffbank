@@ -107,6 +107,8 @@ const TAB_TITLES = {
 
 let currentTab = "songs";
 let selectedSongId = null;
+let songsView = "list"; // "list" | "create"
+let pendingScrollToUpload = false;
 
 let drawerView = null;     // "projects" | "eps" | "collabs" | "importExport" | "about" | null
 let drawerOpen = false;
@@ -189,30 +191,17 @@ function badgeForStatus(status) {
   return `<span class="badge">🎧 ${escapeHtml(status || "Idea")}</span>`;
 }
 
-// Tabs
-document.querySelectorAll(".tab").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    currentTab = btn.dataset.tab;
-    selectedSongId = null;
-    document
-      .querySelectorAll(".tab")
-      .forEach((b) => b.classList.toggle("active", b === btn));
-    setHeader(TAB_TITLES[currentTab] || "RiffBank");
-    render();
-  });
-});
-
 // Drawer open/close
-$("#menuBtn")?.addEventListener("click", openDrawer);
 $("#drawerCloseBtn")?.addEventListener("click", closeDrawer);
 $("#drawerOverlay")?.addEventListener("click", closeDrawer);
 
 // Tabs
 document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
-    drawerView = null; // ✅ if you were in a drawer screen, return to normal tabs
+    drawerView = null;
     currentTab = btn.dataset.tab;
     selectedSongId = null;
+    songsView = "list";
 
     document
       .querySelectorAll(".tab")
@@ -222,6 +211,69 @@ document.querySelectorAll(".tab").forEach((btn) => {
     render();
   });
 });
+
+$("#uploadSongBtn")?.addEventListener("click", () => {
+  drawerView = null;
+  selectedSongId = null;
+  songsView = "create";
+  currentTab = "songs";
+  document
+    .querySelectorAll(".tab")
+    .forEach((b) => b.classList.toggle("active", b.dataset.tab === "songs"));
+  setHeader("Upload Song");
+  render();
+});
+
+let touchStartX = 0;
+let touchStartY = 0;
+let touchTracking = false;
+let touchMode = null;
+
+document.addEventListener("touchstart", (e) => {
+  const t = e.changedTouches?.[0];
+  if (!t) return;
+
+  if (!drawerOpen && t.clientX <= 24) {
+    touchTracking = true;
+    touchMode = "open";
+    touchStartX = t.clientX;
+    touchStartY = t.clientY;
+    return;
+  }
+
+  if (drawerOpen) {
+    touchTracking = true;
+    touchMode = "close";
+    touchStartX = t.clientX;
+    touchStartY = t.clientY;
+  }
+}, { passive: true });
+
+document.addEventListener("touchmove", (e) => {
+  if (!touchTracking) return;
+  const t = e.changedTouches?.[0];
+  if (!t) return;
+  const dx = t.clientX - touchStartX;
+  const dy = t.clientY - touchStartY;
+  if (Math.abs(dx) <= 10 || Math.abs(dx) <= Math.abs(dy)) return;
+
+  if (touchMode === "open" && dx >= 60) {
+    openDrawer();
+    touchTracking = false;
+    touchMode = null;
+  }
+
+  if (touchMode === "close" && dx <= -60) {
+    closeDrawer();
+    touchTracking = false;
+    touchMode = null;
+  }
+}, { passive: true });
+
+document.addEventListener("touchend", () => {
+  touchTracking = false;
+  touchMode = null;
+}, { passive: true });
 
 // Drawer menu items
 document.querySelectorAll(".drawerItem").forEach((btn) => {
@@ -272,6 +324,11 @@ $("#importFile")?.addEventListener("change", async (e) => {
 function render() {
   if (!view) return;
 
+  const uploadSongBtn = $("#uploadSongBtn");
+  if (uploadSongBtn) {
+    uploadSongBtn.style.display = !drawerView && currentTab === "songs" && !selectedSongId && songsView === "list" ? "" : "none";
+  }
+
   // Drawer screens take precedence
   if (drawerView === "projects") return renderProjects();
   if (drawerView === "eps") return renderEPs();
@@ -282,6 +339,7 @@ function render() {
   // Normal tabs
   if (currentTab === "songs") {
     if (selectedSongId) return renderSongDetail(selectedSongId);
+    if (songsView === "create") return renderSongCreate();
     return renderSongsList();
   }
   if (currentTab === "player") return renderPlayer();
@@ -381,6 +439,7 @@ function renderProjects() {
       // Jump to songs tab and prefill search with project name
       drawerView = null;
       currentTab = "songs";
+      songsView = "list";
       document.querySelectorAll(".tab").forEach(t =>
         t.classList.toggle("active", t.dataset.tab === "songs")
       );
@@ -477,6 +536,7 @@ function renderCollaborators() {
       const name = btn.getAttribute("data-filter-collab");
       drawerView = null;
       currentTab = "songs";
+      songsView = "list";
       document.querySelectorAll(".tab").forEach(t =>
         t.classList.toggle("active", t.dataset.tab === "songs")
       );
@@ -554,45 +614,12 @@ function renderAbout() {
 // Songs list + creation
 // ----------------------
 function renderSongsList() {
+  setHeader("Songs");
   const songs = [...state.songs].sort((a, b) =>
     (b.updatedAt || "").localeCompare(a.updatedAt || "")
   );
 
   view.innerHTML = `
-    <div class="card">
-      <h2>New song</h2>
-      <div class="row">
-        <div class="col">
-          <div class="label">Title</div>
-          <input id="newTitle" type="text" placeholder="e.g. Internal (FFND)" />
-        </div>
-        <div class="col">
-          <div class="label">Project</div>
-          <input id="newProject" type="text" value="${escapeHtml(
-            state.settings.defaultProject
-          )}" />
-        </div>
-      </div>
-      <div class="row" style="margin-top:10px">
-        <div class="col">
-          <div class="label">Genre</div>
-          <input id="newGenre" type="text" value="${escapeHtml(
-            state.settings.defaultGenre
-          )}" />
-        </div>
-        <div class="col">
-          <div class="label">Sprint</div>
-          <input id="newSprint" type="text" value="${escapeHtml(
-            state.settings.defaultSprint
-          )}" />
-        </div>
-      </div>
-      <div class="row" style="margin-top:10px">
-        <button id="createSong" class="btn primary">Create</button>
-      </div>
-      <div class="small" style="margin-top:10px">Local-only. Export backups anytime.</div>
-    </div>
-
     <div class="card">
       <h2>Search</h2>
       <div class="row">
@@ -615,36 +642,6 @@ function renderSongsList() {
       <div id="songList" class="list"></div>
     </div>
   `;
-
-  $("#createSong").addEventListener("click", () => {
-    const title = $("#newTitle").value.trim();
-    if (!title) return toast("Give it a title 🙂");
-
-    const song = {
-      id: uid(), // ✅ fixed
-      title,
-      project: $("#newProject").value.trim() || "Project",
-      genre: $("#newGenre").value.trim() || "",
-      sprint: $("#newSprint").value.trim() || "Unsorted",
-      instrumentation: "",
-      collaborators: "",
-      status: "Idea",
-      stuckState: "Active",
-      nextAction: "",
-      vibes: "",
-      lyrics: "",
-      notes: "",
-      versions: [],
-      createdAt: nowStamp(),
-      updatedAt: nowStamp(),
-    };
-
-    state.songs.unshift(song);
-    saveState();
-    $("#newTitle").value = "";
-    toast("Created 🎸");
-    renderSongsList();
-  });
 
   const listEl = $("#songList");
 
@@ -700,6 +697,85 @@ function renderSongsList() {
   $("#q").addEventListener("input", applyFilter);
   $("#statusFilter").addEventListener("change", applyFilter);
   applyFilter();
+}
+
+function renderSongCreate() {
+  setHeader("Upload Song");
+
+  view.innerHTML = `
+    <div class="card">
+      <h2>Upload Song</h2>
+      <div class="row">
+        <div class="col">
+          <div class="label">Title</div>
+          <input id="newTitle" type="text" placeholder="e.g. Internal (FFND)" />
+        </div>
+        <div class="col">
+          <div class="label">Project</div>
+          <input id="newProject" type="text" value="${escapeHtml(
+            state.settings.defaultProject
+          )}" />
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <div class="col">
+          <div class="label">Genre</div>
+          <input id="newGenre" type="text" value="${escapeHtml(
+            state.settings.defaultGenre
+          )}" />
+        </div>
+        <div class="col">
+          <div class="label">Sprint</div>
+          <input id="newSprint" type="text" value="${escapeHtml(
+            state.settings.defaultSprint
+          )}" />
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button id="createSong" class="btn primary">Create & Upload</button>
+        <button id="backToList" class="ghost">Back</button>
+      </div>
+    </div>
+  `;
+
+  $("#backToList").addEventListener("click", () => {
+    songsView = "list";
+    setHeader("Songs");
+    render();
+  });
+
+  $("#createSong").addEventListener("click", () => {
+    const title = $("#newTitle").value.trim();
+    if (!title) return toast("Give it a title 🙂");
+
+    const song = {
+      id: uid(),
+      title,
+      project: $("#newProject").value.trim() || "Project",
+      genre: $("#newGenre").value.trim() || "",
+      sprint: $("#newSprint").value.trim() || "Unsorted",
+      instrumentation: "",
+      collaborators: "",
+      status: "Idea",
+      stuckState: "Active",
+      nextAction: "",
+      vibes: "",
+      lyrics: "",
+      notes: "",
+      versions: [],
+      createdAt: nowStamp(),
+      updatedAt: nowStamp(),
+    };
+
+    state.songs.unshift(song);
+    saveState();
+    toast("Created 🎸");
+    selectedSongId = song.id;
+    songsView = "list";
+    pendingScrollToUpload = true;
+    setHeader("Song");
+    render();
+  });
 }
 
 // ----------------------
@@ -996,6 +1072,13 @@ function renderSongDetail(id) {
   });
 
   renderVersionsList(song);
+
+  if (pendingScrollToUpload) {
+    pendingScrollToUpload = false;
+    setTimeout(() => {
+      $("#pickFile")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 0);
+  }
 }
 
 function renderVersionsList(song) {

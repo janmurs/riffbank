@@ -23,21 +23,13 @@
   <div class="app">
 
 <header class="topbar">
-  <div class="left-actions">
-    <button id="menuBtn" class="ghost iconbtn" aria-label="Open menu">☰</button>
-  </div>
-
   <div class="titleblock">
     <div class="kicker">RiffBank</div>
     <h1 id="headerTitle">Songs</h1>
   </div>
 
   <div class="top-actions">
-    <button id="exportBtn" class="ghost">Export</button>
-    <label class="ghost filelabel">
-      Import
-      <input id="importFile" type="file" accept="application/json" />
-    </label>
+    <button id="uploadSongBtn" class="btn primary">Upload Song</button>
   </div>
 </header>
 
@@ -80,6 +72,11 @@
   </div>
 
   <div id="toast" class="toast" aria-live="polite"></div>
+
+  <div style="display:none">
+    <button id="exportBtn"></button>
+    <input id="importFile" type="file" accept="application/json" />
+  </div>
 
   <script src="./app.js"></script>
 

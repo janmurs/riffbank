@@ -1,4 +1,4 @@
-const CACHE = "riffbank-v1";
+const CACHE = "riffbank-v1-1";
 const ASSETS = ["/", "/index.html", "/styles.css", "/app.js", "/manifest.json"];
 
 self.addEventListener("install", (e) => {
