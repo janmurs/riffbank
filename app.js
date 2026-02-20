@@ -347,6 +347,7 @@ $("#importFile")?.addEventListener("change", async (e) => {
 function render() {
   if (!view) return;
   syncTabs();
+    document.body.classList.toggle("isHome", currentTab === "home" && !drawerView);
 
   const uploadSongBtn = $("#uploadSongBtn");
   if (uploadSongBtn) {
@@ -635,19 +636,48 @@ function renderAbout() {
 }
 
 function renderHome() {
-  setHeader("Home");
+  // Big centered brand like the example
+  setHeader("RiffBank.");
+
+  const songCount = state.songs.length;
+
   view.innerHTML = `
-    <div class="homeWrap">
-      <div class="tileGrid">
-        <button class="tile" data-home="songs"><div class="tileIcon">🎵</div><div class="tileLabel">Songs</div></button>
-        <button class="tile" data-home="projects"><div class="tileIcon">📁</div><div class="tileLabel">Projects</div></button>
-        <button class="tile" data-home="browse"><div class="tileIcon">🔎</div><div class="tileLabel">Browse</div></button>
-        <button class="tile" data-home="lyrics"><div class="tileIcon">✍️</div><div class="tileLabel">Lyrics</div></button>
+    <div class="homeReleaf">
+      <div class="homeGridReleaf">
+        <button class="homeCard" data-home="songs" aria-label="Songs">
+          ${iconBookmark()}
+          <div class="cardText">${songCount} song${songCount === 1 ? "" : "s"}</div>
+          <div class="cardSub">library</div>
+        </button>
+
+        <button class="homeCard" data-home="projects" aria-label="Projects">
+          ${iconChart()}
+          <div class="cardText">projects</div>
+          <div class="cardSub">organize</div>
+        </button>
+
+        <button class="homeCard" data-home="browse" aria-label="Browse">
+          ${iconBulb()}
+          <div class="cardText">browse</div>
+          <div class="cardSub">search</div>
+        </button>
+
+        <button class="homeCard" data-home="lyrics" aria-label="Lyrics">
+          ${iconPlus()}
+          <div class="cardText">lyrics</div>
+          <div class="cardSub">scratchpad</div>
+        </button>
+
+        <button class="homeCard homeCardWide" data-home="next" aria-label="Next Actions">
+          ${iconPeople()}
+          <div class="cardText">next actions</div>
+          <div class="cardSub">finish songs</div>
+        </button>
       </div>
-      <button class="tile tileCenter" data-home="next"><div class="tileIcon">✅</div><div class="tileLabel">Next Actions</div></button>
-      <div class="homeActions">
-        <button class="ctaSmall" id="quickLogBtn">⚡ Quick log</button>
-        <button class="ctaBig" id="startSessionBtn">Start a session</button>
+
+      <div class="homeActionsReleaf">
+      <button class="pillOutline" id="newLyricsBtn">⚡ New lyrics</button>
+      <button class="bigCTA" id="newSongBtn">New song</button>
       </div>
     </div>
   `;
@@ -686,26 +716,57 @@ function renderHome() {
     });
   });
 
-  $('#quickLogBtn')?.addEventListener('click', () => {
-    const val = prompt('Quick log');
-    if (!val || !val.trim()) return;
-    state.quickLog = Array.isArray(state.quickLog) ? state.quickLog : [];
-    state.quickLog.unshift({ id: uid(), text: val.trim(), at: nowStamp() });
-    saveState();
-    toast('Logged ⚡');
+  $('#newLyricsBtn')?.addEventListener('click', () => {
+    renderLyricsScratch();
   });
 
-  $('#startSessionBtn')?.addEventListener('click', () => {
-    const active = [...state.songs]
-      .filter((song) => (song.stuckState || 'Active') === 'Active')
-      .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))[0];
-    const pick = active || [...state.songs].sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))[0];
-    if (!pick) return toast('Add a song first 🎵');
-    currentTab = 'songs';
-    selectedSongId = pick.id;
-    songsView = 'list';
+  $('#newSongBtn')?.addEventListener('click', () => {
+    drawerView = null;
+    selectedSongId = null;
+    songsView = "create";
+    currentTab = "songs";
+    setHeader("Upload Song");
     render();
   });
+}
+
+// ---- simple line icons (stroke uses currentColor) ----
+function iconBookmark(){
+  return `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M6 3h12v18l-6-4-6 4V3z"></path>
+    </svg>`;
+}
+function iconChart(){
+  return `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M3 17l6-6 4 4 7-7"></path>
+      <path d="M14 8h6v6"></path>
+    </svg>`;
+}
+function iconBulb(){
+  return `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M9 18h6"></path>
+      <path d="M10 22h4"></path>
+      <path d="M8 14a6 6 0 1 1 8 0c-1 1-1 2-1 3H9c0-1 0-2-1-3z"></path>
+    </svg>`;
+}
+function iconPlus(){
+  return `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 5v14"></path>
+      <path d="M5 12h14"></path>
+    </svg>`;
+}
+function iconPeople(){
+  return `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M16 11a4 4 0 1 0-8 0"></path>
+      <path d="M2 21c1.5-4 6-6 10-6s8.5 2 10 6"></path>
+      <path d="M8 9a3 3 0 1 1 0-6"></path>
+      <path d="M16 3a3 3 0 1 1 0 6"></path>
+    </svg>`;
 }
 
 function renderLyricsScratch() {

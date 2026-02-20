@@ -1,24 +1,23 @@
 :root{
-  --bg:#0b0714;
-  --card:#130a1f;
-  --card2:#160c26;
-  --text:#f6f0ff;
-  --muted:#c9b7e6;
-  --line:rgba(255,255,255,.10);
+  --bg:#8C2C6F;            /* Dayseeker main tone */
+  --bgBright:#E13C7C;      /* brighter accent */
+  --ink:#1A0828;           /* dark purple text */
+  --inkDeep:#14081F;       /* nav + buttons */
+  --cardBorder:#1A0828;
+  --white:#ffffff;
 
-  --accent:#ff4aa2;
-  --accent2:#ff7a6b;
-  --warn:#ffb86b;
-  --bad:#ff3b6e;
-
-  --r:18px;
+  --rCard: 14px;
+  --rPill: 999px;
 }
 
-/* App container */
-.app {
+.app{
   max-width: 480px;
   margin: 0 auto;
-  padding: 16px;
+  height: 100vh;
+  display:flex;
+  flex-direction:column;
+  padding: 0 16px;
+  position: relative;
 }
 
 button {
@@ -46,16 +45,18 @@ body {
 }
 
 *{box-sizing:border-box}
-html,body{height:100%; background:#070610;}
+html,body{
+  height:100%;
+  background: var(--bg);
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
 body{
   margin:0;
-  background:
-    radial-gradient(900px 700px at 50% 10%, rgba(255,122,107,.45) 0%, transparent 55%),
-    radial-gradient(1000px 800px at 30% 35%, rgba(255,74,162,.22) 0%, transparent 60%),
-    radial-gradient(1100px 900px at 70% 70%, rgba(120,60,190,.18) 0%, transparent 65%),
-    linear-gradient(180deg, #170a1f 0%, #0b0714 45%, #070610 100%);
-  color:var(--text);
-  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+  background: var(--bg);
+  color: var(--inkDeep);
+  font-family: "Nunito", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
 }
 
 .app{
@@ -81,28 +82,30 @@ body{
 .topbar{
   display:flex;
   align-items:center;
-  justify-content:space-between;
-  gap:12px;
-  padding: calc(env(safe-area-inset-top) + 18px) 6px 12px;
-  margin-top: calc(env(safe-area-inset-top) * -1);
+  justify-content:center; /* center logo/title */
+  padding: calc(env(safe-area-inset-top) + 22px) 6px 10px;
   position:relative;
-  z-index:1;
 }
 
-.titleblock .kicker{
-  color:var(--muted);
-  font-size:12px;
-  letter-spacing:.2px;
-}
+.titleblock .kicker{ display:none; }
+
 .titleblock h1{
-  margin:4px 0 0;
-  font-size:28px;
-  letter-spacing:-.6px;
+  margin:0;
+  font-size: 34px;
+  font-weight: 900;
+  letter-spacing: -0.8px;
+  color: var(--ink);
 }
 
-.top-actions{display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end; max-width:50%}
+.top-actions{ display:none; } /* matches example (no top-right action) */
 
-.view{flex:1; padding: 0 0 92px; overscroll-behavior: contain; touch-action: pan-y;}
+.view{
+  flex:1;
+  min-height:0;
+  overflow-y:auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 10px 0 90px; /* room above wave+nav */
+}
 
 .card{
   background: linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.02));
@@ -208,28 +211,55 @@ textarea{min-height:100px; resize:vertical}
 .badge.bad{border-color: rgba(255,92,119,.35); color: var(--text); background: rgba(255,92,119,.10)}
 
 .tabs{
-  position:fixed; left:0; right:0; bottom:0;
-  padding: 10px 14px calc(env(safe-area-inset-bottom) + 10px);
-  background: rgba(10,10,16,.78);
-  backdrop-filter: blur(12px);
-  border-top: 1px solid rgba(255,255,255,.08);
-  display:flex; gap:10px; justify-content:center;
+  position:fixed;
+  left:0; right:0; bottom:0;
+  padding: 14px 18px calc(env(safe-area-inset-bottom) + 14px);
+  background: linear-gradient(180deg, #2A0F3F, #14081F);
+  display:flex;
+  gap: 14px;
+  justify-content:center;
+  align-items:center;
   z-index: 40;
 }
+
 .tab{
-  flex:1; max-width:220px;
-  background: rgba(255,255,255,.06);
-  border:1px solid rgba(255,255,255,.08);
-  color: var(--muted);
-  padding: 10px 10px;
-  border-radius: 16px;
-  cursor:pointer;
+  flex:1;
+  max-width: 150px;
+  border: 0;
+  background: transparent;
+  color: rgba(255,255,255,.55);
+  font-weight: 800;
+  padding: 12px 14px;
+  border-radius: 999px;
+  transition: all .25s ease;
+  position:relative;
 }
+
 .tab.active{
-  color: var(--text);
-  border-color: rgba(255,74,162,.58);
-  background: rgba(255,74,162,.20);
-  box-shadow: 0 0 0 1px rgba(255,74,162,.22), 0 0 24px rgba(255,74,162,.25);
+  color: #fff;
+  background: rgba(225,60,124,.18); /* soft pink glass */
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+
+  box-shadow:
+    0 0 0 2px rgba(225,60,124,.25),      /* subtle outline */
+    0 8px 20px rgba(0,0,0,.35),          /* lift */
+    0 0 28px rgba(225,60,124,.35);       /* pink glow */
+
+  transform: translateY(-2px);
+}
+
+.tab.active::after{
+  content:"";
+  position:absolute;
+  inset:0;
+  border-radius:999px;
+  background: radial-gradient(
+    circle at center,
+    rgba(225,60,124,.25),
+    transparent 70%
+  );
+  pointer-events:none;
 }
 
 .toast{
@@ -260,17 +290,27 @@ input, textarea, select, button {
   font-size: 16px;
 }
 
-/* 2) Make the "app" a fixed screen, not a scrolling webpage */
-html, body {
-  height: 100%;
-  overflow: hidden; /* prevents body scroll */
-  overscroll-behavior: none;
+*{box-sizing:border-box}
+
+html,body{
+  background: var(--bg);
 }
+body{
+  background: var(--bg);
+}
+
+input, textarea, select, button { font-size: 16px; }
+input, textarea { -webkit-user-select: text; user-select: text; }
+* { -webkit-tap-highlight-color: transparent; }
 
 /* 3) Allow scrolling ONLY inside the main content area */
 .view {
   overflow-y: auto;
   -webkit-overflow-scrolling: touch; /* smooth iOS momentum scroll */
+}
+
+body.isHome .view{
+  overflow: hidden !important;
 }
 
 /* 4) Remove ugly tap highlight + make taps feel native */
@@ -538,4 +578,94 @@ input, textarea {
 .drawerOpen .drawerOverlay{ opacity: 1; pointer-events: auto; }
 .drawerOpen .view{
   overflow: hidden;
+}
+
+/* =========
+   HOME (Releaf-style)
+   ========= */
+
+.homeReleaf{
+  position: relative;
+  padding: 6px 0 30px;
+}
+
+.homeGridReleaf{
+  display:grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 10px;
+}
+
+.homeCard{
+  border: 3px solid var(--cardBorder);
+  border-radius: var(--rCard);
+  background: rgba(255,255,255,.06); /* subtle glass look */
+  padding: 18px 14px;
+  min-height: 112px;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  gap: 8px;
+  box-shadow: 0 14px 30px rgba(0,0,0,.25);
+}
+
+.homeCard svg{
+  width: 24px;
+  height: 24px;
+  color: var(--ink);
+}
+
+.homeCard .cardText{
+  font-weight: 900;
+  font-size: 18px;
+  color: var(--ink);
+  text-align:center;
+  line-height: 1.05;
+}
+
+.homeCard .cardSub{
+  font-weight: 800;
+  font-size: 14px;
+  opacity: .9;
+}
+
+.homeCardWide{
+  grid-column: 1 / -1;
+  width: min(72%, 320px);
+  justify-self:center;
+}
+
+.homeActionsReleaf{
+  display:flex;
+  flex-direction:column;
+  gap: 12px;
+  align-items:center;
+  margin-top: 18px;
+  padding-bottom: 20px;
+}
+
+.pillOutline{
+  border: var(--cardBorder) solid var(--ink);
+  border-radius: var(--rPill);
+  padding: 12px 18px;
+  background: rgba(255,255,255,.12);
+  font-weight: 900;
+  color: var(--ink);
+  display:inline-flex;
+  align-items:center;
+  gap: 10px;
+}
+
+.bigCTA{
+  width: 100%;
+  border-radius: 18px;
+  padding: 16px 18px;
+  background: var(--inkDeep);
+  color: var(--white);
+  border: 0;
+  font-weight: 900;
+  font-size: 20px;
+  letter-spacing: -0.2px;
+  box-shadow: 0 18px 40px rgba(0,0,0,.45);
 }
