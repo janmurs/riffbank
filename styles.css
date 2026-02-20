@@ -1200,3 +1200,69 @@ body.hasMiniPlayer #view{
   width: 100%;
   margin-top: 6px;
 }
+
+/* -------------------------
+   Splash / Loading Screen
+------------------------- */
+.splash {
+  position: fixed;
+  inset: 0;
+  background: #0b0b0f;
+  z-index: 9999;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  opacity: 1;
+  transition: opacity 420ms ease;
+}
+
+.splash-inner {
+  text-align: center;
+  transform: translateY(0);
+}
+
+.splash-title {
+  font-size: 40px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  color: #ffffff;
+  /* subtle glow vibe */
+  text-shadow: 0 0 18px rgba(120, 90, 255, 0.25), 0 0 28px rgba(70, 160, 255, 0.18);
+  transform: translateY(0);
+  transition: transform 700ms cubic-bezier(0.2, 0.9, 0.2, 1);
+}
+
+.splash-tagline {
+  margin-top: 14px;
+  font-size: 16px;
+  color: rgba(255, 255, 255, 0.72);
+  opacity: 0;
+  transform: translateY(10px);
+  transition:
+    opacity 500ms ease,
+    transform 500ms ease;
+}
+
+/* Stage 2: title slides up + tagline appears */
+.splash.is-stage-2 .splash-title {
+  transform: translateY(-18px);
+}
+
+.splash.is-stage-2 .splash-tagline {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Fade out + click-through when done */
+.splash.is-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Optional: hide app until splash begins transitioning */
+body.is-splashing .app {
+  visibility: hidden;
+}
+body.is-splashing #view {
+  visibility: hidden;
+}
