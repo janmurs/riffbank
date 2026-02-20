@@ -9,7 +9,136 @@
 const LS_KEY = "riffbank_v1";
 const $ = (sel) => document.querySelector(sel);
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+let splashAlreadyRan = false;
+
+// -----------------------------
+// Splash animation sequence (awaitable)
+// -----------------------------
+async function runSplashSequence() {
+  const splash = document.getElementById("splash");
+  const title = document.getElementById("splashTitle");
+  const subWrap = document.getElementById("splashSub");       // wrapper div (IMPORTANT)
+  const subText = document.getElementById("splashSubText");   // text span
+  const spinner = document.getElementById("splashSpinner");
+
+  if (!splash) return;
+
+  document.body.classList.add("splashing");
+
+  // Add shimmer to title (CSS handles the effect)
+  if (title) title.classList.add("shimmer");
+
+  // ✅ IMPORTANT: NO built-in "…" here — the dancing dots handle that inline
+  const lines = [
+    "Indexing your universe",
+    "Syncing sessions",
+    "Entering RiffBank",
+  ];
+
+  // ---- timing knobs (premium, not rushed) ----
+  const HOLD_1 = 2400;
+  const HOLD_2 = 2400;
+  const HOLD_3 = 900;
+
+  // Read jump duration from CSS var if available (fallback to 520)
+  const cssJump = (() => {
+    try {
+      const raw = getComputedStyle(document.documentElement)
+        .getPropertyValue("--splash-jump-ms")
+        .trim();
+      const n = parseInt(raw, 10);
+      return Number.isFinite(n) ? n : 520;
+    } catch {
+      return 520;
+    }
+  })();
+
+  const JUMP_MS = cssJump;
+  const JUMP_IN_SETTLE = 80;
+
+  // Ensure initial DOM text is correct (DON’T wipe children)
+  if (subText) subText.textContent = lines[0];
+
+  // Start hidden; CSS should manage actual opacity/position
+  // ✅ Jump classes belong on the WRAPPER (#splashSub) because CSS animates #splashSub
+  if (subWrap) subWrap.classList.remove("show", "churn", "jumpIn", "jumpOut", "static");
+
+  // Hide spinner until after the 1.2s logo moment
+  if (spinner) spinner.classList.remove("show");
+
+  // --- 1.2s “logo shine” moment ---
+  await sleep(1200);
+
+  // Slide title up + fade in spinner/sub area
+  splash.classList.add("phase1");
+  if (spinner) spinner.classList.add("show");
+
+  if (subWrap) subWrap.classList.add("show", "churn", "static"); // phrase 1 = stable display
+
+  // Let the title slide animation complete before we start text transitions
+  await sleep(550);
+
+  async function jumpSwap(nextText) {
+    if (!subWrap || !subText) return;
+
+    // ✅ FIX: "static" disables animation via CSS (!important),
+    // so remove it during the jump, then restore after.
+    subWrap.classList.remove("static");
+
+    // OUT current phrase
+    subWrap.classList.remove("jumpIn", "jumpOut");
+    void subWrap.offsetHeight;          // ✅ restart animation reliably
+    subWrap.classList.add("jumpOut");
+    await sleep(JUMP_MS);
+
+    // swap text
+    subWrap.classList.remove("jumpOut");
+    void subWrap.offsetHeight;          // ✅ restart animation reliably
+    subText.textContent = nextText;
+
+    // IN next phrase
+    subWrap.classList.add("jumpIn");
+    await sleep(JUMP_MS);
+
+    subWrap.classList.remove("jumpIn");
+
+    // ✅ restore static "stable" state after jump completes
+    subWrap.classList.add("static");
+  }
+
+  // ---- Hold PHRASE 1 ----
+  await sleep(HOLD_1);
+
+  // ✅ Phrase 1 -> Phrase 2 (JUMP)
+  await jumpSwap(lines[1]);
+
+  // ---- Hold PHRASE 2 ----
+  await sleep(HOLD_2);
+
+  // ✅ Phrase 2 -> Phrase 3 (JUMP)
+  // ✅ AND: no "jump" after phrase 3 (only hold + fade out)
+  await jumpSwap(lines[2]);
+
+  // Hold briefly while app finishes rendering
+  await sleep(HOLD_3);
+
+  // Hide splash (no extra jump here)
+  splash.classList.add("hide");
+  splash.setAttribute("aria-hidden", "true");
+  await sleep(420);
+  splash.remove();
+
+  document.body.classList.remove("splashing");
+}
+
 const view = $("#view");
+if (!view) {
+  console.error("RiffBank: #view not found. Check index.html structure.");
+}
 const headerTitle = $("#headerTitle");
 const toastEl = $("#toast");
 
@@ -105,15 +234,15 @@ function isPlayable(v){
   return !!(v?.link || v?.fileId || v?.localAudioId);
 }
 
-async function syncMiniPlayerUI(){
+async function syncMiniPlayerUI() {
   if (!miniPlayerEl) return;
-
-  document.body.classList.toggle("hasMiniPlayer", !miniPlayerEl.classList.contains("hidden"));
 
   const now = state.player?.nowPlaying;
   if (!now) {
     miniPlayerEl.classList.add("hidden");
+    miniPlayerEl.classList.remove("visible");
     miniPlayerEl.setAttribute("aria-hidden", "true");
+    document.body.classList.remove("hasMiniPlayer");
     return;
   }
 
@@ -122,40 +251,30 @@ async function syncMiniPlayerUI(){
 
   if (!song || !v || !isPlayable(v)) {
     miniPlayerEl.classList.add("hidden");
+    miniPlayerEl.classList.remove("visible");
     miniPlayerEl.setAttribute("aria-hidden", "true");
+    document.body.classList.remove("hasMiniPlayer");
     return;
   }
 
-  // show bar with animation
-miniPlayerEl.classList.remove("hidden");
-requestAnimationFrame(() => miniPlayerEl.classList.add("visible"));
-
-const art = document.getElementById("miniArt");
-if (art) art.innerHTML = coverSvg(song);
-
-// queue badge
-const qb = document.getElementById("miniQueueBadge");
-const qCount = (state.player?.queue || []).length;
-if (qb){
-  qb.style.display = qCount ? "inline-flex" : "none";
-  qb.textContent = String(qCount);
-}
-
-  miniToggleEl.textContent = globalAudio?.paused ? "▶" : "⏸";
-  document.body.classList.add("hasMiniPlayer");
-
-  miniPlayerEl.classList.remove("visible");
-  miniPlayerEl.classList.add("hidden");
-  document.body.classList.remove("hasMiniPlayer");
-
+  // show
   miniPlayerEl.classList.remove("hidden");
   miniPlayerEl.setAttribute("aria-hidden", "false");
+  document.body.classList.add("hasMiniPlayer");
+
+  // optional "animate in"
+  requestAnimationFrame(() => miniPlayerEl.classList.add("visible"));
 
   miniTitleEl.textContent = song.title || "Untitled";
   miniSubEl.textContent = v.label || "Version";
-
-  // button icon
   miniToggleEl.textContent = globalAudio?.paused ? "▶" : "⏸";
+
+  const qb = document.getElementById("miniQueueBadge");
+  const qCount = (state.player?.queue || []).length;
+  if (qb) {
+    qb.style.display = qCount ? "inline-flex" : "none";
+    qb.textContent = String(qCount);
+  }
 }
 
 const miniScrubEl = document.getElementById("miniScrub");
@@ -188,12 +307,12 @@ async function playNowPlaying({ autoplay = true } = {}){
   if (!url) return toast("No playable audio 😅");
 
   // Ensure only ONE audio plays in the whole app
-document.querySelectorAll("audio").forEach(a => {
-  if (a !== globalAudio) {
-    try { a.pause(); } catch {}
-    try { a.removeAttribute("src"); a.load(); } catch {}
-  }
-});
+  document.querySelectorAll("audio").forEach(a => {
+    if (a !== globalAudio) {
+      try { a.pause(); } catch {}
+      try { a.removeAttribute("src"); a.load(); } catch {}
+    }
+  });
 
   // If already playing this exact src, don't reset time
   if (globalAudio.src !== url) globalAudio.src = url;
@@ -284,7 +403,7 @@ function normalizeState() {
     song.versions = Array.isArray(song.versions) ? song.versions : [];
     song.versions.forEach((v) => {
       if (typeof v.isActive !== "boolean") v.isActive = false;
-            // Local file support
+      // Local file support
       if (v.fileId === undefined) v.fileId = null;
       if (v.fileName === undefined) v.fileName = "";
       if (v.fileType === undefined) v.fileType = "";
@@ -293,10 +412,10 @@ function normalizeState() {
       if (v.localAudioId === undefined) v.localAudioId = null;
       if (v.originalFileName === undefined) v.originalFileName = "";
     });
-        // ✅ new: featured version pointer
+    // ✅ new: featured version pointer
     if (song.featuredVersionId === undefined) song.featuredVersionId = null;
   });
-    // Player state (queue)
+  // Player state (queue)
   state.player = state.player || {};
   state.player.queue = Array.isArray(state.player.queue) ? state.player.queue : [];
   state.player.nowPlaying = state.player.nowPlaying || null;
@@ -781,7 +900,7 @@ function goBack({ animate = false } = {}) {
       return;
     }
 
-        // ✅ If you're in a version detail view, back goes to the song page
+    // ✅ If you're in a version detail view, back goes to the song page
     if (selectedSongId && selectedVersionId) {
       selectedVersionId = null;
       currentTab = "songs";
@@ -809,7 +928,7 @@ function goBack({ animate = false } = {}) {
       return;
     }
 
-        // If Songs list was opened from a drawer view (e.g. Projects -> View songs),
+    // If Songs list was opened from a drawer view (e.g. Projects -> View songs),
     // going back from the Songs list should return to that drawer view.
     if (
       currentTab === "songs" &&
@@ -1216,7 +1335,7 @@ function renderSheet() {
       return;
     }
 
-    const playable = !!v.link;
+    const playable = !!(v.link || v.fileId || v.localAudioId);
 
     sheetContent.innerHTML = `
       <div class="sheetTitle">${escapeHtml(song.title)}</div>
@@ -2376,12 +2495,6 @@ function renderVersionDetail(songId, versionId) {
         <button class="btn" id="openLinkBtn" ${v.link ? "" : "disabled"}>Open link</button>
         <button class="btn" id="deleteVersionBtn">Delete</button>
       </div>
-
-      ${hasPlayable ? `
-        <div class="hr"></div>
-        <div class="small">Preview</div>
-        <audio id="versionAudio" controls style="width:100%; margin-top:10px"></audio>
-      ` : ""}
     </div>
   `;
 
@@ -2399,6 +2512,7 @@ function renderVersionDetail(songId, versionId) {
     toast("Saved ✅");
     renderVersionDetail(songId, versionId);
   });
+}
 
   // Import audio (local file)
   $("#importAudioBtn")?.addEventListener("click", async () => {
@@ -2495,118 +2609,6 @@ function renderVersionDetail(songId, versionId) {
     selectedVersionId = null;
     renderSongDetail(songId);
   });
-
-  // Preview hydrate
-  (async () => {
-    const audioEl = document.getElementById("versionAudio");
-    if (!audioEl) return;
-    const url = await getPlayableUrlForVersion(songId, versionId);
-    if (url) audioEl.src = url;
-  })();
-}
-
-function renderVersionsList(song) {
-  const listEl = $("#versionsList");
-  const versions = song.versions || [];
-
-  listEl.innerHTML = versions.length
-    ? versions.map((v) => `
-      <div class="item" style="cursor:default">
-        <div class="row" style="justify-content:space-between; align-items:center">
-          <div class="title">${escapeHtml(v.label)}</div>
-          <div class="row" style="gap:8px; justify-content:flex-end">
-            ${v.isBest ? `<span class="badge good">⭐ Best</span>` : `<span class="badge">—</span>`}
-          </div>
-        </div>
-        <div class="meta">Created: ${escapeHtml(v.createdAt)}${v.notes ? ` • Notes: ${escapeHtml(v.notes)}` : ""}</div>
-        <div class="row" style="margin-top:10px; gap:8px; flex-wrap:wrap">
-          <button class="btn" data-best="${v.id}">${v.isBest ? "Best ✅" : "Set Best ⭐"}</button>
-          <button class="btn" data-active="${v.id}">${v.isActive ? "Active ✅" : "Set Active 🎧"}</button>
-          <button class="btn" data-copy="${v.id}">Copy name</button>
-          <button class="btn" data-open="${v.id}" ${v.link ? "" : "disabled"}>Open link</button>
-          <button class="btn" data-del="${v.id}">Delete</button>
-        </div>
-        ${
-          v.link
-            ? `<div class="small" style="margin-top:8px">Link: <span class="mono">${escapeHtml(v.link)}</span></div>`
-            : `<div class="small" style="margin-top:8px"><i>No link yet</i> (paste after uploading)</div>`
-        }
-      </div>
-    `).join("")
-    : `<div class="small">No versions yet. Add one above.</div>`;
-
-  listEl.querySelectorAll("[data-best]").forEach((b) =>
-    b.addEventListener("click", () => {
-      const id = b.getAttribute("data-best");
-      song.versions.forEach((x) => (x.isBest = x.id === id));
-      song.updatedAt = nowStamp();
-      saveState();
-      toast("Best updated ⭐");
-      renderSongDetail(song.id);
-    })
-  );
-
-  listEl.querySelectorAll("[data-active]").forEach((b) =>
-    b.addEventListener("click", () => {
-      const id = b.getAttribute("data-active");
-      const v = song.versions.find((x) => x.id === id);
-      if (!v) return;
-      v.isActive = !v.isActive;
-      song.updatedAt = nowStamp();
-      saveState();
-      toast("Active updated 🎧");
-      renderSongDetail(song.id);
-    })
-  );
-
-  listEl.querySelectorAll("[data-copy]").forEach((b) =>
-    b.addEventListener("click", async () => {
-      const id = b.getAttribute("data-copy");
-      const v = song.versions.find((x) => x.id === id);
-      if (v) await copyText(v.label);
-    })
-  );
-
-  listEl.querySelectorAll("[data-open]").forEach((b) =>
-    b.addEventListener("click", () => {
-      const id = b.getAttribute("data-open");
-      const v = song.versions.find((x) => x.id === id);
-      if (v?.link) window.open(v.link, "_blank");
-    })
-  );
-
-  listEl.querySelectorAll("[data-del]").forEach((b) =>
-    b.addEventListener("click", () => {
-      const id = b.getAttribute("data-del");
-      const v = song.versions.find((x) => x.id === id);
-      if (!v) return;
-      if (!confirm(`Delete version "${v.label}"?`)) return;
-      song.versions = song.versions.filter((x) => x.id !== id);
-      if (song.versions.length && !song.versions.some((x) => x.isBest)) song.versions[0].isBest = true;
-      song.updatedAt = nowStamp();
-      saveState();
-      toast("Deleted 🗑️");
-      renderSongDetail(song.id);
-    })
-  );
-
-    // If local audio exists, hydrate the <audio> element
-    (async () => {
-      const audioEl = document.getElementById("versionAudio");
-      if (!audioEl) return;
-
-      if (v.link) {
-        audioEl.src = v.link;
-        return;
-      }
-
-      if (v.localAudioId) {
-        const url = await getLocalObjectUrl(v.localAudioId);
-        if (!url) return;
-        audioEl.src = url;
-      }
-    })();
-}
 
 // ---------------------
 // Player
@@ -2847,41 +2849,15 @@ function preventRubberBandScroll(container) {
   );
 }
 
-function runSplash() {
-  const splash = document.getElementById("splash");
-  if (!splash) return;
-
-  document.body.classList.add("is-splashing");
-
-  setTimeout(() => {
-    splash.classList.add("is-stage-2");
-    document.body.classList.remove("is-splashing");
-  }, 550);
-
-  setTimeout(() => splash.classList.add("is-hidden"), 1450);
-  setTimeout(() => splash.remove(), 2100);
-}
-
 // ---------------------
-// Splash logic (GLOBAL, runs once)
+// Boot (wait for splash)
 // ---------------------
-function hideSplash() {
-  const s = document.getElementById("splash");
-  if (!s) return;
-  s.classList.add("hide");
-  setTimeout(() => s.remove(), 350);
-}
+window.addEventListener("DOMContentLoaded", async () => {
+  await runSplashSequence();
 
-window.addEventListener("load", () => {
-  const MIN_SPLASH_TIME = 2600; // longer loading feel
-  setTimeout(hideSplash, MIN_SPLASH_TIME);
+  setHeader("RiffBank");
+  syncTabs();
+  render();
+  preventRubberBandScroll(view);
+  syncMiniPlayerUI();
 });
-
-// ---------------------
-// Boot
-// ---------------------
-setHeader("RiffBank");
-syncTabs();
-render();
-preventRubberBandScroll(view);
-syncMiniPlayerUI();
