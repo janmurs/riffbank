@@ -1,4 +1,4 @@
-// RiffBank V1 (Local-only PWA)
+// RiffBank v1.2 (Local-only PWA)
 // - Song creation + editing
 // - Upload Helper (suggested filename + Drive path)
 // - Version history + Best flag
@@ -84,6 +84,7 @@ function loadState() {
       defaultSprint: "Unsorted",
     },
     songs: [],
+    quickLog: [],
   };
 }
 
@@ -92,6 +93,7 @@ let state = loadState();
 function normalizeState() {
   state.settings = state.settings || {};
   state.songs = Array.isArray(state.songs) ? state.songs : [];
+  state.quickLog = Array.isArray(state.quickLog) ? state.quickLog : [];
   state.songs.forEach((song) => {
     song.versions = Array.isArray(song.versions) ? song.versions : [];
     song.versions.forEach((v) => {
@@ -331,6 +333,7 @@ $("#importFile")?.addEventListener("change", async (e) => {
     if (!confirm("Import will replace your current data on this device. Continue?"))
       return;
     state = incoming;
+    normalizeState();
     saveState();
     toast("Imported ✅");
     render();
@@ -1406,9 +1409,10 @@ function renderVersionsList(song) {
 }
 
 // ----------------------
-// Player (best-only)
+// Player (active versions)
 // ----------------------
 function renderPlayer() {
+  setHeader("Player");
   const activeVersions = state.songs
     .flatMap((song) => (song.versions || []).map((v) => ({ song, v })))
     .filter(({ v }) => v.link && v.isActive === true);
@@ -1500,6 +1504,7 @@ function renderDashboard() {
 // Settings
 // ----------------------
 function renderSettings() {
+  setHeader("Settings");
   view.innerHTML = `
     <div class="card">
       <h2>Settings</h2>
@@ -1561,6 +1566,7 @@ function renderSettings() {
     if (!confirm("Wipe all local RiffBank data on this browser?")) return;
     localStorage.removeItem(LS_KEY);
     state = loadState();
+    normalizeState();
     toast("Wiped 🧼");
     render();
   });
