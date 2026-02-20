@@ -23,6 +23,30 @@
   <link rel="stylesheet" href="./styles.css" />
 </head>
 
+<!-- Global audio element (do not place inside #view) -->
+<audio id="globalAudio" playsinline preload="metadata"></audio>
+
+<!-- Mini player bar -->
+<div id="miniPlayer" class="miniPlayer hidden" aria-hidden="true">
+  <div class="miniArt" id="miniArt" aria-hidden="true"></div>
+
+  <div class="miniLeft">
+    <div class="miniTitle" id="miniTitle">Nothing playing</div>
+    <div class="miniSubRow">
+      <div class="miniSub" id="miniSub">—</div>
+      <div class="miniBadge" id="miniQueueBadge" style="display:none;">0</div>
+    </div>
+
+    <input id="miniScrub" class="miniScrub" type="range" min="0" max="1000" value="0" />
+  </div>
+
+  <div class="miniRight">
+    <button class="miniBtn" id="miniPrev" aria-label="Previous">⏮</button>
+    <button class="miniBtn miniPlay" id="miniToggle" aria-label="Play/Pause">▶</button>
+    <button class="miniBtn" id="miniNext" aria-label="Next">⏭</button>
+  </div>
+</div>
+
 <body>
   <!-- Splash -->
   <div id="splash" class="splash" aria-hidden="false">
@@ -123,6 +147,7 @@
   <div style="display:none">
     <button id="exportBtn"></button>
     <input id="importFile" type="file" accept="application/json" />
+    <input id="audioFilePicker" type="file" accept="audio/*" style="display:none" />
   </div>
 
   <script src="./app.js"></script>

@@ -13,6 +13,66 @@ const view = $("#view");
 const headerTitle = $("#headerTitle");
 const toastEl = $("#toast");
 
+// ---------------------
+// Audio storage (IndexedDB) - Phase 1
+// ---------------------
+const AUDIO_DB = "riffbank_audio_v1";
+const AUDIO_STORE = "files";
+const audioUrlCache = new Map(); // localAudioId -> objectURL
+
+function openAudioDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(AUDIO_DB, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(AUDIO_STORE)) {
+        db.createObjectStore(AUDIO_STORE, { keyPath: "id" });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function putAudioBlob({ id, blob, name, type, size }) {
+  const db = await openAudioDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(AUDIO_STORE, "readwrite");
+    tx.objectStore(AUDIO_STORE).put({
+      id,
+      blob,
+      name,
+      type,
+      size,
+      savedAt: nowStamp(),
+    });
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function getAudioBlob(id) {
+  const db = await openAudioDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(AUDIO_STORE, "readonly");
+    const req = tx.objectStore(AUDIO_STORE).get(id);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function getLocalObjectUrl(localAudioId) {
+  if (!localAudioId) return "";
+  if (audioUrlCache.has(localAudioId)) return audioUrlCache.get(localAudioId);
+
+  const rec = await getAudioBlob(localAudioId);
+  if (!rec?.blob) return "";
+
+  const url = URL.createObjectURL(rec.blob);
+  audioUrlCache.set(localAudioId, url);
+  return url;
+}
+
 function isHomeRoot() {
   return (
     currentTab === "home" &&
@@ -27,6 +87,127 @@ function toast(msg) {
   toastEl.textContent = msg;
   toastEl.classList.add("show");
   setTimeout(() => toastEl.classList.remove("show"), 1400);
+}
+
+// ---------------------
+// Global audio + mini player
+// ---------------------
+const globalAudio = document.getElementById("globalAudio");
+
+const miniPlayerEl = document.getElementById("miniPlayer");
+const miniTitleEl = document.getElementById("miniTitle");
+const miniSubEl = document.getElementById("miniSub");
+const miniToggleEl = document.getElementById("miniToggle");
+const miniNextEl = document.getElementById("miniNext");
+const miniPrevEl = document.getElementById("miniPrev");
+
+function isPlayable(v){
+  return !!(v?.link || v?.fileId || v?.localAudioId);
+}
+
+async function syncMiniPlayerUI(){
+  if (!miniPlayerEl) return;
+
+  document.body.classList.toggle("hasMiniPlayer", !miniPlayerEl.classList.contains("hidden"));
+
+  const now = state.player?.nowPlaying;
+  if (!now) {
+    miniPlayerEl.classList.add("hidden");
+    miniPlayerEl.setAttribute("aria-hidden", "true");
+    return;
+  }
+
+  const song = getSong(now.songId);
+  const v = song ? getVersion(song, now.versionId) : null;
+
+  if (!song || !v || !isPlayable(v)) {
+    miniPlayerEl.classList.add("hidden");
+    miniPlayerEl.setAttribute("aria-hidden", "true");
+    return;
+  }
+
+  // show bar with animation
+miniPlayerEl.classList.remove("hidden");
+requestAnimationFrame(() => miniPlayerEl.classList.add("visible"));
+
+const art = document.getElementById("miniArt");
+if (art) art.innerHTML = coverSvg(song);
+
+// queue badge
+const qb = document.getElementById("miniQueueBadge");
+const qCount = (state.player?.queue || []).length;
+if (qb){
+  qb.style.display = qCount ? "inline-flex" : "none";
+  qb.textContent = String(qCount);
+}
+
+  miniToggleEl.textContent = globalAudio?.paused ? "▶" : "⏸";
+  document.body.classList.add("hasMiniPlayer");
+
+  miniPlayerEl.classList.remove("visible");
+  miniPlayerEl.classList.add("hidden");
+  document.body.classList.remove("hasMiniPlayer");
+
+  miniPlayerEl.classList.remove("hidden");
+  miniPlayerEl.setAttribute("aria-hidden", "false");
+
+  miniTitleEl.textContent = song.title || "Untitled";
+  miniSubEl.textContent = v.label || "Version";
+
+  // button icon
+  miniToggleEl.textContent = globalAudio?.paused ? "▶" : "⏸";
+}
+
+const miniScrubEl = document.getElementById("miniScrub");
+
+function syncMiniScrub(){
+  if (!miniScrubEl || !globalAudio) return;
+  if (Number.isFinite(globalAudio.duration) && globalAudio.duration > 0) {
+    miniScrubEl.value = String(Math.floor((globalAudio.currentTime / globalAudio.duration) * 1000));
+  } else {
+    miniScrubEl.value = "0";
+  }
+}
+
+globalAudio?.addEventListener("timeupdate", syncMiniScrub);
+globalAudio?.addEventListener("loadedmetadata", syncMiniScrub);
+
+miniScrubEl?.addEventListener("input", (e) => {
+  if (!globalAudio) return;
+  const val = Number(e.target.value || 0) / 1000;
+  if (Number.isFinite(globalAudio.duration) && globalAudio.duration > 0) {
+    globalAudio.currentTime = val * globalAudio.duration;
+  }
+});
+
+async function playNowPlaying({ autoplay = true } = {}){
+  const now = state.player?.nowPlaying;
+  if (!now || !globalAudio) return;
+
+  const url = await getPlayableUrlForVersion(now.songId, now.versionId);
+  if (!url) return toast("No playable audio 😅");
+
+  // Ensure only ONE audio plays in the whole app
+document.querySelectorAll("audio").forEach(a => {
+  if (a !== globalAudio) {
+    try { a.pause(); } catch {}
+    try { a.removeAttribute("src"); a.load(); } catch {}
+  }
+});
+
+  // If already playing this exact src, don't reset time
+  if (globalAudio.src !== url) globalAudio.src = url;
+
+  if (autoplay) {
+    try {
+      await globalAudio.play(); // must be called from a user gesture on iOS
+    } catch (e) {
+      console.warn(e);
+      toast("Tap Play to start audio (iOS rule) 😅");
+    }
+  }
+
+  await syncMiniPlayerUI();
 }
 
 function nowStamp(d = new Date()) {
@@ -103,6 +284,14 @@ function normalizeState() {
     song.versions = Array.isArray(song.versions) ? song.versions : [];
     song.versions.forEach((v) => {
       if (typeof v.isActive !== "boolean") v.isActive = false;
+            // Local file support
+      if (v.fileId === undefined) v.fileId = null;
+      if (v.fileName === undefined) v.fileName = "";
+      if (v.fileType === undefined) v.fileType = "";
+      if (v.fileSize === undefined) v.fileSize = 0;
+
+      if (v.localAudioId === undefined) v.localAudioId = null;
+      if (v.originalFileName === undefined) v.originalFileName = "";
     });
         // ✅ new: featured version pointer
     if (song.featuredVersionId === undefined) song.featuredVersionId = null;
@@ -117,6 +306,106 @@ normalizeState();
 
 function saveState() {
   localStorage.setItem(LS_KEY, JSON.stringify(state));
+}
+
+// ---------------------
+// Local audio store (IndexedDB) — iPhone-friendly
+// ---------------------
+
+function openAudioDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(AUDIO_DB, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(AUDIO_STORE)) {
+        db.createObjectStore(AUDIO_STORE, { keyPath: "id" });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function audioPut(fileRecord) {
+  const db = await openAudioDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(AUDIO_STORE, "readwrite");
+    tx.objectStore(AUDIO_STORE).put(fileRecord);
+    tx.oncomplete = () => { db.close(); resolve(true); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+  });
+}
+
+async function audioGet(id) {
+  const db = await openAudioDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(AUDIO_STORE, "readonly");
+    const req = tx.objectStore(AUDIO_STORE).get(id);
+    req.onsuccess = () => { db.close(); resolve(req.result || null); };
+    req.onerror = () => { db.close(); reject(req.error); };
+  });
+}
+
+async function audioDelete(id) {
+  const db = await openAudioDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(AUDIO_STORE, "readwrite");
+    tx.objectStore(AUDIO_STORE).delete(id);
+    tx.oncomplete = () => { db.close(); resolve(true); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+  });
+}
+
+// Pick audio from iOS Files picker
+function pickAudioFile() {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+
+    // iOS/Safari sometimes mislabels audio MIME types, so don't over-filter
+    input.accept = ""; // allow all
+
+    input.onchange = () => {
+      const f = input.files?.[0] || null;
+      if (!f) return resolve(null);
+
+      const name = (f.name || "").toLowerCase();
+      const okExt = /\.(wav|mp3|m4a|aac|aiff|flac|ogg|caf)$/i.test(name);
+      const okMime = (f.type || "").startsWith("audio/");
+
+      if (!okExt && !okMime) {
+        toast("That doesn’t look like an audio file 😅");
+        return resolve(null);
+      }
+
+      resolve(f);
+    };
+
+    input.click();
+  });
+}
+
+// Turn a version into a playable URL (blob or link)
+async function getPlayableUrlForVersion(songId, versionId) {
+  const song = getSong(songId);
+  const v = getVersion(song, versionId);
+  if (!song || !v) return null;
+
+  // Local file (fileId) beats link
+  if (v.fileId) {
+    const rec = await audioGet(v.fileId);
+    if (!rec?.blob) return null;
+    return URL.createObjectURL(rec.blob);
+  }
+
+  // Local file (localAudioId) fallback
+  if (v.localAudioId) {
+    const url = await getLocalObjectUrl(v.localAudioId);
+    if (url) return url;
+  }
+
+  if (v.link) return v.link;
+  return null;
 }
 
 // PWA SW register
@@ -196,6 +485,35 @@ function getVersion(song, versionId){
   return (song?.versions || []).find(v => v.id === versionId) || null;
 }
 
+function createVersion(song, { makeBest = true } = {}) {
+  if (!song) return null;
+
+  const vNum = (song.versions?.length || 0) + 1;
+
+  const v = {
+    id: uid(),
+    label: `${song.title || "Song"} - v${vNum}`,
+    notes: "",
+    link: "",
+    isBest: false,
+    isActive: true,
+    createdAt: nowStamp(),
+  };
+
+  song.versions = Array.isArray(song.versions) ? song.versions : [];
+  song.versions.unshift(v);
+
+  // First version defaults
+  if (makeBest) {
+    song.versions.forEach(x => x.isBest = (x.id === v.id));
+  }
+  song.featuredVersionId = v.id;
+  song.updatedAt = nowStamp();
+
+  saveState();
+  return v;
+}
+
 function featuredVersion(song){
   if (!song) return null;
 
@@ -220,11 +538,15 @@ function featuredVersion(song){
 function playVersion(songId, versionId, { goPlayer = true } = {}) {
   const song = getSong(songId);
   const v = getVersion(song, versionId);
-  if (!song || !v || !v.link) return toast("No playable link for that version 😅");
+  if (!song || !v || (!v.link && !v.fileId && !v.localAudioId))
+    return toast("No playable audio for that version 😅");
 
   state.player.nowPlaying = { songId, versionId };
   saveState();
   toast("Playing ▶️");
+
+  // start audio immediately (user gesture-safe)
+  playNowPlaying({ autoplay: true });
 
   if (goPlayer) {
     drawerView = null;
@@ -235,13 +557,17 @@ function playVersion(songId, versionId, { goPlayer = true } = {}) {
     setHeader("Player");
     syncTabs();
     render();
+  } else {
+    // even if we don’t go to player, show the mini bar
+    syncMiniPlayerUI();
   }
 }
 
 function addToQueue(songId, versionId) {
   const song = getSong(songId);
   const v = getVersion(song, versionId);
-  if (!song || !v || !v.link) return toast("No playable link for that version 😅");
+  if (!song || !v || (!v.link && !v.fileId && !v.localAudioId))
+  return toast("No playable audio for that version 😅");
 
   state.player.queue.push({ songId, versionId });
   saveState();
@@ -276,20 +602,36 @@ function suggestedFileName(song, originalFileName, makeBest) {
   return `${title} - v${vNum} - ${stamp}${bestTag}.${ext}`;
 }
 
-function copyText(txt) {
+async function copyText(txt) {
   if (!txt) return;
-  navigator.clipboard?.writeText(txt).then(
-    () => toast("Copied 📋"),
-    () => {
-      const ta = document.createElement("textarea");
-      ta.value = txt;
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      ta.remove();
+
+  try {
+    // Preferred modern path
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(txt);
       toast("Copied 📋");
+      return;
     }
-  );
+  } catch {
+    // fall through to legacy
+  }
+
+  // Legacy fallback (works in more edge cases)
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = txt;
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    ta.style.top = "-9999px";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+    toast("Copied 📋");
+  } catch {
+    toast("Couldn’t copy 😅");
+  }
 }
 
 function badgeForStatus(status) {
@@ -346,6 +688,48 @@ headerTitle?.addEventListener("click", () => {
   syncTabs();
   setHeader("RiffBank");
   render();
+});
+
+// ---------------------
+// Hidden audio picker wiring
+// ---------------------
+const audioPickerEl = document.getElementById("audioFilePicker");
+let audioPickerCtx = null; // { songId, versionId }
+
+audioPickerEl?.addEventListener("change", async (e) => {
+  const file = e.target.files?.[0];
+  if (!file || !audioPickerCtx) return;
+
+  try {
+    const { songId, versionId } = audioPickerCtx;
+    const song = getSong(songId);
+    const v = getVersion(song, versionId);
+    if (!song || !v) return toast("Couldn’t find that version 😅");
+
+    const id = uid();
+    await putAudioBlob({
+      id,
+      blob: file,
+      name: file.name,
+      type: file.type,
+      size: file.size,
+    });
+
+    v.localAudioId = id;
+    v.originalFileName = file.name || "";
+    song.updatedAt = nowStamp();
+    saveState();
+
+    toast("Imported ✅");
+    render(); // refresh UI
+  } catch (err) {
+    console.error(err);
+    toast("Import failed 😭");
+  } finally {
+    // reset so picking the same file twice still triggers change
+    e.target.value = "";
+    audioPickerCtx = null;
+  }
 });
 
 // ---------------------
@@ -524,6 +908,60 @@ document.addEventListener("touchend", () => {
   touchTracking = false;
   touchMode = null;
 }, { passive: true });
+
+miniToggleEl?.addEventListener("click", async (e) => {
+  e.stopPropagation();
+  if (!globalAudio) return;
+
+  if (globalAudio.paused) {
+    await playNowPlaying({ autoplay: true });
+  } else {
+    globalAudio.pause();
+    syncMiniPlayerUI();
+  }
+});
+
+miniNextEl?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  const q = state.player?.queue || [];
+  if (!q.length) return toast("Queue empty 😅");
+  state.player.nowPlaying = q.shift();
+  saveState();
+  playNowPlaying({ autoplay: true });
+});
+
+miniPrevEl?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  // simple behavior: restart track
+  if (!globalAudio) return;
+  globalAudio.currentTime = 0;
+});
+
+miniPlayerEl?.addEventListener("click", () => {
+  // tap bar opens full player view
+  currentTab = "player";
+  drawerView = null;
+  overlayView = null;
+  selectedSongId = null;
+  selectedVersionId = null;
+  setHeader("Player");
+  syncTabs();
+  render();
+});
+
+globalAudio?.addEventListener("play", syncMiniPlayerUI);
+globalAudio?.addEventListener("pause", syncMiniPlayerUI);
+globalAudio?.addEventListener("ended", () => {
+  // auto-next if queue exists
+  const q = state.player?.queue || [];
+  if (q.length) {
+    state.player.nowPlaying = q.shift();
+    saveState();
+    playNowPlaying({ autoplay: true });
+  } else {
+    syncMiniPlayerUI();
+  }
+});
 
 // ---------------------
 // Bottom sheet (GLOBAL)
@@ -841,8 +1279,8 @@ function renderSheet() {
       closeSheet();
     });
 
-    $("#vmCopy")?.addEventListener("click", () => {
-      copyText(v.label || "");
+    $("#vmCopy")?.addEventListener("click", async () => {
+      await copyText(v.label || "");
       closeSheet();
     });
 
@@ -908,31 +1346,40 @@ sheet?.addEventListener("touchend", (e) => {
 // ---------------------
 // Export / Import
 // ---------------------
-$("#exportBtn")?.addEventListener("click", () => {
-  const payload = JSON.stringify(state, null, 2);
-  const blob = new Blob([payload], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `riffbank-backup-${nowStamp().replace(" ", "_")}.json`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-  toast("Exported ✅");
+$("#exportBtn")?.addEventListener("click", async () => {
+  try {
+    const payload = JSON.stringify(state, null, 2);
+    const blob = new Blob([payload], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `riffbank-backup-${nowStamp().replace(" ", "_")}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast("Exported ✅");
+  } catch {
+    toast("Export failed 😅");
+  }
 });
 
 $("#importFile")?.addEventListener("change", async (e) => {
-  const file = e.target.files?.[0];
+  const input = e.target;
+  const file = input?.files?.[0];
   if (!file) return;
-  const txt = await file.text();
+
   try {
+    const txt = await file.text();
     const incoming = JSON.parse(txt);
+
     if (!incoming || !incoming.songs || !incoming.settings) {
       alert("That file doesn't look like a RiffBank backup.");
       return;
     }
+
     if (!confirm("Import will replace your current data on this device. Continue?")) return;
+
     state = incoming;
     normalizeState();
     saveState();
@@ -941,7 +1388,7 @@ $("#importFile")?.addEventListener("change", async (e) => {
   } catch {
     alert("Could not parse that JSON file.");
   } finally {
-    e.target.value = "";
+    if (input) input.value = "";
   }
 });
 
@@ -1756,10 +2203,10 @@ function renderSongDetail(id) {
         <div class="songFeaturedSub">${featuredSub}</div>
 
         <div class="songHeroActions">
-          <button class="songHeroPlay" id="songBigPlay" ${fv?.link ? "" : "disabled"}>
+          <button class="songHeroPlay" id="songBigPlay" ${(fv?.link || fv?.fileId || fv?.localAudioId) ? "" : "disabled"}>
             ▶ Play
           </button>
-          <button class="songHeroQueue" id="songBigQueue" ${fv?.link ? "" : "disabled"}>
+          <button class="songHeroQueue" id="songBigQueue" ${(fv?.link || fv?.fileId || fv?.localAudioId) ? "" : "disabled"}>
             + Queue
           </button>
           <button class="songHeroDetails" id="songDetailsBtn">
@@ -1782,12 +2229,12 @@ function renderSongDetail(id) {
   $("#songHeroBack")?.addEventListener("click", () => goBack({ animate: true }));
 
   $("#songBigPlay")?.addEventListener("click", () => {
-    if (!fv?.link) return toast("No playable link yet 😅");
+    if (!(fv?.link || fv?.fileId || fv?.localAudioId)) return toast("No playable audio yet 😅");
     playVersion(song.id, fv.id, { goPlayer: true });
   });
 
   $("#songBigQueue")?.addEventListener("click", () => {
-    if (!fv?.link) return toast("No playable link yet 😅");
+    if (!(fv?.link || fv?.fileId || fv?.localAudioId)) return toast("No playable audio yet 😅");
     addToQueue(song.id, fv.id);
   });
 
@@ -1795,19 +2242,27 @@ function renderSongDetail(id) {
   // We’ll implement it as: details = version detail of the featured? or a new view later.
   // For today: send you to the existing song form by reusing your old renderSongDetail UI? (we replaced it)
   // So: we’ll open the featured version detail as “Details” as a first step.
-  $("#songDetailsBtn")?.addEventListener("click", () => {
-    // Open featured version detail if exists, otherwise toast
-    if (!fv) return toast("Add a version first 🎧");
-    selectedVersionId = fv.id;
+$("#songDetailsBtn")?.addEventListener("click", () => {
+  // If no versions yet, create the first one and open it
+  if (!fv) {
+    const first = createVersion(song, { makeBest: true });
+    if (!first) return toast("Couldn’t create version 😅");
+    selectedVersionId = first.id;
     render();
-  });
+    return;
+  }
 
-  // “Add version” jump: scroll to version detail upload helper (we’ll put it on the version detail screen)
-  $("#addVersionJump")?.addEventListener("click", () => {
-    if (!fv) return toast("Tap Details, then add your first version 🎧");
-    selectedVersionId = fv.id;
-    render();
-  });
+  selectedVersionId = fv.id;
+  render();
+});
+
+$("#addVersionJump")?.addEventListener("click", () => {
+  // Always create a brand new version (even if versions already exist)
+  const newV = createVersion(song, { makeBest: false });
+  if (!newV) return toast("Couldn’t create version 😅");
+  selectedVersionId = newV.id;
+  render();
+});
 
   // Render version rows
   const rowsEl = $("#versionsRows");
@@ -1855,11 +2310,11 @@ function renderSongDetail(id) {
   });
 }
 
-function renderVersionDetail(songId, versionId){
+function renderVersionDetail(songId, versionId) {
   const song = getSong(songId);
   const v = getVersion(song, versionId);
 
-  if (!song || !v){
+  if (!song || !v) {
     selectedVersionId = null;
     return renderSongDetail(songId);
   }
@@ -1867,6 +2322,7 @@ function renderVersionDetail(songId, versionId){
   setHeader("Version");
 
   const isFeatured = song.featuredVersionId === v.id;
+  const hasPlayable = !!(v.link || v.fileId);
 
   view.innerHTML = `
     <div class="card">
@@ -1878,10 +2334,10 @@ function renderVersionDetail(songId, versionId){
 
       <div class="hr"></div>
 
-      <div class="row" style="gap:10px; align-items:center">
-        <div class="badge ${isFeatured ? "warn" : ""}">${isFeatured ? "⭐ Featured" : "—"}</div>
-        <div class="badge ${v.isBest ? "good" : ""}">${v.isBest ? "⭐ Best" : "—"}</div>
-        <div class="badge ${v.isActive ? "good" : ""}">${v.isActive ? "🎧 Active" : "—"}</div>
+      <div class="row" style="gap:10px; align-items:center; flex-wrap:wrap">
+        <div class="badge ${isFeatured ? "warn" : ""}">${isFeatured ? "⭐ Featured" : "Featured —"}</div>
+        <div class="badge ${v.isBest ? "good" : ""}">${v.isBest ? "⭐ Best" : "Best —"}</div>
+        <div class="badge ${v.isActive ? "good" : ""}">${v.isActive ? "🎧 Active" : "Active —"}</div>
       </div>
 
       <div class="hr"></div>
@@ -1892,13 +2348,25 @@ function renderVersionDetail(songId, versionId){
       <div class="label" style="margin-top:10px">Notes</div>
       <input id="vNotesEdit" type="text" value="${escapeHtml(v.notes || "")}" />
 
-      <div class="label" style="margin-top:10px">Link (audio URL / Drive)</div>
+      <div class="label" style="margin-top:10px">Link (URL)</div>
       <input id="vLink" type="text" value="${escapeHtml(v.link || "")}" placeholder="Paste direct audio URL" />
 
-      <div class="row" style="margin-top:12px; gap:10px">
+      <div class="row" style="margin-top:10px; gap:10px; flex-wrap:wrap">
+        <button class="btn" id="importAudioBtn">Import audio (Files) 📁</button>
+        <button class="btn" id="clearLocalBtn" ${v.fileId ? "" : "disabled"}>Remove local file</button>
+      </div>
+
+      ${v.fileId ? `
+        <div class="small" style="margin-top:8px">
+          Local: <b>${escapeHtml(v.fileName || "audio file")}</b>
+          ${v.fileSize ? ` • ${(v.fileSize/1024/1024).toFixed(1)} MB` : ""}
+        </div>
+      ` : `<div class="small" style="margin-top:8px">No local file attached.</div>`}
+
+      <div class="row" style="margin-top:12px; gap:10px; flex-wrap:wrap">
         <button class="btn primary" id="saveVersion">Save</button>
-        <button class="btn" id="playThis" ${v.link ? "" : "disabled"}>Play</button>
-        <button class="btn" id="queueThis" ${v.link ? "" : "disabled"}>Queue</button>
+        <button class="btn" id="playThis" ${hasPlayable ? "" : "disabled"}>Play</button>
+        <button class="btn" id="queueThis" ${hasPlayable ? "" : "disabled"}>Queue</button>
       </div>
 
       <div class="row" style="margin-top:10px; gap:10px; flex-wrap:wrap">
@@ -1909,16 +2377,18 @@ function renderVersionDetail(songId, versionId){
         <button class="btn" id="deleteVersionBtn">Delete</button>
       </div>
 
-      ${v.link ? `
+      ${hasPlayable ? `
         <div class="hr"></div>
         <div class="small">Preview</div>
-        <audio controls style="width:100%; margin-top:10px" src="${escapeHtml(v.link)}"></audio>
+        <audio id="versionAudio" controls style="width:100%; margin-top:10px"></audio>
       ` : ""}
     </div>
   `;
 
+  // Back
   $("#backToSong")?.addEventListener("click", () => goBack({ animate: true }));
 
+  // Save
   $("#saveVersion")?.addEventListener("click", () => {
     v.label = ($("#vLabel")?.value || "").trim();
     v.notes = ($("#vNotesEdit")?.value || "").trim();
@@ -1930,9 +2400,59 @@ function renderVersionDetail(songId, versionId){
     renderVersionDetail(songId, versionId);
   });
 
+  // Import audio (local file)
+  $("#importAudioBtn")?.addEventListener("click", async () => {
+    try {
+      const file = await pickAudioFile();
+      if (!file) return;
+
+      const fileId = uid();
+      await audioPut({
+        id: fileId,
+        name: file.name || "audio",
+        type: file.type || "audio/*",
+        size: file.size || 0,
+        blob: file,
+        createdAt: nowStamp(),
+      });
+
+      v.fileId = fileId;
+      v.fileName = file.name || "audio";
+      v.fileType = file.type || "audio/*";
+      v.fileSize = file.size || 0;
+
+      song.updatedAt = nowStamp();
+      saveState();
+      toast("Imported ✅");
+      renderVersionDetail(songId, versionId);
+    } catch (err) {
+      console.error(err);
+      toast("Import failed 😅");
+    }
+  });
+
+  // Remove local file
+  $("#clearLocalBtn")?.addEventListener("click", async () => {
+    if (!v.fileId) return;
+    if (!confirm("Remove local audio from this device?")) return;
+    try { await audioDelete(v.fileId); } catch {}
+
+    v.fileId = null;
+    v.fileName = "";
+    v.fileType = "";
+    v.fileSize = 0;
+
+    song.updatedAt = nowStamp();
+    saveState();
+    toast("Removed 🧼");
+    renderVersionDetail(songId, versionId);
+  });
+
+  // Play / Queue
   $("#playThis")?.addEventListener("click", () => playVersion(songId, versionId, { goPlayer: true }));
   $("#queueThis")?.addEventListener("click", () => addToQueue(songId, versionId));
 
+  // Featured / Active / Best
   $("#setFeaturedBtn")?.addEventListener("click", () => {
     setFeatured(songId, versionId);
     renderVersionDetail(songId, versionId);
@@ -1954,12 +2474,15 @@ function renderVersionDetail(songId, versionId){
     renderVersionDetail(songId, versionId);
   });
 
+  // Open link
   $("#openLinkBtn")?.addEventListener("click", () => {
     if (v.link) window.open(v.link, "_blank");
   });
 
+  // Delete
   $("#deleteVersionBtn")?.addEventListener("click", () => {
     if (!confirm("Delete this version?")) return;
+
     song.versions = (song.versions || []).filter(x => x.id !== versionId);
 
     if (song.featuredVersionId === versionId) song.featuredVersionId = null;
@@ -1968,9 +2491,18 @@ function renderVersionDetail(songId, versionId){
     song.updatedAt = nowStamp();
     saveState();
     toast("Deleted 🗑️");
+
     selectedVersionId = null;
     renderSongDetail(songId);
   });
+
+  // Preview hydrate
+  (async () => {
+    const audioEl = document.getElementById("versionAudio");
+    if (!audioEl) return;
+    const url = await getPlayableUrlForVersion(songId, versionId);
+    if (url) audioEl.src = url;
+  })();
 }
 
 function renderVersionsList(song) {
@@ -2028,10 +2560,10 @@ function renderVersionsList(song) {
   );
 
   listEl.querySelectorAll("[data-copy]").forEach((b) =>
-    b.addEventListener("click", () => {
+    b.addEventListener("click", async () => {
       const id = b.getAttribute("data-copy");
       const v = song.versions.find((x) => x.id === id);
-      if (v) copyText(v.label);
+      if (v) await copyText(v.label);
     })
   );
 
@@ -2057,6 +2589,23 @@ function renderVersionsList(song) {
       renderSongDetail(song.id);
     })
   );
+
+    // If local audio exists, hydrate the <audio> element
+    (async () => {
+      const audioEl = document.getElementById("versionAudio");
+      if (!audioEl) return;
+
+      if (v.link) {
+        audioEl.src = v.link;
+        return;
+      }
+
+      if (v.localAudioId) {
+        const url = await getLocalObjectUrl(v.localAudioId);
+        if (!url) return;
+        audioEl.src = url;
+      }
+    })();
 }
 
 // ---------------------
@@ -2075,14 +2624,20 @@ function renderPlayer() {
     <div class="card">
       <h2>Now playing</h2>
       ${
-        nowSong && nowV && nowV.link
+        nowSong && nowV && (nowV.link || nowV.fileId || nowV.localAudioId)
           ? `
             <div class="small"><b>${escapeHtml(nowSong.title)}</b> • ${escapeHtml(nowV.label || "Version")}</div>
-            <audio controls autoplay style="width:100%; margin-top:10px" src="${escapeHtml(nowV.link)}"></audio>
-            <div class="row" style="margin-top:10px; gap:10px">
-              <button class="btn" id="openNowSong">Open song</button>
+
+            <div class="row" style="margin-top:10px; gap:10px; flex-wrap:wrap">
+              <button class="btn" id="playerToggle">Play/Pause</button>
               <button class="btn" id="nextFromQueue" ${queue.length ? "" : "disabled"}>Next ▶</button>
               <button class="btn" id="clearQueue">Clear queue</button>
+            </div>
+
+            <div class="row" style="margin-top:10px; gap:10px; align-items:center">
+              <span class="small" id="playerTime">0:00</span>
+              <input id="playerScrub" type="range" min="0" max="1000" value="0" style="flex:1" />
+              <span class="small" id="playerDur">0:00</span>
             </div>
           `
           : `<div class="small">Nothing playing yet. Play a version from a song.</div>`
@@ -2091,33 +2646,50 @@ function renderPlayer() {
 
     <div class="card">
       <h2>Queue</h2>
-      ${
-        queue.length
-          ? `<div class="list" id="queueList">
-              ${queue.map((q, idx) => {
-                const s = getSong(q.songId);
-                const v = s ? getVersion(s, q.versionId) : null;
-                return `
-                  <div class="item" data-qidx="${idx}" style="cursor:default">
-                    <div class="row" style="justify-content:space-between; align-items:center">
-                      <div>
-                        <div class="title"><b>${escapeHtml(s?.title || "—")}</b></div>
-                        <div class="meta">${escapeHtml(v?.label || "Version")}</div>
-                      </div>
-                      <div class="row" style="gap:8px">
-                        <button class="btn" data-qplay="${idx}">Play</button>
-                        <button class="btn" data-qrm="${idx}">Remove</button>
-                      </div>
-                    </div>
-                  </div>
-                `;
-              }).join("")}
-            </div>`
-          : `<div class="small">Queue is empty.</div>`
-      }
+      ...
     </div>
   `;
 
+$("#playerToggle")?.addEventListener("click", async () => {
+  if (!globalAudio) return;
+  if (globalAudio.paused) await playNowPlaying({ autoplay: true });
+  else globalAudio.pause();
+});
+
+function fmtTime(sec){
+  sec = Math.max(0, Math.floor(sec || 0));
+  const m = Math.floor(sec/60);
+  const s = String(sec%60).padStart(2,"0");
+  return `${m}:${s}`;
+}
+
+function syncPlayerScrub(){
+  const t = $("#playerTime");
+  const d = $("#playerDur");
+  const r = $("#playerScrub");
+  if (!t || !d || !r || !globalAudio) return;
+
+  t.textContent = fmtTime(globalAudio.currentTime);
+  d.textContent = fmtTime(globalAudio.duration);
+
+  if (Number.isFinite(globalAudio.duration) && globalAudio.duration > 0) {
+    r.value = String(Math.floor((globalAudio.currentTime / globalAudio.duration) * 1000));
+  }
+}
+
+globalAudio?.addEventListener("timeupdate", syncPlayerScrub);
+globalAudio?.addEventListener("loadedmetadata", syncPlayerScrub);
+globalAudio?.addEventListener("play", syncPlayerScrub);
+globalAudio?.addEventListener("pause", syncPlayerScrub);
+
+$("#playerScrub")?.addEventListener("input", (e) => {
+  if (!globalAudio) return;
+  const val = Number(e.target.value || 0) / 1000;
+  if (Number.isFinite(globalAudio.duration) && globalAudio.duration > 0) {
+    globalAudio.currentTime = val * globalAudio.duration;
+  }
+});
+  
   $("#openNowSong")?.addEventListener("click", () => {
     if (!nowSong) return;
     currentTab = "songs";
@@ -2297,3 +2869,4 @@ setHeader("RiffBank");
 syncTabs();
 render();
 preventRubberBandScroll(view);
+syncMiniPlayerUI();

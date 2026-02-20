@@ -5,6 +5,8 @@
   --line: rgba(255,255,255,.12);
   --text: rgba(255,255,255,.92);
   --muted: rgba(255,255,255,.62);
+  --tabbar-h: 64px; /* tweak if your bottom nav is taller */
+  --mini-gap: 10px;
 
   --rCard: 18px;
   --rPill: 999px;
@@ -1077,4 +1079,124 @@ textarea{ min-height:100px; resize:vertical; }
 .vMore:hover{
   background: rgba(255,255,255,.06);
   color: rgba(255,255,255,.92);
+}
+
+.miniPlayer{
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  /* sits ABOVE bottom nav + safe area */
+  bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + var(--mini-gap));
+  z-index: 50;
+
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+
+  padding: 10px 12px;
+  border-radius: 14px;
+
+  background: rgba(20,20,26,.92);
+  border: 1px solid rgba(255,255,255,.08);
+  backdrop-filter: blur(14px);
+
+  box-shadow: 0 10px 28px rgba(0,0,0,.35);
+}
+
+body.hasMiniPlayer #view{
+  padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 84px);
+}
+
+.miniPlayer.hidden{
+  display: none;
+}
+
+.miniLeft{
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.miniTitle{
+  font-weight: 700;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.miniSub{
+  opacity: .8;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.miniRight{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.miniBtn{
+  background: rgba(255,255,255,.06);
+  border: 1px solid rgba(255,255,255,.08);
+  color: inherit;
+  border-radius: 12px;
+  padding: 8px 10px;
+  font-size: 14px;
+}
+
+.miniPlay{
+  font-size: 16px;
+  padding: 8px 12px;
+}
+
+.miniPlayer{
+  transform: translateY(16px);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform .18s ease, opacity .18s ease;
+}
+
+.miniPlayer.visible{
+  transform: translateY(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.miniArt{
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  overflow: hidden;
+  flex: 0 0 44px;
+  border: 1px solid rgba(255,255,255,.10);
+}
+
+.miniArt svg{ width:100%; height:100%; display:block; }
+
+.miniSubRow{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  min-width:0;
+}
+
+.miniBadge{
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(255,255,255,.10);
+  border: 1px solid rgba(255,255,255,.10);
+  opacity: .9;
+  flex: 0 0 auto;
+}
+
+.miniScrub{
+  width: 100%;
+  margin-top: 6px;
 }
