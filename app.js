@@ -109,6 +109,12 @@ let currentTab = "songs";
 let selectedSongId = null;
 let songsView = "list"; // "list" | "create"
 let pendingScrollToUpload = false;
+const songsListState = {
+  sortMode: "updated",
+  query: "",
+  statusFilter: "",
+  projectFilter: "",
+};
 
 let drawerView = null;     // "projects" | "eps" | "collabs" | "importExport" | "about" | null
 let drawerOpen = false;
@@ -326,7 +332,12 @@ function render() {
 
   const uploadSongBtn = $("#uploadSongBtn");
   if (uploadSongBtn) {
-    uploadSongBtn.style.display = !drawerView && currentTab === "songs" && !selectedSongId && songsView === "list" ? "" : "none";
+    const onSongsListScreen =
+      currentTab === "songs" &&
+      !drawerView &&
+      !selectedSongId &&
+      songsView === "list";
+    uploadSongBtn.style.display = onSongsListScreen ? "none" : "";
   }
 
   // Drawer screens take precedence
@@ -615,46 +626,81 @@ function renderAbout() {
 // ----------------------
 function renderSongsList() {
   setHeader("Songs");
-  const songs = [...state.songs].sort((a, b) =>
-    (b.updatedAt || "").localeCompare(a.updatedAt || "")
-  );
+  const songs = [...state.songs];
+  const projects = Array.from(
+    new Set([
+      ...(state.settings?.defaultProject ? [state.settings.defaultProject.trim()] : []),
+      ...state.songs.map((s) => (s.project || "").trim()).filter(Boolean),
+    ])
+  ).sort((a, b) => a.localeCompare(b));
 
   view.innerHTML = `
-    <div class="card">
-      <h2>Search</h2>
-      <div class="row">
-        <div class="col">
-          <input id="q" type="text" placeholder="Search title / lyrics / notes / collaborators..." />
-        </div>
-        <div class="col">
-          <select id="statusFilter">
-            <option value="">All statuses</option>
-            ${["Idea","Demo","Arrange","Mix","Master","Ready","Done","Released"]
-              .map((s) => `<option value="${s}">${s}</option>`)
-              .join("")}
-          </select>
-        </div>
+    <div class="songsHead">
+      <div class="segTabs" role="tablist" aria-label="Sort">
+        <button class="segTab ${songsListState.sortMode === "updated" ? "active" : ""}" data-sort="updated">updated</button>
+        <button class="segTab ${songsListState.sortMode === "title" ? "active" : ""}" data-sort="title">title</button>
+        <button class="segTab ${songsListState.sortMode === "status" ? "active" : ""}" data-sort="status">status</button>
+      </div>
+
+      <div class="songsFilters">
+        <input id="q" type="text" placeholder="Search title / lyrics / notes / collaborators..." value="${escapeHtml(songsListState.query)}" />
+        <select id="statusFilter">
+          <option value="">All statuses</option>
+          ${["Idea", "Demo", "Arrange", "Mix", "Master", "Ready", "Done", "Released"]
+            .map(
+              (s) =>
+                `<option value="${s}" ${songsListState.statusFilter === s ? "selected" : ""}>${s}</option>`
+            )
+            .join("")}
+        </select>
+        <select id="projectFilter">
+          <option value="">All projects</option>
+          ${projects
+            .map(
+              (p) =>
+                `<option value="${escapeHtml(p)}" ${songsListState.projectFilter === p ? "selected" : ""}>${escapeHtml(p)}</option>`
+            )
+            .join("")}
+        </select>
       </div>
     </div>
 
-    <div class="card">
-      <h2>Your songs (${songs.length})</h2>
-      <div id="songList" class="list"></div>
-    </div>
+    <div id="songList" class="songsList"></div>
+
+    <button id="fabAddSong" class="fab" aria-label="Add song">+</button>
   `;
 
   const listEl = $("#songList");
 
   const applyFilter = () => {
-    const q = ($("#q").value || "").toLowerCase();
+    const qValue = $("#q").value || "";
+    const q = qValue.toLowerCase();
     const sf = $("#statusFilter").value;
+    const pf = $("#projectFilter").value;
 
-    const filtered = songs.filter((s) => {
+    songsListState.query = qValue;
+    songsListState.statusFilter = sf;
+    songsListState.projectFilter = pf;
+
+    const filtered = songs
+      .filter((s) => {
       const hay = `${s.title} ${s.project} ${s.genre} ${s.sprint} ${s.instrumentation} ${s.collaborators} ${s.vibes} ${s.lyrics} ${s.notes}`.toLowerCase();
       const qOk = !q || hay.includes(q);
       const sOk = !sf || s.status === sf;
-      return qOk && sOk;
-    });
+        const pOk = !pf || (s.project || "").trim() === pf;
+      return qOk && sOk && pOk;
+      })
+      .sort((a, b) => {
+        if (songsListState.sortMode === "title") {
+          return (a.title || "").localeCompare(b.title || "");
+        }
+        if (songsListState.sortMode === "status") {
+          const statusSort = (a.status || "").localeCompare(b.status || "");
+          if (statusSort !== 0) return statusSort;
+          return (b.updatedAt || "").localeCompare(a.updatedAt || "");
+        }
+        return (b.updatedAt || "").localeCompare(a.updatedAt || "");
+      });
 
     listEl.innerHTML = filtered.length
       ? filtered
@@ -668,7 +714,7 @@ function renderSongsList() {
                 : `<span class="badge">✅ Active</span>`;
 
             return `
-            <div class="item" data-id="${s.id}">
+            <div class="songRow" data-id="${s.id}">
               <div class="row" style="justify-content:space-between; align-items:center">
                 <div class="title"><b>${escapeHtml(s.title)}</b></div>
                 <div class="row" style="gap:8px; justify-content:flex-end">
@@ -679,6 +725,7 @@ function renderSongsList() {
               <div class="meta">${escapeHtml(s.project)} • ${escapeHtml(
               s.genre || "—"
             )} • Sprint: ${escapeHtml(s.sprint || "—")} • Versions: ${vCount}</div>
+              ${s.nextAction ? `<div class="meta">Next: ${escapeHtml(s.nextAction)}</div>` : ""}
             </div>
           `;
           })
@@ -694,9 +741,66 @@ function renderSongsList() {
     });
   };
 
+  view.querySelectorAll(".segTab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      songsListState.sortMode = btn.getAttribute("data-sort") || "updated";
+      view
+        .querySelectorAll(".segTab")
+        .forEach((t) => t.classList.toggle("active", t === btn));
+      applyFilter();
+    });
+  });
+
   $("#q").addEventListener("input", applyFilter);
   $("#statusFilter").addEventListener("change", applyFilter);
+  $("#projectFilter").addEventListener("change", applyFilter);
+
+  $("#fabAddSong")?.addEventListener("click", () => {
+    drawerView = null;
+    selectedSongId = null;
+    songsView = "create";
+    currentTab = "songs";
+    document
+      .querySelectorAll(".tab")
+      .forEach((b) => b.classList.toggle("active", b.dataset.tab === "songs"));
+    setHeader("Upload Song");
+    render();
+  });
+
   applyFilter();
+}
+
+function preventRubberBandScroll(container) {
+  if (!container) return;
+  let startY = 0;
+
+  container.addEventListener(
+    "touchstart",
+    (e) => {
+      if (e.touches && e.touches.length > 1) return;
+      startY = e.touches?.[0]?.clientY ?? 0;
+    },
+    { passive: true }
+  );
+
+  container.addEventListener(
+    "touchmove",
+    (e) => {
+      const tag = (e.target?.tagName || "").toLowerCase();
+      if (tag === "textarea" || tag === "input" || tag === "select") return;
+
+      const y = e.touches?.[0]?.clientY ?? 0;
+      const dy = y - startY;
+
+      const atTop = container.scrollTop <= 0;
+      const atBottom =
+        Math.ceil(container.scrollTop + container.clientHeight) >=
+        container.scrollHeight;
+
+      if ((atTop && dy > 0) || (atBottom && dy < 0)) e.preventDefault();
+    },
+    { passive: false }
+  );
 }
 
 function renderSongCreate() {
@@ -1336,3 +1440,4 @@ function renderSettings() {
 // Boot
 setHeader("Songs");
 render();
+preventRubberBandScroll(view);
