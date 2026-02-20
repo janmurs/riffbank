@@ -2847,6 +2847,21 @@ function preventRubberBandScroll(container) {
   );
 }
 
+function runSplash() {
+  const splash = document.getElementById("splash");
+  if (!splash) return;
+
+  document.body.classList.add("is-splashing");
+
+  setTimeout(() => {
+    splash.classList.add("is-stage-2");
+    document.body.classList.remove("is-splashing");
+  }, 550);
+
+  setTimeout(() => splash.classList.add("is-hidden"), 1450);
+  setTimeout(() => splash.remove(), 2100);
+}
+
 // ---------------------
 // Splash logic (GLOBAL, runs once)
 // ---------------------
