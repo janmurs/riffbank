@@ -80,7 +80,7 @@ body{
   letter-spacing:-.6px;
 }
 
-.top-actions{display:flex; gap:10px; align-items:center}
+.top-actions{display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end; max-width:50%}
 
 .view{flex:1; padding: 8px 0 92px;}
 
@@ -282,7 +282,6 @@ input, textarea {
    Drawer (slide-left menu)
    ========================= */
 
-.left-actions { display:flex; align-items:center; gap:10px; }
 .iconbtn { padding: 10px 12px; min-height: 44px; border-radius: 14px; }
 
 .drawerOverlay{
