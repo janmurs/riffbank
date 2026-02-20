@@ -21,8 +21,8 @@ let splashAlreadyRan = false;
 async function runSplashSequence() {
   const splash = document.getElementById("splash");
   const title = document.getElementById("splashTitle");
-  const subWrap = document.getElementById("splashSub");       // wrapper div
-  const subText = document.getElementById("splashSubText");   // text span (IMPORTANT)
+  const subWrap = document.getElementById("splashSub");       // wrapper div (IMPORTANT)
+  const subText = document.getElementById("splashSubText");   // text span
   const spinner = document.getElementById("splashSpinner");
 
   if (!splash) return;
@@ -32,10 +32,11 @@ async function runSplashSequence() {
   // Add shimmer to title (CSS handles the effect)
   if (title) title.classList.add("shimmer");
 
+  // ✅ IMPORTANT: NO built-in "…" here — the dancing dots handle that inline
   const lines = [
-    "Indexing your universe…",
-    "Syncing sessions…",
-    "Entering RiffBank…",
+    "Indexing your universe",
+    "Syncing sessions",
+    "Entering RiffBank",
   ];
 
   // ---- timing knobs (premium, not rushed) ----
@@ -56,15 +57,15 @@ async function runSplashSequence() {
     }
   })();
 
-  const JUMP_OUT_MS = cssJump;
+  const JUMP_MS = cssJump;
   const JUMP_IN_SETTLE = 80;
 
   // Ensure initial DOM text is correct (DON’T wipe children)
   if (subText) subText.textContent = lines[0];
 
   // Start hidden; CSS should manage actual opacity/position
-  if (subWrap) subWrap.classList.remove("show", "churn");
-  if (subText) subText.classList.remove("jumpIn", "jumpOut", "static");
+  // ✅ Jump classes belong on the WRAPPER (#splashSub) because CSS animates #splashSub
+  if (subWrap) subWrap.classList.remove("show", "churn", "jumpIn", "jumpOut", "static");
 
   // Hide spinner until after the 1.2s logo moment
   if (spinner) spinner.classList.remove("show");
@@ -76,60 +77,56 @@ async function runSplashSequence() {
   splash.classList.add("phase1");
   if (spinner) spinner.classList.add("show");
 
-  if (subWrap) subWrap.classList.add("show", "churn");
-  if (subText) subText.classList.add("static"); // phrase 1 = stable display
+  if (subWrap) subWrap.classList.add("show", "churn", "static"); // phrase 1 = stable display
 
   // Let the title slide animation complete before we start text transitions
   await sleep(550);
 
+  async function jumpSwap(nextText) {
+    if (!subWrap || !subText) return;
+
+    // ✅ FIX: "static" disables animation via CSS (!important),
+    // so remove it during the jump, then restore after.
+    subWrap.classList.remove("static");
+
+    // OUT current phrase
+    subWrap.classList.remove("jumpIn", "jumpOut");
+    void subWrap.offsetHeight;          // ✅ restart animation reliably
+    subWrap.classList.add("jumpOut");
+    await sleep(JUMP_MS);
+
+    // swap text
+    subWrap.classList.remove("jumpOut");
+    void subWrap.offsetHeight;          // ✅ restart animation reliably
+    subText.textContent = nextText;
+
+    // IN next phrase
+    subWrap.classList.add("jumpIn");
+    await sleep(JUMP_MS);
+
+    subWrap.classList.remove("jumpIn");
+
+    // ✅ restore static "stable" state after jump completes
+    subWrap.classList.add("static");
+  }
+
   // ---- Hold PHRASE 1 ----
   await sleep(HOLD_1);
 
-  // ---- Phrase 1 -> Phrase 2 ----
-  if (subText) {
-    // animate OUT phrase 1
-    subText.classList.remove("jumpIn", "jumpOut", "static");
-    void subText.offsetWidth;
-    subText.classList.add("jumpOut");
-    await sleep(JUMP_OUT_MS);
-
-    // swap text
-    subText.classList.remove("jumpOut", "jumpIn", "static");
-    void subText.offsetWidth;
-    subText.textContent = lines[1];
-
-    // animate IN phrase 2
-    subText.classList.add("jumpIn");
-    await sleep(JUMP_OUT_MS + JUMP_IN_SETTLE);
-
-    // settle (so it doesn’t get “stuck” in a transform end-state)
-    subText.classList.remove("jumpIn");
-    subText.classList.add("static");
-  }
+  // ✅ Phrase 1 -> Phrase 2 (JUMP)
+  await jumpSwap(lines[1]);
 
   // ---- Hold PHRASE 2 ----
   await sleep(HOLD_2);
 
-  // ---- Phrase 2 -> Phrase 3 ----
-  if (subText) {
-    subText.classList.remove("jumpIn", "jumpOut", "static");
-    void subText.offsetWidth;
-
-    // OUT phrase 2
-    subText.classList.add("jumpOut");
-    await sleep(JUMP_OUT_MS);
-
-    // swap to phrase 3 (static, no jump-in)
-    subText.classList.remove("jumpOut", "jumpIn", "static");
-    void subText.offsetWidth;
-    subText.textContent = lines[2];
-    subText.classList.add("static");
-  }
+  // ✅ Phrase 2 -> Phrase 3 (JUMP)
+  // ✅ AND: no "jump" after phrase 3 (only hold + fade out)
+  await jumpSwap(lines[2]);
 
   // Hold briefly while app finishes rendering
   await sleep(HOLD_3);
 
-  // Hide splash
+  // Hide splash (no extra jump here)
   splash.classList.add("hide");
   splash.setAttribute("aria-hidden", "true");
   await sleep(420);
@@ -310,12 +307,12 @@ async function playNowPlaying({ autoplay = true } = {}){
   if (!url) return toast("No playable audio 😅");
 
   // Ensure only ONE audio plays in the whole app
-document.querySelectorAll("audio").forEach(a => {
-  if (a !== globalAudio) {
-    try { a.pause(); } catch {}
-    try { a.removeAttribute("src"); a.load(); } catch {}
-  }
-});
+  document.querySelectorAll("audio").forEach(a => {
+    if (a !== globalAudio) {
+      try { a.pause(); } catch {}
+      try { a.removeAttribute("src"); a.load(); } catch {}
+    }
+  });
 
   // If already playing this exact src, don't reset time
   if (globalAudio.src !== url) globalAudio.src = url;
@@ -406,7 +403,7 @@ function normalizeState() {
     song.versions = Array.isArray(song.versions) ? song.versions : [];
     song.versions.forEach((v) => {
       if (typeof v.isActive !== "boolean") v.isActive = false;
-            // Local file support
+      // Local file support
       if (v.fileId === undefined) v.fileId = null;
       if (v.fileName === undefined) v.fileName = "";
       if (v.fileType === undefined) v.fileType = "";
@@ -415,10 +412,10 @@ function normalizeState() {
       if (v.localAudioId === undefined) v.localAudioId = null;
       if (v.originalFileName === undefined) v.originalFileName = "";
     });
-        // ✅ new: featured version pointer
+    // ✅ new: featured version pointer
     if (song.featuredVersionId === undefined) song.featuredVersionId = null;
   });
-    // Player state (queue)
+  // Player state (queue)
   state.player = state.player || {};
   state.player.queue = Array.isArray(state.player.queue) ? state.player.queue : [];
   state.player.nowPlaying = state.player.nowPlaying || null;
@@ -903,7 +900,7 @@ function goBack({ animate = false } = {}) {
       return;
     }
 
-        // ✅ If you're in a version detail view, back goes to the song page
+    // ✅ If you're in a version detail view, back goes to the song page
     if (selectedSongId && selectedVersionId) {
       selectedVersionId = null;
       currentTab = "songs";
@@ -931,7 +928,7 @@ function goBack({ animate = false } = {}) {
       return;
     }
 
-        // If Songs list was opened from a drawer view (e.g. Projects -> View songs),
+    // If Songs list was opened from a drawer view (e.g. Projects -> View songs),
     // going back from the Songs list should return to that drawer view.
     if (
       currentTab === "songs" &&

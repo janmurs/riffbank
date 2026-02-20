@@ -798,8 +798,11 @@ textarea{ min-height:100px; resize:vertical; }
 /* Subtext: JS controls show + jump */
 #splashSub{
   min-height: 28px;
-  display: grid;
-  place-items: center;
+
+  /* ✅ Inline text + dancing dots on the SAME LINE */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 
   font-size: 14px;
   font-weight: 800;
@@ -811,6 +814,7 @@ textarea{ min-height:100px; resize:vertical; }
   will-change: transform, opacity;
 }
 
+/* When shown normally */
 #splashSub.show{
   opacity: 1;
   transform: translateY(0);
@@ -820,12 +824,24 @@ textarea{ min-height:100px; resize:vertical; }
   animation: none !important;
 }
 
+/* Jump IN (enter) */
 #splashSub.jumpIn{
-  animation: splashJump var(--splash-jump-ms) cubic-bezier(.2,.9,.2,1) both;
+  animation: splashJumpIn var(--splash-jump-ms) cubic-bezier(.2,.8,.2,1) forwards;
 }
+
+/* Jump OUT (leave) */
 #splashSub.jumpOut{
-  animation: splashJump var(--splash-jump-ms) cubic-bezier(.2,.9,.2,1) both;
-  animation-direction: reverse;
+  animation: splashJumpOut var(--splash-jump-ms) cubic-bezier(.2,.8,.2,1) forwards;
+}
+
+@keyframes splashJumpOut{
+  0%   { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-14px); }
+}
+
+@keyframes splashJumpIn{
+  0%   { opacity: 0; transform: translateY(14px); }
+  100% { opacity: 1; transform: translateY(0); }
 }
 
 /* Spinner: JS controls show */
