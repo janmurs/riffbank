@@ -1765,8 +1765,9 @@ body {
   z-index: 9999;
 }
 
-/* mini player & bottom nav should NOT be fixed anymore inside the dock */
-#miniPlayer, #bottomNav{
+/* mini player & bottom nav should NOT be fixed anymore ONLY when inside the dock */
+#bottomDock #miniPlayer,
+#bottomDock #bottomNav{
   position: relative !important;
   left: auto !important;
   right: auto !important;
