@@ -138,7 +138,11 @@ async function runSplashSequence() {
 const view = $("#view");
 if (!view) {
   console.error("RiffBank: #view not found. Check index.html structure.");
+} else {
+  // ✅ Ensure CSS that targets `.view` applies to `#view`
+  view.classList.add("view");
 }
+
 const headerTitle = $("#headerTitle");
 const toastEl = $("#toast");
 
@@ -1518,7 +1522,10 @@ function render() {
   if (!view) return;
 
   syncTabs();
-  document.body.classList.toggle("isHome", currentTab === "home" && !drawerView && !overlayView);
+document.body.classList.toggle(
+  "isHome",
+  currentTab === "home" && !drawerView && !overlayView && !selectedSongId && !selectedVersionId
+);
 
   // Drawer screens
   if (drawerView === "projects") return renderProjects();
@@ -2007,11 +2014,24 @@ function makeRng(seed){
   };
 }
 
-function coverSvg(song){
+// --- Cover caching + iOS "lite" mode ---
+const coverCache = new Map();
+
+function isIOSDevice(){
+  // iPadOS can report as MacIntel with touch points
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+function coverSvg(song, { lite = false } = {}) {
+  const forceLite = lite || isIOSDevice();
+  const key = `${song.id}|${song.title}|${song.project}|${song.genre}|${forceLite ? "lite" : "full"}`;
+
+  if (coverCache.has(key)) return coverCache.get(key);
+
   const seed = hashStr(`${song.id}|${song.title}|${song.project}|${song.genre}`);
   const r = makeRng(seed);
 
-  // Neon palette via HSL
   const h1 = Math.floor(r()*360);
   const h2 = (h1 + 90 + Math.floor(r()*90)) % 360;
   const h3 = (h2 + 90 + Math.floor(r()*90)) % 360;
@@ -2020,7 +2040,6 @@ function coverSvg(song){
   const c2 = `hsl(${h2} 95% 58%)`;
   const c3 = `hsl(${h3} 95% 62%)`;
 
-  // Blob positions/sizes
   const b = Array.from({length: 3}).map(() => ({
     x: Math.floor(r()*120),
     y: Math.floor(r()*120),
@@ -2028,13 +2047,34 @@ function coverSvg(song){
     col: [c1,c2,c3][Math.floor(r()*3)]
   }));
 
-  // Streak
   const sx1 = Math.floor(r()*40);
   const sy1 = Math.floor(30 + r()*60);
   const sx2 = Math.floor(90 + r()*40);
   const sy2 = Math.floor(20 + r()*80);
 
-  return `
+  // LITE: no turbulence/grain, no SVG filter stack (huge iOS win)
+  const svg = forceLite ? `
+  <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="${c1}" stop-opacity=".95"/>
+        <stop offset=".55" stop-color="${c2}" stop-opacity=".85"/>
+        <stop offset="1" stop-color="${c3}" stop-opacity=".9"/>
+      </linearGradient>
+      <radialGradient id="vig" cx="50%" cy="45%" r="70%">
+        <stop offset="55%" stop-color="rgba(0,0,0,0)"/>
+        <stop offset="100%" stop-color="rgba(0,0,0,.28)"/>
+      </radialGradient>
+    </defs>
+
+    <rect width="120" height="120" fill="url(#g)"/>
+    ${b.map(x => `<circle cx="${x.x}" cy="${x.y}" r="${x.rad}" fill="${x.col}" opacity=".22"/>`).join("")}
+
+    <path d="M ${sx1} ${sy1} C ${sx1+35} ${sy1-30}, ${sx2-35} ${sy2+30}, ${sx2} ${sy2}"
+      stroke="rgba(255,255,255,.55)" stroke-width="5" stroke-linecap="round" opacity=".18"/>
+
+    <rect width="120" height="120" fill="url(#vig)"/>
+  </svg>` : `
   <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
     <defs>
       <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
@@ -2063,30 +2103,28 @@ function coverSvg(song){
           <feMergeNode in="SourceGraphic"/>
         </feMerge>
       </filter>
+
+      <radialGradient id="vig" cx="50%" cy="45%" r="70%">
+        <stop offset="55%" stop-color="rgba(0,0,0,0)"/>
+        <stop offset="100%" stop-color="rgba(0,0,0,.35)"/>
+      </radialGradient>
     </defs>
 
-    <!-- Base -->
     <rect width="120" height="120" fill="url(#g)"/>
 
-    <!-- Neon blobs -->
     <g filter="url(#blur)" opacity=".9">
       ${b.map(x => `<circle cx="${x.x}" cy="${x.y}" r="${x.rad}" fill="${x.col}" opacity=".55"/>`).join("")}
     </g>
 
-    <!-- Light streak -->
     <path d="M ${sx1} ${sy1} C ${sx1+35} ${sy1-30}, ${sx2-35} ${sy2+30}, ${sx2} ${sy2}"
-          stroke="rgba(255,255,255,.65)" stroke-width="6" stroke-linecap="round" opacity=".22" filter="url(#glow)"/>
+      stroke="rgba(255,255,255,.65)" stroke-width="6" stroke-linecap="round" opacity=".22" filter="url(#glow)"/>
 
-    <!-- Subtle vignette -->
-    <radialGradient id="vig" cx="50%" cy="45%" r="70%">
-      <stop offset="55%" stop-color="rgba(0,0,0,0)"/>
-      <stop offset="100%" stop-color="rgba(0,0,0,.35)"/>
-    </radialGradient>
     <rect width="120" height="120" fill="url(#vig)"/>
-
-    <!-- Grain -->
     <rect width="120" height="120" filter="url(#grain)" opacity=".55"/>
   </svg>`;
+
+  coverCache.set(key, svg);
+  return svg;
 }
 
 function parseStamp(stamp){
@@ -2208,7 +2246,7 @@ function renderSongsList() {
           return `
             <div class="songRow" data-id="${s.id}">
               <div class="songThumb" aria-hidden="true">
-                ${coverSvg(s)}
+                ${coverSvg(s, { lite: true })}
                 <div class="songDur">—:—</div>
               </div>
 
@@ -2300,50 +2338,57 @@ function renderSongDetail(id) {
 
   // hero cover uses your neon generator
   const heroCover = coverSvg(song);
+  const rowCover  = coverSvg(song, { lite: true }); // always lite for version rows
 
   const featuredTag = fv?.isBest ? "⭐ Best" : fv?.isActive ? "🎧 Active" : "Featured";
   const featuredSub = fv
     ? `${escapeHtml(fv.label || "Version")} ${fv.notes ? `• ${escapeHtml(fv.notes)}` : ""}`
     : "No versions yet — add one below";
 
-  view.innerHTML = `
-    <div class="songHero">
-      <button class="songHeroBack" id="songHeroBack" aria-label="Back">←</button>
+view.innerHTML = `
+  <div class="albumHero">
+    <button class="songHeroBack" id="songHeroBack" aria-label="Back">←</button>
 
-      <div class="songHeroCover">
+    <div class="albumBg" aria-hidden="true">
+      ${heroCover}
+    </div>
+
+    <div class="albumTop">
+      <div class="albumArt" aria-hidden="true">
         ${heroCover}
       </div>
 
-      <div class="songHeroTitle">${escapeHtml(song.title)}</div>
-      <div class="songHeroMeta">${escapeHtml(song.project || "—")} • ${escapeHtml(song.genre || "—")} • ${vCount} version${vCount===1?"":"s"}</div>
-
-      <div class="songFeatured">
-        <div class="songFeaturedTag">${escapeHtml(featuredTag)}</div>
-        <div class="songFeaturedSub">${featuredSub}</div>
-
-        <div class="songHeroActions">
-          <button class="songHeroPlay" id="songBigPlay" ${(fv?.link || fv?.fileId || fv?.localAudioId) ? "" : "disabled"}>
-            ▶ Play
-          </button>
-          <button class="songHeroQueue" id="songBigQueue" ${(fv?.link || fv?.fileId || fv?.localAudioId) ? "" : "disabled"}>
-            + Queue
-          </button>
-          <button class="songHeroDetails" id="songDetailsBtn">
-            Details
-          </button>
+      <div class="albumText">
+        <div class="albumTitle">${escapeHtml(song.title)}</div>
+        <div class="albumMeta">
+          ${escapeHtml(song.project || "—")} • ${escapeHtml(song.genre || "—")} •
+          ${vCount} version${vCount===1?"":"s"}
         </div>
       </div>
     </div>
 
-    <div class="versionsWrap">
-      <div class="versionsHeader">
-        <div class="versionsTitle">Versions</div>
-        <button class="btn" id="addVersionJump">Add version</button>
-      </div>
-
-      <div id="versionsRows" class="versionsRows"></div>
+    <div class="albumActions">
+      <button class="songHeroPlay" id="songBigPlay" ${(fv?.link || fv?.fileId || fv?.localAudioId) ? "" : "disabled"}>
+        ▶ Play
+      </button>
+      <button class="songHeroQueue" id="songBigQueue" ${(fv?.link || fv?.fileId || fv?.localAudioId) ? "" : "disabled"}>
+        + Queue
+      </button>
+      <button class="songHeroDetails" id="songDetailsBtn">
+        Details
+      </button>
     </div>
-  `;
+  </div>
+
+  <div class="versionsWrap">
+    <div class="versionsHeader">
+      <div class="versionsTitle">Versions</div>
+      <button class="btn" id="addVersionJump">Add version</button>
+    </div>
+
+    <div id="versionsRows" class="versionsRows"></div>
+  </div>
+`;
 
   $("#songHeroBack")?.addEventListener("click", () => goBack({ animate: true }));
 
@@ -2397,7 +2442,7 @@ $("#addVersionJump")?.addEventListener("click", () => {
 
         return `
           <div class="vRow" data-vrow="${v.id}">
-            <div class="vThumb">${coverSvg(song)}<div class="vDur">—:—</div></div>
+            <div class="vThumb">${rowCover}<div class="vDur">—:—</div></div>
 
             <div class="vMain">
               <div class="vTop">
@@ -2625,102 +2670,6 @@ function renderVersionDetail(songId, versionId) {
     renderSongDetail(songId);
   });
 }
-
-  // Import audio (local file)
-  $("#importAudioBtn")?.addEventListener("click", async () => {
-    try {
-      const file = await pickAudioFile();
-      if (!file) return;
-
-      const fileId = uid();
-      await audioPut({
-        id: fileId,
-        name: file.name || "audio",
-        type: file.type || "audio/*",
-        size: file.size || 0,
-        blob: file,
-        createdAt: nowStamp(),
-      });
-
-      v.fileId = fileId;
-      v.fileName = file.name || "audio";
-      v.fileType = file.type || "audio/*";
-      v.fileSize = file.size || 0;
-
-      song.updatedAt = nowStamp();
-      saveState();
-      toast("Imported ✅");
-      renderVersionDetail(songId, versionId);
-    } catch (err) {
-      console.error(err);
-      toast("Import failed 😅");
-    }
-  });
-
-  // Remove local file
-  $("#clearLocalBtn")?.addEventListener("click", async () => {
-    if (!v.fileId) return;
-    if (!confirm("Remove local audio from this device?")) return;
-    try { await audioDelete(v.fileId); } catch {}
-
-    v.fileId = null;
-    v.fileName = "";
-    v.fileType = "";
-    v.fileSize = 0;
-
-    song.updatedAt = nowStamp();
-    saveState();
-    toast("Removed 🧼");
-    renderVersionDetail(songId, versionId);
-  });
-
-  // Play / Queue
-  $("#playThis")?.addEventListener("click", () => playVersion(songId, versionId, { goPlayer: true }));
-  $("#queueThis")?.addEventListener("click", () => addToQueue(songId, versionId));
-
-  // Featured / Active / Best
-  $("#setFeaturedBtn")?.addEventListener("click", () => {
-    setFeatured(songId, versionId);
-    renderVersionDetail(songId, versionId);
-  });
-
-  $("#toggleActiveBtn")?.addEventListener("click", () => {
-    v.isActive = !v.isActive;
-    song.updatedAt = nowStamp();
-    saveState();
-    toast("Active updated 🎧");
-    renderVersionDetail(songId, versionId);
-  });
-
-  $("#setBestBtn")?.addEventListener("click", () => {
-    song.versions.forEach(x => x.isBest = (x.id === versionId));
-    song.updatedAt = nowStamp();
-    saveState();
-    toast("Best updated ⭐");
-    renderVersionDetail(songId, versionId);
-  });
-
-  // Open link
-  $("#openLinkBtn")?.addEventListener("click", () => {
-    if (v.link) window.open(v.link, "_blank");
-  });
-
-  // Delete
-  $("#deleteVersionBtn")?.addEventListener("click", () => {
-    if (!confirm("Delete this version?")) return;
-
-    song.versions = (song.versions || []).filter(x => x.id !== versionId);
-
-    if (song.featuredVersionId === versionId) song.featuredVersionId = null;
-    if (song.versions.length && !song.versions.some(x => x.isBest)) song.versions[0].isBest = true;
-
-    song.updatedAt = nowStamp();
-    saveState();
-    toast("Deleted 🗑️");
-
-    selectedVersionId = null;
-    renderSongDetail(songId);
-  });
 
 // ---------------------
 // Player
