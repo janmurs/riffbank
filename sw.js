@@ -14,7 +14,7 @@ const PRECACHE_URLS = [
   "/",              // important for navigations
   "/index.html",
   "/styles.css",
-  "/app.js",
+  "/src/app.js",
   "/manifest.json",
   "/icon-1024.png",
 ];
