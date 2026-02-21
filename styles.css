@@ -179,10 +179,13 @@ textarea{ min-height:100px; resize:vertical; }
    ========================= */
 .bottomNav{
   position: fixed;
-  left: 0;
+  left: 50%;
+  transform: translateX(-50%);
   bottom: 0;
 
-  width: 100%;
+  /* ✅ This is the fix */
+  width: min(var(--app-maxw), 100vw);
+  max-width: 100vw;
 
   padding: 10px 14px env(safe-area-inset-bottom);
   background: rgba(8,8,12,.82);
