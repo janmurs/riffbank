@@ -15,6 +15,14 @@ function sleep(ms) {
 
 let splashAlreadyRan = false;
 
+// ---------------------
+// Player view state
+// ---------------------
+let playerFilter = "all"; // all | fav
+let playerSort = "recent"; // recent | title
+let playerQueue = []; // array of { songId, versionId }
+let sheetState = null; // { songId, versionId }
+
 // -----------------------------
 // Splash animation sequence (awaitable)
 // -----------------------------
@@ -138,7 +146,11 @@ async function runSplashSequence() {
 const view = $("#view");
 if (!view) {
   console.error("RiffBank: #view not found. Check index.html structure.");
+} else {
+  // ✅ Ensure CSS that targets `.view` applies to `#view`
+  view.classList.add("view");
 }
+
 const headerTitle = $("#headerTitle");
 const toastEl = $("#toast");
 
@@ -224,11 +236,11 @@ function toast(msg) {
 const globalAudio = document.getElementById("globalAudio");
 
 const miniPlayerEl = document.getElementById("miniPlayer");
-const miniTitleEl = document.getElementById("miniTitle");
-const miniSubEl = document.getElementById("miniSub");
+const miniArtEl    = document.getElementById("miniArt");
 const miniToggleEl = document.getElementById("miniToggle");
-const miniNextEl = document.getElementById("miniNext");
-const miniPrevEl = document.getElementById("miniPrev");
+const miniNextEl   = document.getElementById("miniNext");
+const miniPrevEl   = document.getElementById("miniPrev");
+const miniScrubEl  = document.getElementById("miniScrub");
 
 function isPlayable(v){
   return !!(v?.link || v?.fileId || v?.localAudioId);
@@ -261,23 +273,20 @@ async function syncMiniPlayerUI() {
   miniPlayerEl.classList.remove("hidden");
   miniPlayerEl.setAttribute("aria-hidden", "false");
   document.body.classList.add("hasMiniPlayer");
-
-  // optional "animate in"
   requestAnimationFrame(() => miniPlayerEl.classList.add("visible"));
 
-  miniTitleEl.textContent = song.title || "Untitled";
-  miniSubEl.textContent = v.label || "Version";
-  miniToggleEl.textContent = globalAudio?.paused ? "▶" : "⏸";
-
-  const qb = document.getElementById("miniQueueBadge");
-  const qCount = (state.player?.queue || []).length;
-  if (qb) {
-    qb.style.display = qCount ? "inline-flex" : "none";
-    qb.textContent = String(qCount);
+  // album art
+  if (miniArtEl) {
+    // Use your existing neon cover generator (lite for speed)
+    miniArtEl.innerHTML = coverSvg(song, { lite: true });
   }
-}
 
-const miniScrubEl = document.getElementById("miniScrub");
+  // play/pause icon
+  if (miniToggleEl) miniToggleEl.textContent = globalAudio?.paused ? "▶" : "⏸";
+
+  // keep scrub in sync
+  syncMiniScrub();
+}
 
 function syncMiniScrub(){
   if (!miniScrubEl || !globalAudio) return;
@@ -411,6 +420,9 @@ function normalizeState() {
 
       if (v.localAudioId === undefined) v.localAudioId = null;
       if (v.originalFileName === undefined) v.originalFileName = "";
+            // Player playlist flags
+      if (typeof v.playerYes !== "boolean") v.playerYes = false;
+      if (typeof v.favorite !== "boolean") v.favorite = false;
     });
     // ✅ new: featured version pointer
     if (song.featuredVersionId === undefined) song.featuredVersionId = null;
@@ -525,6 +537,78 @@ async function getPlayableUrlForVersion(songId, versionId) {
 
   if (v.link) return v.link;
   return null;
+}
+
+function getSongById(data, songId) {
+  return (data.songs || []).find(s => s.id === songId);
+}
+
+function getVersionById(song, versionId) {
+  if (!song) return null;
+  return (song.versions || []).find(v => v.id === versionId);
+}
+
+function ensureVersionFlags(v) {
+  if (!v) return v;
+  if (typeof v.playerYes !== "boolean") v.playerYes = false;
+  if (typeof v.favorite !== "boolean") v.favorite = false; // Player favorites
+  return v;
+}
+
+function versionLabel(v) {
+  const parts = [];
+  if (v?.label) parts.push(v.label);
+  if (v?.stamp) parts.push(v.stamp);
+  return parts.filter(Boolean).join(" • ");
+}
+
+function pickCoverUrl(song, v) {
+  // adjust if you have cover art fields already
+  return v?.coverUrl || song?.coverUrl || "";
+}
+
+function playerItems(data) {
+  const items = [];
+  for (const s of (data.songs || [])) {
+    for (const vv of (s.versions || [])) {
+      const v = ensureVersionFlags(vv);
+      if (v.playerYes) {
+        items.push({
+          songId: s.id,
+          versionId: v.id,
+          songName: s.title || "Untitled",
+          artistName: s.artist || "You",
+          coverUrl: pickCoverUrl(s, v),
+          favorite: !!v.favorite,
+          updatedAt: v.updatedAt || v.stamp || "",
+          label: versionLabel(v)
+        });
+      }
+    }
+  }
+
+  // filter
+  let out = items;
+  if (playerFilter === "fav") out = out.filter(x => x.favorite);
+
+  // sort
+  if (playerSort === "title") {
+    out = out.slice().sort((a,b) => a.songName.localeCompare(b.songName));
+  } else {
+    // "recent" (best effort): if no dates, keep natural order
+    out = out.slice().sort((a,b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  }
+
+  return out;
+}
+
+function shuffleArray(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
 }
 
 // PWA SW register
@@ -1056,8 +1140,12 @@ miniPrevEl?.addEventListener("click", (e) => {
   globalAudio.currentTime = 0;
 });
 
-miniPlayerEl?.addEventListener("click", () => {
-  // tap bar opens full player view
+miniPlayerEl?.addEventListener("click", (e) => {
+  // If user tapped a control button or scrubber, do NOT open fullscreen player
+  const isControl = e.target.closest("#miniPrev, #miniToggle, #miniNext, #miniScrub");
+  if (isControl) return;
+
+  // tap bar (non-controls) opens full player view
   currentTab = "player";
   drawerView = null;
   overlayView = null;
@@ -1067,6 +1155,9 @@ miniPlayerEl?.addEventListener("click", () => {
   syncTabs();
   render();
 });
+
+miniScrubEl?.addEventListener("pointerdown", (e) => e.stopPropagation());
+miniScrubEl?.addEventListener("touchstart", (e) => e.stopPropagation(), { passive: true });
 
 globalAudio?.addEventListener("play", syncMiniPlayerUI);
 globalAudio?.addEventListener("pause", syncMiniPlayerUI);
@@ -1518,7 +1609,10 @@ function render() {
   if (!view) return;
 
   syncTabs();
-  document.body.classList.toggle("isHome", currentTab === "home" && !drawerView && !overlayView);
+  document.body.classList.toggle(
+    "isHome",
+    currentTab === "home" && !drawerView && !overlayView && !selectedSongId && !selectedVersionId
+  );
 
   // Drawer screens
   if (drawerView === "projects") return renderProjects();
@@ -2007,11 +2101,24 @@ function makeRng(seed){
   };
 }
 
-function coverSvg(song){
+// --- Cover caching + iOS "lite" mode ---
+const coverCache = new Map();
+
+function isIOSDevice(){
+  // iPadOS can report as MacIntel with touch points
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+function coverSvg(song, { lite = false } = {}) {
+  const forceLite = lite || isIOSDevice();
+  const key = `${song.id}|${song.title}|${song.project}|${song.genre}|${forceLite ? "lite" : "full"}`;
+
+  if (coverCache.has(key)) return coverCache.get(key);
+
   const seed = hashStr(`${song.id}|${song.title}|${song.project}|${song.genre}`);
   const r = makeRng(seed);
 
-  // Neon palette via HSL
   const h1 = Math.floor(r()*360);
   const h2 = (h1 + 90 + Math.floor(r()*90)) % 360;
   const h3 = (h2 + 90 + Math.floor(r()*90)) % 360;
@@ -2020,7 +2127,6 @@ function coverSvg(song){
   const c2 = `hsl(${h2} 95% 58%)`;
   const c3 = `hsl(${h3} 95% 62%)`;
 
-  // Blob positions/sizes
   const b = Array.from({length: 3}).map(() => ({
     x: Math.floor(r()*120),
     y: Math.floor(r()*120),
@@ -2028,13 +2134,34 @@ function coverSvg(song){
     col: [c1,c2,c3][Math.floor(r()*3)]
   }));
 
-  // Streak
   const sx1 = Math.floor(r()*40);
   const sy1 = Math.floor(30 + r()*60);
   const sx2 = Math.floor(90 + r()*40);
   const sy2 = Math.floor(20 + r()*80);
 
-  return `
+  // LITE: no turbulence/grain, no SVG filter stack (huge iOS win)
+  const svg = forceLite ? `
+  <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="${c1}" stop-opacity=".95"/>
+        <stop offset=".55" stop-color="${c2}" stop-opacity=".85"/>
+        <stop offset="1" stop-color="${c3}" stop-opacity=".9"/>
+      </linearGradient>
+      <radialGradient id="vig" cx="50%" cy="45%" r="70%">
+        <stop offset="55%" stop-color="rgba(0,0,0,0)"/>
+        <stop offset="100%" stop-color="rgba(0,0,0,.28)"/>
+      </radialGradient>
+    </defs>
+
+    <rect width="120" height="120" fill="url(#g)"/>
+    ${b.map(x => `<circle cx="${x.x}" cy="${x.y}" r="${x.rad}" fill="${x.col}" opacity=".22"/>`).join("")}
+
+    <path d="M ${sx1} ${sy1} C ${sx1+35} ${sy1-30}, ${sx2-35} ${sy2+30}, ${sx2} ${sy2}"
+      stroke="rgba(255,255,255,.55)" stroke-width="5" stroke-linecap="round" opacity=".18"/>
+
+    <rect width="120" height="120" fill="url(#vig)"/>
+  </svg>` : `
   <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
     <defs>
       <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
@@ -2063,30 +2190,28 @@ function coverSvg(song){
           <feMergeNode in="SourceGraphic"/>
         </feMerge>
       </filter>
+
+      <radialGradient id="vig" cx="50%" cy="45%" r="70%">
+        <stop offset="55%" stop-color="rgba(0,0,0,0)"/>
+        <stop offset="100%" stop-color="rgba(0,0,0,.35)"/>
+      </radialGradient>
     </defs>
 
-    <!-- Base -->
     <rect width="120" height="120" fill="url(#g)"/>
 
-    <!-- Neon blobs -->
     <g filter="url(#blur)" opacity=".9">
       ${b.map(x => `<circle cx="${x.x}" cy="${x.y}" r="${x.rad}" fill="${x.col}" opacity=".55"/>`).join("")}
     </g>
 
-    <!-- Light streak -->
     <path d="M ${sx1} ${sy1} C ${sx1+35} ${sy1-30}, ${sx2-35} ${sy2+30}, ${sx2} ${sy2}"
-          stroke="rgba(255,255,255,.65)" stroke-width="6" stroke-linecap="round" opacity=".22" filter="url(#glow)"/>
+      stroke="rgba(255,255,255,.65)" stroke-width="6" stroke-linecap="round" opacity=".22" filter="url(#glow)"/>
 
-    <!-- Subtle vignette -->
-    <radialGradient id="vig" cx="50%" cy="45%" r="70%">
-      <stop offset="55%" stop-color="rgba(0,0,0,0)"/>
-      <stop offset="100%" stop-color="rgba(0,0,0,.35)"/>
-    </radialGradient>
     <rect width="120" height="120" fill="url(#vig)"/>
-
-    <!-- Grain -->
     <rect width="120" height="120" filter="url(#grain)" opacity=".55"/>
   </svg>`;
+
+  coverCache.set(key, svg);
+  return svg;
 }
 
 function parseStamp(stamp){
@@ -2208,7 +2333,7 @@ function renderSongsList() {
           return `
             <div class="songRow" data-id="${s.id}">
               <div class="songThumb" aria-hidden="true">
-                ${coverSvg(s)}
+                ${coverSvg(s, { lite: true })}
                 <div class="songDur">—:—</div>
               </div>
 
@@ -2300,50 +2425,57 @@ function renderSongDetail(id) {
 
   // hero cover uses your neon generator
   const heroCover = coverSvg(song);
+  const rowCover  = coverSvg(song, { lite: true }); // always lite for version rows
 
   const featuredTag = fv?.isBest ? "⭐ Best" : fv?.isActive ? "🎧 Active" : "Featured";
   const featuredSub = fv
     ? `${escapeHtml(fv.label || "Version")} ${fv.notes ? `• ${escapeHtml(fv.notes)}` : ""}`
     : "No versions yet — add one below";
 
-  view.innerHTML = `
-    <div class="songHero">
-      <button class="songHeroBack" id="songHeroBack" aria-label="Back">←</button>
+view.innerHTML = `
+  <div class="albumHero">
+    <button class="songHeroBack" id="songHeroBack" aria-label="Back">←</button>
 
-      <div class="songHeroCover">
+    <div class="albumBg" aria-hidden="true">
+      ${heroCover}
+    </div>
+
+    <div class="albumTop">
+      <div class="albumArt" aria-hidden="true">
         ${heroCover}
       </div>
 
-      <div class="songHeroTitle">${escapeHtml(song.title)}</div>
-      <div class="songHeroMeta">${escapeHtml(song.project || "—")} • ${escapeHtml(song.genre || "—")} • ${vCount} version${vCount===1?"":"s"}</div>
-
-      <div class="songFeatured">
-        <div class="songFeaturedTag">${escapeHtml(featuredTag)}</div>
-        <div class="songFeaturedSub">${featuredSub}</div>
-
-        <div class="songHeroActions">
-          <button class="songHeroPlay" id="songBigPlay" ${(fv?.link || fv?.fileId || fv?.localAudioId) ? "" : "disabled"}>
-            ▶ Play
-          </button>
-          <button class="songHeroQueue" id="songBigQueue" ${(fv?.link || fv?.fileId || fv?.localAudioId) ? "" : "disabled"}>
-            + Queue
-          </button>
-          <button class="songHeroDetails" id="songDetailsBtn">
-            Details
-          </button>
+      <div class="albumText">
+        <div class="albumTitle">${escapeHtml(song.title)}</div>
+        <div class="albumMeta">
+          ${escapeHtml(song.project || "—")} • ${escapeHtml(song.genre || "—")} •
+          ${vCount} version${vCount===1?"":"s"}
         </div>
       </div>
     </div>
 
-    <div class="versionsWrap">
-      <div class="versionsHeader">
-        <div class="versionsTitle">Versions</div>
-        <button class="btn" id="addVersionJump">Add version</button>
-      </div>
-
-      <div id="versionsRows" class="versionsRows"></div>
+    <div class="albumActions">
+      <button class="songHeroPlay" id="songBigPlay" ${(fv?.link || fv?.fileId || fv?.localAudioId) ? "" : "disabled"}>
+        ▶ Play
+      </button>
+      <button class="songHeroQueue" id="songBigQueue" ${(fv?.link || fv?.fileId || fv?.localAudioId) ? "" : "disabled"}>
+        + Queue
+      </button>
+      <button class="songHeroDetails" id="songDetailsBtn">
+        Details
+      </button>
     </div>
-  `;
+  </div>
+
+  <div class="versionsWrap">
+    <div class="versionsHeader">
+      <div class="versionsTitle">Versions</div>
+      <button class="btn" id="addVersionJump">Add version</button>
+    </div>
+
+    <div id="versionsRows" class="versionsRows"></div>
+  </div>
+`;
 
   $("#songHeroBack")?.addEventListener("click", () => goBack({ animate: true }));
 
@@ -2397,7 +2529,7 @@ $("#addVersionJump")?.addEventListener("click", () => {
 
         return `
           <div class="vRow" data-vrow="${v.id}">
-            <div class="vThumb">${coverSvg(song)}<div class="vDur">—:—</div></div>
+            <div class="vThumb">${rowCover}<div class="vDur">—:—</div></div>
 
             <div class="vMain">
               <div class="vTop">
@@ -2441,7 +2573,7 @@ function renderVersionDetail(songId, versionId) {
   setHeader("Version");
 
   const isFeatured = song.featuredVersionId === v.id;
-  const hasPlayable = !!(v.link || v.fileId);
+  const hasPlayable = !!(v.link || v.fileId || v.localAudioId);
 
   view.innerHTML = `
     <div class="card">
@@ -2472,12 +2604,12 @@ function renderVersionDetail(songId, versionId) {
 
       <div class="row" style="margin-top:10px; gap:10px; flex-wrap:wrap">
         <button class="btn" id="importAudioBtn">Import audio (Files) 📁</button>
-        <button class="btn" id="clearLocalBtn" ${v.fileId ? "" : "disabled"}>Remove local file</button>
+        <button class="btn" id="clearLocalBtn" ${(v.fileId || v.localAudioId) ? "" : "disabled"}>Remove local file</button>
       </div>
 
-      ${v.fileId ? `
+      ${(v.fileId || v.localAudioId) ? `
         <div class="small" style="margin-top:8px">
-          Local: <b>${escapeHtml(v.fileName || "audio file")}</b>
+          Local: <b>${escapeHtml(v.fileName || v.originalFileName || "audio file")}</b>
           ${v.fileSize ? ` • ${(v.fileSize/1024/1024).toFixed(1)} MB` : ""}
         </div>
       ` : `<div class="small" style="margin-top:8px">No local file attached.</div>`}
@@ -2505,14 +2637,13 @@ function renderVersionDetail(songId, versionId) {
   $("#saveVersion")?.addEventListener("click", () => {
     v.label = ($("#vLabel")?.value || "").trim();
     v.notes = ($("#vNotesEdit")?.value || "").trim();
-    v.link = ($("#vLink")?.value || "").trim();
+    v.link  = ($("#vLink")?.value || "").trim();
 
     song.updatedAt = nowStamp();
     saveState();
     toast("Saved ✅");
     renderVersionDetail(songId, versionId);
   });
-}
 
   // Import audio (local file)
   $("#importAudioBtn")?.addEventListener("click", async () => {
@@ -2520,9 +2651,11 @@ function renderVersionDetail(songId, versionId) {
       const file = await pickAudioFile();
       if (!file) return;
 
-      const fileId = uid();
+      const id = uid();
+
+      // store into IndexedDB (your audioPut)
       await audioPut({
-        id: fileId,
+        id,
         name: file.name || "audio",
         type: file.type || "audio/*",
         size: file.size || 0,
@@ -2530,10 +2663,14 @@ function renderVersionDetail(songId, versionId) {
         createdAt: nowStamp(),
       });
 
-      v.fileId = fileId;
+      // use fileId path for this screen
+      v.fileId = id;
       v.fileName = file.name || "audio";
       v.fileType = file.type || "audio/*";
       v.fileSize = file.size || 0;
+
+      // clear old localAudioId if you want (optional)
+      // v.localAudioId = null;
 
       song.updatedAt = nowStamp();
       saveState();
@@ -2547,14 +2684,24 @@ function renderVersionDetail(songId, versionId) {
 
   // Remove local file
   $("#clearLocalBtn")?.addEventListener("click", async () => {
-    if (!v.fileId) return;
     if (!confirm("Remove local audio from this device?")) return;
-    try { await audioDelete(v.fileId); } catch {}
 
-    v.fileId = null;
-    v.fileName = "";
-    v.fileType = "";
-    v.fileSize = 0;
+    // if it was stored under fileId
+    if (v.fileId) {
+      try { await audioDelete(v.fileId); } catch {}
+      v.fileId = null;
+      v.fileName = "";
+      v.fileType = "";
+      v.fileSize = 0;
+    }
+
+    // if it was stored under localAudioId (your other system)
+    if (v.localAudioId) {
+      // you used putAudioBlob/getAudioBlob for this path,
+      // but you don't have a delete wrapper there — so just clear pointer:
+      v.localAudioId = null;
+      v.originalFileName = "";
+    }
 
     song.updatedAt = nowStamp();
     saveState();
@@ -2609,6 +2756,7 @@ function renderVersionDetail(songId, versionId) {
     selectedVersionId = null;
     renderSongDetail(songId);
   });
+}
 
 // ---------------------
 // Player
@@ -2616,128 +2764,268 @@ function renderVersionDetail(songId, versionId) {
 function renderPlayer() {
   setHeader("Player");
 
-  const now = state.player?.nowPlaying;
-  const queue = state.player?.queue || [];
+  // Build playlist rows (one row per version where playerYes === true)
+  const items = playerItems(state); // uses playerFilter/playerSort globals
 
-  const nowSong = now ? getSong(now.songId) : null;
-  const nowV = nowSong ? getVersion(nowSong, now.versionId) : null;
+  const now = state.player?.nowPlaying || null;
 
+  function isNowPlayingRow(songId, versionId) {
+    return !!(now && now.songId === songId && now.versionId === versionId);
+  }
+
+  function openPlayerActionSheet(item) {
+    // Remove any existing sheet
+    document.querySelectorAll(".actionSheetBackdrop, .actionSheet").forEach(el => el.remove());
+
+    const s = getSong(item.songId);
+    const v = s ? getVersion(s, item.versionId) : null;
+    if (!s || !v) return;
+
+    // Ensure flags exist
+    ensureVersionFlags(v);
+
+    const backdrop = document.createElement("div");
+    backdrop.className = "actionSheetBackdrop";
+
+    const sheet = document.createElement("div");
+    sheet.className = "actionSheet";
+    sheet.innerHTML = `
+      <div class="actionSheetHeader">
+        <div style="font-weight:900; font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+          ${escapeHtml(s.title || "Untitled")}
+        </div>
+        <div class="small" style="margin-top:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+          ${escapeHtml(v.label || "Version")}
+        </div>
+      </div>
+
+      <button class="actionSheetBtn" data-act="play">Play</button>
+      <button class="actionSheetBtn" data-act="queue">Add to Queue</button>
+      <button class="actionSheetBtn" data-act="fav">
+        ${v.favorite ? "Unfavorite" : "Favorite"}
+      </button>
+
+      <button class="actionSheetBtn" data-act="goto">Go to Song</button>
+
+      <button class="actionSheetBtn danger" data-act="remove">Remove from Playlist</button>
+      <button class="actionSheetBtn" data-act="cancel">Cancel</button>
+    `;
+
+    function close() {
+      backdrop.remove();
+      sheet.remove();
+    }
+
+    backdrop.addEventListener("click", close);
+
+    sheet.querySelectorAll("[data-act]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const act = btn.getAttribute("data-act");
+
+        if (act === "play") {
+          close();
+          playVersion(s.id, v.id, { goPlayer: true });
+          return;
+        }
+
+        if (act === "queue") {
+          addToQueue(s.id, v.id);
+          close();
+          return;
+        }
+
+        if (act === "fav") {
+          v.favorite = !v.favorite;
+          s.updatedAt = nowStamp();
+          saveState();
+          toast(v.favorite ? "Favorited 💚" : "Unfavorited");
+          close();
+          renderPlayer();
+          return;
+        }
+
+        if (act === "remove") {
+          v.playerYes = false;
+          s.updatedAt = nowStamp();
+          saveState();
+          toast("Removed from playlist");
+          close();
+          renderPlayer();
+          return;
+        }
+
+        if (act === "goto") {
+          close();
+          currentTab = "songs";
+          drawerView = null;
+          overlayView = null;
+          selectedSongId = s.id;
+          selectedVersionId = null;
+          setHeader("Song");
+          syncTabs();
+          render();
+          return;
+        }
+
+        close();
+      });
+    });
+
+    document.body.appendChild(backdrop);
+    document.body.appendChild(sheet);
+  }
+
+  // Header + chips + list
   view.innerHTML = `
-    <div class="card">
-      <h2>Now playing</h2>
+    <div class="playerHeader">
+      <div class="playerTitleRow">
+        <div>
+          <div class="small">Playlist</div>
+          <h2 class="playerTitle">Liked Versions</h2>
+          <div class="playerCount">${items.length} version${items.length === 1 ? "" : "s"}</div>
+        </div>
+
+        <div class="playerActions">
+          <button class="playerShuffleBtn" id="playerShuffle" aria-label="Shuffle">⤮</button>
+          <button class="playerPlayBtn" id="playerPlayAll" aria-label="Play">▶</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="chipsRow" aria-label="Player filters">
+      <button class="chip ${playerFilter === "all" ? "active" : ""}" data-pf="all">All</button>
+      <button class="chip ${playerFilter === "fav" ? "active" : ""}" data-pf="fav">Favorites</button>
+
+      <span style="width:10px; flex:0 0 auto;"></span>
+
+      <button class="chip ${playerSort === "recent" ? "active" : ""}" data-ps="recent">Recent</button>
+      <button class="chip ${playerSort === "title" ? "active" : ""}" data-ps="title">Title</button>
+    </div>
+
+    <div class="playerList">
       ${
-        nowSong && nowV && (nowV.link || nowV.fileId || nowV.localAudioId)
-          ? `
-            <div class="small"><b>${escapeHtml(nowSong.title)}</b> • ${escapeHtml(nowV.label || "Version")}</div>
+        items.length
+          ? items.map((it) => {
+              const s = getSong(it.songId);
+              const v = s ? getVersion(s, it.versionId) : null;
 
-            <div class="row" style="margin-top:10px; gap:10px; flex-wrap:wrap">
-              <button class="btn" id="playerToggle">Play/Pause</button>
-              <button class="btn" id="nextFromQueue" ${queue.length ? "" : "disabled"}>Next ▶</button>
-              <button class="btn" id="clearQueue">Clear queue</button>
-            </div>
+              // Fallback if missing
+              const title = it.songName || s?.title || "Untitled";
+              const meta = it.label || v?.label || "Version";
+              const fav = !!it.favorite;
 
-            <div class="row" style="margin-top:10px; gap:10px; align-items:center">
-              <span class="small" id="playerTime">0:00</span>
-              <input id="playerScrub" type="range" min="0" max="1000" value="0" style="flex:1" />
-              <span class="small" id="playerDur">0:00</span>
-            </div>
-          `
-          : `<div class="small">Nothing playing yet. Play a version from a song.</div>`
+              const cover = s ? coverSvg(s, { lite: true }) : "";
+
+              return `
+                <div class="playerRow ${isNowPlayingRow(it.songId, it.versionId) ? "playing" : ""}"
+                     data-pr-song="${it.songId}"
+                     data-pr-ver="${it.versionId}">
+                  <div class="playerCover" aria-hidden="true">${cover}</div>
+
+                  <div class="playerMain">
+                    <div class="playerName">${escapeHtml(title)}</div>
+                    <div class="playerMeta">
+                      <span>${escapeHtml(meta)}</span>
+                      ${fav ? `<span class="playerBadge fav">♥</span>` : ``}
+                      ${
+                        isNowPlayingRow(it.songId, it.versionId)
+                          ? `<span class="playerBadge">Now</span>`
+                          : ``
+                      }
+                    </div>
+                  </div>
+
+                  <button class="playerMore" data-pr-more="1" aria-label="More">⋯</button>
+                </div>
+              `;
+            }).join("")
+          : `<div class="emptyState">No playlist versions yet. Mark a version as “Player ✅” to add it here.</div>`
       }
     </div>
 
-    <div class="card">
-      <h2>Queue</h2>
-      ...
+    <div class="card" style="margin-top:12px">
+      <div class="row" style="justify-content:space-between; align-items:center">
+        <h2 style="margin:0">Queue</h2>
+        <button class="ghost" id="clearQueueMini">Clear</button>
+      </div>
+      <div class="small" style="margin-top:6px">${(state.player?.queue || []).length} item(s)</div>
     </div>
   `;
 
-$("#playerToggle")?.addEventListener("click", async () => {
-  if (!globalAudio) return;
-  if (globalAudio.paused) await playNowPlaying({ autoplay: true });
-  else globalAudio.pause();
-});
-
-function fmtTime(sec){
-  sec = Math.max(0, Math.floor(sec || 0));
-  const m = Math.floor(sec/60);
-  const s = String(sec%60).padStart(2,"0");
-  return `${m}:${s}`;
-}
-
-function syncPlayerScrub(){
-  const t = $("#playerTime");
-  const d = $("#playerDur");
-  const r = $("#playerScrub");
-  if (!t || !d || !r || !globalAudio) return;
-
-  t.textContent = fmtTime(globalAudio.currentTime);
-  d.textContent = fmtTime(globalAudio.duration);
-
-  if (Number.isFinite(globalAudio.duration) && globalAudio.duration > 0) {
-    r.value = String(Math.floor((globalAudio.currentTime / globalAudio.duration) * 1000));
-  }
-}
-
-globalAudio?.addEventListener("timeupdate", syncPlayerScrub);
-globalAudio?.addEventListener("loadedmetadata", syncPlayerScrub);
-globalAudio?.addEventListener("play", syncPlayerScrub);
-globalAudio?.addEventListener("pause", syncPlayerScrub);
-
-$("#playerScrub")?.addEventListener("input", (e) => {
-  if (!globalAudio) return;
-  const val = Number(e.target.value || 0) / 1000;
-  if (Number.isFinite(globalAudio.duration) && globalAudio.duration > 0) {
-    globalAudio.currentTime = val * globalAudio.duration;
-  }
-});
-  
-  $("#openNowSong")?.addEventListener("click", () => {
-    if (!nowSong) return;
-    currentTab = "songs";
-    selectedSongId = nowSong.id;
-    selectedVersionId = null;
-    setHeader("Song");
-    syncTabs();
-    render();
+  // Filter chips
+  view.querySelectorAll("[data-pf]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      playerFilter = btn.getAttribute("data-pf") || "all";
+      renderPlayer();
+    });
+  });
+  view.querySelectorAll("[data-ps]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      playerSort = btn.getAttribute("data-ps") || "recent";
+      renderPlayer();
+    });
   });
 
-  $("#nextFromQueue")?.addEventListener("click", () => {
-    if (!queue.length) return;
-    const next = queue.shift();
-    state.player.nowPlaying = next;
+  // Play all (in current filter/sort order)
+  $("#playerPlayAll")?.addEventListener("click", async () => {
+    if (!items.length) return toast("Playlist empty 😅");
+
+    // Set queue to remaining items after the first
+    state.player.nowPlaying = { songId: items[0].songId, versionId: items[0].versionId };
+    state.player.queue = items.slice(1).map(x => ({ songId: x.songId, versionId: x.versionId }));
     saveState();
+
+    await playNowPlaying({ autoplay: true });
+    toast("Playing ▶️");
     renderPlayer();
   });
 
-  $("#clearQueue")?.addEventListener("click", () => {
+  // Shuffle
+  $("#playerShuffle")?.addEventListener("click", async () => {
+    if (!items.length) return toast("Playlist empty 😅");
+    const shuffled = shuffleArray(items);
+
+    state.player.nowPlaying = { songId: shuffled[0].songId, versionId: shuffled[0].versionId };
+    state.player.queue = shuffled.slice(1).map(x => ({ songId: x.songId, versionId: x.versionId }));
+    saveState();
+
+    await playNowPlaying({ autoplay: true });
+    toast("Shuffled ▶️");
+    renderPlayer();
+  });
+
+  // Row interactions
+  view.querySelectorAll(".playerRow").forEach(row => {
+    row.addEventListener("click", async (e) => {
+      const isMore = e.target.closest(".playerMore");
+      const songId = row.getAttribute("data-pr-song");
+      const versionId = row.getAttribute("data-pr-ver");
+      if (!songId || !versionId) return;
+
+      const item = items.find(x => x.songId === songId && x.versionId === versionId);
+      if (!item) return;
+
+      if (isMore) {
+        e.stopPropagation();
+        openPlayerActionSheet(item);
+        return;
+      }
+
+      // Tap row = play immediately (Spotify-ish)
+      state.player.nowPlaying = { songId, versionId };
+      saveState();
+      await playNowPlaying({ autoplay: true });
+      toast("Playing ▶️");
+      renderPlayer();
+    });
+  });
+
+  // Queue clear
+  $("#clearQueueMini")?.addEventListener("click", () => {
     state.player.queue = [];
     saveState();
     toast("Queue cleared 🧼");
     renderPlayer();
-  });
-
-  view.querySelectorAll("[data-qplay]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const idx = Number(btn.getAttribute("data-qplay"));
-      const item = queue[idx];
-      if (!item) return;
-      state.player.nowPlaying = item;
-      // remove it from queue when you play it
-      state.player.queue = queue.filter((_, i) => i !== idx);
-      saveState();
-      renderPlayer();
-    });
-  });
-
-  view.querySelectorAll("[data-qrm]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const idx = Number(btn.getAttribute("data-qrm"));
-      state.player.queue = queue.filter((_, i) => i !== idx);
-      saveState();
-      toast("Removed");
-      renderPlayer();
-    });
   });
 }
 
