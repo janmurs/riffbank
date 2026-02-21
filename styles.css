@@ -1729,3 +1729,62 @@ body.fullplayer-open .view{
 body.fullplayer-open #miniPlayer{
   display: none !important;
 }
+
+/* ---- iOS Safari viewport fix ---- */
+html, body {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+}
+
+body {
+  /* dynamic vh driven by JS; fixes Safari toolbar height changes */
+  min-height: calc(var(--vh, 1vh) * 100);
+  background: var(--bg);
+}
+
+/* ---- Single bottom dock that owns the bottom layout ---- */
+#bottomDock{
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+
+  /* paint the whole “URL bar area” so there’s no dead gutter */
+  background: linear-gradient(to top, rgba(0,0,0,.85), rgba(0,0,0,.35));
+
+  /* respect iPhone home indicator */
+  padding-bottom: env(safe-area-inset-bottom);
+
+  /* spacing */
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+
+  /* keep it above everything */
+  z-index: 9999;
+}
+
+/* mini player & bottom nav should NOT be fixed anymore inside the dock */
+#miniPlayer, #bottomNav{
+  position: relative !important;
+  left: auto !important;
+  right: auto !important;
+  bottom: auto !important;
+}
+
+/* Your main content must make room for the dock */
+#view{
+  padding-bottom: calc(var(--dock-h, 160px) + 16px);
+}
+
+/* HARD OVERRIDE: mini player must behave like a normal block inside the dock */
+#bottomDock #miniPlayer{
+  position: relative !important;
+  inset: auto !important;
+  top: auto !important;
+  left: auto !important;
+  right: auto !important;
+  bottom: auto !important;
+  transform: none !important;
+}

@@ -3331,3 +3331,39 @@ window.addEventListener("DOMContentLoaded", async () => {
   preventRubberBandScroll(view);
   syncMiniPlayerUI();
 });
+
+// ---- iOS bottom-dock layout (mini player + bottom nav) ----
+function setupBottomDock() {
+  const mini = document.getElementById("miniPlayer");
+  const nav = document.getElementById("bottomNav");
+  if (!mini || !nav) return;
+
+  // Create a single fixed dock container if it doesn't exist
+  let dock = document.getElementById("bottomDock");
+  if (!dock) {
+    dock = document.createElement("div");
+    dock.id = "bottomDock";
+    document.body.appendChild(dock);
+  }
+
+  // Move mini + nav into the dock (preserves existing content/handlers)
+  dock.appendChild(mini);
+  dock.appendChild(nav);
+
+  // Update dynamic viewport unit for iOS Safari toolbar changes
+  function setVH() {
+    document.documentElement.style.setProperty("--vh", `${window.innerHeight * 0.01}px`);
+  }
+  setVH();
+  window.addEventListener("resize", setVH, { passive: true });
+  window.addEventListener("orientationchange", setVH, { passive: true });
+
+  // Tell the app how tall the dock is so the content can pad correctly
+  function setDockH() {
+    document.documentElement.style.setProperty("--dock-h", `${dock.offsetHeight}px`);
+  }
+  setDockH();
+  window.addEventListener("resize", setDockH, { passive: true });
+  window.addEventListener("orientationchange", setDockH, { passive: true });
+}
+setupBottomDock();
