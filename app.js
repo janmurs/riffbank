@@ -22,6 +22,30 @@ let playerFilter = "all"; // all | fav
 let playerSort = "recent"; // recent | title
 let playerQueue = []; // array of { songId, versionId }
 let sheetState = null; // { songId, versionId }
+let lastTabBeforeFullPlayer = null;
+let fullPlayerOpen = false;
+
+// NEW: fullscreen player UI state (single source of truth)
+let isFullPlayerOpen = false;
+
+function setFullPlayerOpen(on) {
+  isFullPlayerOpen = !!on;
+
+  // One CSS toggle so fullscreen can take the whole space
+  document.body.classList.toggle("fullplayer-open", isFullPlayerOpen);
+
+  // Hard guarantee: never show both at once
+  if (miniPlayerEl) {
+    miniPlayerEl.classList.toggle("hidden", isFullPlayerOpen);
+    miniPlayerEl.classList.toggle("visible", !isFullPlayerOpen);
+    miniPlayerEl.setAttribute("aria-hidden", isFullPlayerOpen ? "true" : "false");
+  }
+
+  // Also remove the extra bottom padding that reserves space for mini player
+  if (isFullPlayerOpen) {
+    document.body.classList.remove("hasMiniPlayer");
+  }
+}
 
 // -----------------------------
 // Splash animation sequence (awaitable)
@@ -202,6 +226,68 @@ async function getAudioBlob(id) {
   });
 }
 
+function getActiveTab() {
+  // If you already track current tab in a variable, return that instead.
+  // Fallback: find the active bottom nav button.
+  const active = document.querySelector(".bottomNav .active");
+  return active?.dataset?.tab || "home";
+}
+
+function setActiveTab(tab) {
+  // Use YOUR existing tab switcher here if you have one.
+  // This is intentionally a lightweight fallback.
+  document.querySelectorAll(".bottomNav [data-tab]").forEach((b) => {
+    b.classList.toggle("active", b.dataset.tab === tab);
+  });
+}
+
+function ensureNowPlayingOverlay() {
+  let el = document.getElementById("nowPlayingOverlay");
+  if (el) return el;
+
+  el = document.createElement("div");
+  el.id = "nowPlayingOverlay";
+  el.style.position = "fixed";
+  el.style.inset = "0";
+  el.style.zIndex = "9998";
+  el.style.display = "none";         // hidden by default
+  el.style.background = "transparent"; // your CSS handles background vibes
+  document.body.appendChild(el);
+  return el;
+}
+
+function openNowPlaying() {
+  if (fullPlayerOpen) return;
+
+  lastTabBeforeFullPlayer = getActiveTab(); // 👈 remember where we were
+  fullPlayerOpen = true;
+
+  document.body.classList.add("fullplayer-open");
+
+  const overlay = ensureNowPlayingOverlay();
+  overlay.style.display = "block";
+  overlay.innerHTML = renderNowPlayingHTML(); // 👈 you’ll add this next
+
+  wireNowPlayingEvents(overlay); // 👈 hook buttons
+}
+
+function closeNowPlaying() {
+  if (!fullPlayerOpen) return;
+
+  fullPlayerOpen = false;
+  document.body.classList.remove("fullplayer-open");
+
+  const overlay = document.getElementById("nowPlayingOverlay");
+  if (overlay) {
+    overlay.style.display = "none";
+    overlay.innerHTML = "";
+  }
+
+  // ✅ DO NOT navigate anywhere.
+  // ✅ Optional: just re-highlight the tab we were on (purely cosmetic)
+  if (lastTabBeforeFullPlayer) setActiveTab(lastTabBeforeFullPlayer);
+}
+
 async function getLocalObjectUrl(localAudioId) {
   if (!localAudioId) return "";
   if (audioUrlCache.has(localAudioId)) return audioUrlCache.get(localAudioId);
@@ -247,7 +333,24 @@ function isPlayable(v){
 }
 
 async function syncMiniPlayerUI() {
+    // ✅ If fullscreen Now Playing is open, mini player must never appear
+  if (document.body.classList.contains("fullplayer-open")) {
+    miniPlayerEl.classList.add("hidden");
+    miniPlayerEl.classList.remove("visible");
+    miniPlayerEl.setAttribute("aria-hidden", "true");
+    document.body.classList.remove("hasMiniPlayer");
+    return;
+  }
+
   if (!miniPlayerEl) return;
+
+  if (isNowPlayingFullscreen) {
+    miniPlayerEl.classList.add("hidden");
+    miniPlayerEl.classList.remove("visible");
+    miniPlayerEl.setAttribute("aria-hidden", "true");
+    document.body.classList.remove("hasMiniPlayer");
+    return;
+  }
 
   const now = state.player?.nowPlaying;
   if (!now) {
@@ -671,6 +774,7 @@ let selectedSongId = null;
 let songsView = "list";
 let pendingScrollToUpload = false;
 let selectedVersionId = null; // ✅ new: when you tap a specific version row
+let playerScreen = "list"; // "list" | "now"
 
 const songsListState = {
   sortMode: "updated",
@@ -917,6 +1021,9 @@ document.querySelectorAll(".tab").forEach((btn) => {
     songsView = "list";
 
     currentTab = targetTab;
+    if (targetTab === "player") {
+      playerScreen = "list";
+    }
     syncTabs();
     setHeader(TAB_TITLES[currentTab] || "RiffBank");
     render();
@@ -1188,13 +1295,21 @@ miniPlayerEl?.addEventListener("click", (e) => {
   const isControl = e.target.closest("#miniPrev, #miniToggle, #miniNext, #miniScrub");
   if (isControl) return;
 
-  // tap bar (non-controls) opens full player view
+  // If nothing is playing, do nothing (or fallback to Player list)
+  if (!state.player?.nowPlaying) return;
+
+  // Open full-screen Now Playing
   currentTab = "player";
+  playerScreen = "now";
+
+  setFullPlayerOpen(true); // ✅ hide mini instantly before render
+
   drawerView = null;
   overlayView = null;
   selectedSongId = null;
   selectedVersionId = null;
-  setHeader("Player");
+
+  setHeader("Now Playing");
   syncTabs();
   render();
 });
@@ -1652,6 +1767,10 @@ function render() {
   if (!view) return;
 
   syncTabs();
+
+    // ✅ Enforce fullscreen player state every render (no overlap, no reserved padding)
+  setFullPlayerOpen(currentTab === "player" && playerScreen === "now");
+
   document.body.classList.toggle(
     "isHome",
     currentTab === "home" && !drawerView && !overlayView && !selectedSongId && !selectedVersionId
@@ -1672,7 +1791,10 @@ function render() {
     if (songsView === "create") return renderSongCreate();
     return renderSongsList();
   }
-  if (currentTab === "player") return renderPlayer();
+  if (currentTab === "player") {
+  if (playerScreen === "now") return renderNowPlaying();
+    return renderPlayer();
+  }
   if (currentTab === "settings") return renderSettings();
 }
 
@@ -3069,6 +3191,145 @@ function renderPlayer() {
     saveState();
     toast("Queue cleared 🧼");
     renderPlayer();
+  });
+}
+
+function renderNowPlaying() {
+  const now = state.player?.nowPlaying;
+  if (!now) {
+    playerScreen = "list";
+    return renderPlayer();
+  }
+
+  const song = getSong(now.songId);
+  const v = song ? getVersion(song, now.versionId) : null;
+  if (!song || !v) {
+    playerScreen = "list";
+    return renderPlayer();
+  }
+
+  setHeader("Now Playing");
+
+  setFullPlayerOpen(true);
+
+  const title = song.title || "Untitled";
+  const subtitle = v.label || "Version";
+  const art = coverSvg(song); // full-quality cover is fine here
+
+  view.innerHTML = `
+    <div class="npWrap">
+      <button class="npBack" id="npBackBtn">←</button>
+
+      <div class="npArt" aria-hidden="true">${art}</div>
+
+      <div class="npText">
+        <div class="npTitle">${escapeHtml(title)}</div>
+        <div class="npSub">${escapeHtml(subtitle)}</div>
+      </div>
+
+      <input id="npScrub" class="npScrub" type="range" min="0" max="1000" value="0" aria-label="Progress" />
+
+      <div class="npControls" role="group" aria-label="Playback controls">
+        <button class="npBtn" id="npPrev">⟲</button>
+        <button class="npBtn npPlay" id="npToggle">${globalAudio?.paused ? "▶" : "⏸"}</button>
+        <button class="npBtn" id="npNext">⏭</button>
+      </div>
+
+      <div class="npActions">
+        <button class="btn" id="npGoSong">Go to Song</button>
+        <button class="btn" id="npGoList">Playlist</button>
+      </div>
+    </div>
+  `;
+
+  const npScrub = $("#npScrub");
+
+  function syncNowScrub() {
+    if (!npScrub || !globalAudio) return;
+    if (Number.isFinite(globalAudio.duration) && globalAudio.duration > 0) {
+      npScrub.value = String(Math.floor((globalAudio.currentTime / globalAudio.duration) * 1000));
+    } else {
+      npScrub.value = "0";
+    }
+    $("#npToggle").textContent = globalAudio?.paused ? "▶" : "⏸";
+  }
+
+  // Initial sync + live sync
+  syncNowScrub();
+  globalAudio?.addEventListener("timeupdate", syncNowScrub);
+  globalAudio?.addEventListener("loadedmetadata", syncNowScrub);
+  globalAudio?.addEventListener("play", syncNowScrub);
+  globalAudio?.addEventListener("pause", syncNowScrub);
+
+  // Clean up listeners when we navigate away (simple pattern)
+  // (Because you're not using a framework, we remove them on next render)
+  const cleanup = () => {
+    globalAudio?.removeEventListener("timeupdate", syncNowScrub);
+    globalAudio?.removeEventListener("loadedmetadata", syncNowScrub);
+    globalAudio?.removeEventListener("play", syncNowScrub);
+    globalAudio?.removeEventListener("pause", syncNowScrub);
+  };
+
+  // Back = go to playlist list (or whatever you prefer)
+  $("#npBackBtn")?.addEventListener("click", () => {
+    cleanup();
+    setFullPlayerOpen(false);
+    playerScreen = "list";
+    setHeader("Player");
+    render();
+  });
+
+  // Scrub input
+  npScrub?.addEventListener("input", (e) => {
+    if (!globalAudio) return;
+    const val = Number(e.target.value || 0) / 1000;
+    if (Number.isFinite(globalAudio.duration) && globalAudio.duration > 0) {
+      globalAudio.currentTime = val * globalAudio.duration;
+    }
+  });
+
+  // Controls
+  $("#npToggle")?.addEventListener("click", async () => {
+    if (!globalAudio) return;
+    if (globalAudio.paused) await playNowPlaying({ autoplay: true });
+    else globalAudio.pause();
+    syncMiniPlayerUI();
+  });
+
+  $("#npNext")?.addEventListener("click", () => {
+    const q = state.player?.queue || [];
+    if (!q.length) return toast("Queue empty 😅");
+    state.player.nowPlaying = q.shift();
+    saveState();
+    playNowPlaying({ autoplay: true });
+  });
+
+  $("#npPrev")?.addEventListener("click", () => {
+    if (!globalAudio) return;
+    globalAudio.currentTime = 0;
+  });
+
+  // Actions
+  $("#npGoSong")?.addEventListener("click", () => {
+    cleanup();
+    setFullPlayerOpen(false);
+    currentTab = "songs";
+    selectedSongId = song.id;
+    selectedVersionId = null;
+    drawerView = null;
+    overlayView = null;
+    playerScreen = "list";
+    setHeader("Song");
+    syncTabs();
+    render();
+  });
+
+  $("#npGoList")?.addEventListener("click", () => {
+    cleanup();
+    setFullPlayerOpen(false);
+    playerScreen = "list";
+    setHeader("Player");
+    render();
   });
 }
 
