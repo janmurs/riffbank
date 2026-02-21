@@ -27,25 +27,20 @@
   <!-- Global audio element -->
   <audio id="globalAudio" playsinline preload="metadata"></audio>
 
-  <!-- Mini player bar -->
-  <div id="miniPlayer" class="miniPlayer hidden" aria-hidden="true">
-    <div class="miniLeft">
-      <div class="miniTitle" id="miniTitle">Nothing playing</div>
+<!-- Mini Player -->
+<div id="miniPlayer" class="miniPlayer hidden" aria-hidden="true">
+  <div class="miniTop">
+    <div id="miniArt" class="miniArt" aria-hidden="true"></div>
 
-      <div class="miniSubRow">
-        <div class="miniSub" id="miniSub">—</div>
-        <div class="miniBadge" id="miniQueueBadge" style="display:none;">0</div>
-      </div>
-
-      <input id="miniScrub" class="miniScrub" type="range" min="0" max="1000" value="0" />
-    </div>
-
-    <div class="miniRight">
-      <button class="miniBtn" id="miniPrev" aria-label="Previous">⏮</button>
-      <button class="miniBtn miniPlay" id="miniToggle" aria-label="Play/Pause">▶</button>
-      <button class="miniBtn" id="miniNext" aria-label="Next">⏭</button>
+    <div class="miniControls" role="group" aria-label="Mini player controls">
+      <button id="miniPrev" class="miniBtn" aria-label="Previous">⟲</button>
+      <button id="miniToggle" class="miniBtn miniPlay" aria-label="Play/Pause">▶</button>
+      <button id="miniNext" class="miniBtn" aria-label="Next">⏭</button>
     </div>
   </div>
+
+  <input id="miniScrub" class="miniScrub" type="range" min="0" max="1000" value="0" aria-label="Progress" />
+</div>
 
   <!-- Splash / Loading -->
   <div id="splash" aria-hidden="false">

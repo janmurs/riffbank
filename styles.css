@@ -280,7 +280,7 @@ textarea{ min-height:100px; resize:vertical; }
 }
 
 /* =========================
-   Mini player (ABOVE bottom nav, centered, never covers it)
+   Mini player (clean: art + controls + progress)
    ========================= */
 .miniPlayer{
   position: fixed;
@@ -292,9 +292,8 @@ textarea{ min-height:100px; resize:vertical; }
   z-index: 50;
 
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  flex-direction: column;
+  gap: 8px;
 
   padding: 10px 12px;
   border-radius: 14px;
@@ -303,7 +302,6 @@ textarea{ min-height:100px; resize:vertical; }
   border: 1px solid rgba(255,255,255,.08);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
-
   box-shadow: 0 10px 28px rgba(0,0,0,.35);
 
   opacity: 0;
@@ -319,32 +317,32 @@ textarea{ min-height:100px; resize:vertical; }
   pointer-events: auto;
 }
 
-.miniLeft{
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+.playerRow.playing{
+  background: rgba(30,215,96,.10);
+  border: 1px solid rgba(30,215,96,.18);
 }
 
-.miniTitle{
-  font-weight: 700;
-  font-size: 14px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.miniTop{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap: 12px;
 }
 
-.miniSub{
-  opacity: .8;
-  font-size: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.miniArt{
+  width: 42px;
+  height: 42px;
+  border-radius: 10px;
+  overflow:hidden;
+  flex: 0 0 auto;
+  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(255,255,255,.06);
 }
+.miniArt svg{ width: 100%; height: 100%; display:block; }
 
-.miniRight{
-  display: flex;
-  align-items: center;
+.miniControls{
+  display:flex;
+  align-items:center;
   gap: 10px;
 }
 
@@ -362,26 +360,9 @@ textarea{ min-height:100px; resize:vertical; }
   padding: 8px 12px;
 }
 
-.miniSubRow{
-  display:flex;
-  align-items:center;
-  gap:8px;
-  min-width:0;
-}
-
-.miniBadge{
-  font-size: 12px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: rgba(255,255,255,.10);
-  border: 1px solid rgba(255,255,255,.10);
-  opacity: .9;
-  flex: 0 0 auto;
-}
-
 .miniScrub{
   width: 100%;
-  margin-top: 6px;
+  margin: 0;
 }
 
 /* =========================
@@ -1405,4 +1386,227 @@ body.splashing .app{
 /* Optional: nicer hover / press */
 .songRow:active{
   background: rgba(255,255,255,.04);
+}
+
+/* =========================
+   Player (Spotify-style list)
+   ========================= */
+
+.playerHeader {
+  padding: 18px 16px 10px;
+}
+
+.playerTitleRow{
+  display:flex;
+  align-items:flex-end;
+  justify-content:space-between;
+  gap:12px;
+}
+
+.playerTitle{
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+.playerCount{
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.playerActions{
+  display:flex;
+  align-items:center;
+  gap: 10px;
+}
+
+.playerPlayBtn{
+  width: 52px;
+  height: 52px;
+  border-radius: 999px;
+  border: 0;
+  cursor: pointer;
+  background: #1ed760;
+  color: #0b0b0f;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  font-weight: 900;
+  box-shadow: 0 10px 24px rgba(0,0,0,.35);
+}
+.playerPlayBtn:active{ transform: translateY(1px); }
+
+.playerShuffleBtn{
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,.06);
+  color: var(--text);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  cursor:pointer;
+}
+
+.chipsRow{
+  display:flex;
+  gap: 10px;
+  padding: 8px 16px 6px;
+  overflow:auto;
+  -webkit-overflow-scrolling: touch;
+}
+.chipsRow::-webkit-scrollbar{ display:none; }
+
+.chip{
+  padding: 9px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,.06);
+  color: var(--text);
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.chip.active{
+  background: rgba(255,255,255,.12);
+  border-color: rgba(255,255,255,.20);
+}
+
+.playerList{
+  padding: 8px 12px 140px; /* leaves room for mini player + bottom nav */
+}
+
+.playerRow{
+  display:grid;
+  grid-template-columns: 52px 1fr 34px;
+  gap: 12px;
+  align-items:center;
+  padding: 10px 10px;
+  border-radius: 14px;
+  cursor: pointer;
+}
+.playerRow:hover{
+  background: rgba(255,255,255,.04);
+}
+.playerRow:active{
+  background: rgba(255,255,255,.06);
+}
+
+.playerCover{
+  width: 52px;
+  height: 52px;
+  border-radius: 10px;
+  background: rgba(255,255,255,.08);
+  border: 1px solid rgba(255,255,255,.10);
+  overflow:hidden;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+.playerCover img{
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display:block;
+}
+
+.playerMain{
+  min-width: 0;
+}
+.playerName{
+  font-weight: 750;
+  font-size: 15px;
+  line-height: 1.2;
+  color: var(--text);
+  overflow:hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.playerMeta{
+  margin-top: 4px;
+  display:flex;
+  gap: 10px;
+  align-items:center;
+  color: var(--muted);
+  font-size: 12.5px;
+  overflow:hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.playerBadge{
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,.14);
+  background: rgba(255,255,255,.06);
+  color: rgba(255,255,255,.8);
+}
+.playerBadge.fav{
+  border-color: rgba(30,215,96,.45);
+  background: rgba(30,215,96,.12);
+  color: rgba(200,255,220,.95);
+}
+
+.playerMore{
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: rgba(255,255,255,.75);
+  cursor:pointer;
+}
+.playerMore:hover{
+  background: rgba(255,255,255,.06);
+  border-color: rgba(255,255,255,.08);
+}
+
+/* Action sheet (three dot menu) */
+.actionSheetBackdrop{
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.55);
+  z-index: 60;
+}
+
+.actionSheet{
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--tabbar-h) + var(--mini-gap) + 10px);
+  width: min(520px, calc(100vw - 24px));
+  border-radius: 18px;
+  background: rgba(18,18,22,.92);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255,255,255,.10);
+  z-index: 61;
+  overflow:hidden;
+}
+
+.actionSheetHeader{
+  padding: 14px 14px 10px;
+  border-bottom: 1px solid rgba(255,255,255,.08);
+}
+
+.actionSheetBtn{
+  width:100%;
+  text-align:left;
+  padding: 14px;
+  background: transparent;
+  border: 0;
+  border-top: 1px solid rgba(255,255,255,.06);
+  color: rgba(255,255,255,.90);
+  font-size: 14px;
+  cursor:pointer;
+}
+.actionSheetBtn:hover{ background: rgba(255,255,255,.05); }
+.actionSheetBtn.danger{ color: rgba(255,120,120,.92); }
+
+.emptyState{
+  padding: 22px 16px;
+  color: rgba(255,255,255,.70);
+  font-size: 14px;
 }
