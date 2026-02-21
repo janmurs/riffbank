@@ -1610,3 +1610,57 @@ body.splashing .app{
   color: rgba(255,255,255,.70);
   font-size: 14px;
 }
+
+/* --- FULLSCREEN LAYOUT + NO "BLANK BOTTOM" --- */
+
+/* 1) Make the page truly fill the device height (iOS friendly) */
+html, body {
+  height: 100%;
+}
+
+body{
+  min-height: 100dvh; /* important on iOS */
+  background: var(--bg);
+  overflow-x: hidden;
+}
+
+/* 2) Spotify-ish background layer that always fills the whole screen */
+body::before{
+  content:"";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(900px 520px at 30% -10%, rgba(115,155,255,.22), transparent 60%),
+    radial-gradient(900px 520px at 85% 10%, rgba(160,95,255,.18), transparent 60%),
+    linear-gradient(180deg, rgba(255,255,255,.06), transparent 30%),
+    var(--bg);
+}
+
+/* 3) Make the app wrapper a full-height column */
+#app, .app {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 4) Make the main view consume the remaining height */
+#view, .view {
+  flex: 1;
+  min-height: 0; /* lets internal scrolling work correctly */
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+
+  /* IMPORTANT: give the content enough bottom padding so it never hides
+     behind the mini player + bottom nav + safe-area */
+  padding-bottom: calc(
+    var(--tabbar-h) + var(--mini-h) + (var(--mini-gap) * 2) + env(safe-area-inset-bottom, 0px)
+  );
+}
+
+/* 5) If you have a "screen" / "page" container that was using its own background,
+      make sure it stays transparent so the global background shows through. */
+.screen, .page, .panel, .content {
+  background: transparent;
+}
