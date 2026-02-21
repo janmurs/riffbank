@@ -6,12 +6,10 @@
 // - Dashboard + Settings
 // - Export / Import
 
-const LS_KEY = "riffbank_v1";
-const $ = (sel) => document.querySelector(sel);
+import { $ } from "./ui/dom.js";
+import { runSplashSequence } from "./splash/splash.js";
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
+const LS_KEY = "riffbank_v1";
 
 let splashAlreadyRan = false;
 
@@ -45,126 +43,6 @@ function setFullPlayerOpen(on) {
   if (isFullPlayerOpen) {
     document.body.classList.remove("hasMiniPlayer");
   }
-}
-
-// -----------------------------
-// Splash animation sequence (awaitable)
-// -----------------------------
-async function runSplashSequence() {
-  const splash = document.getElementById("splash");
-  const title = document.getElementById("splashTitle");
-  const subWrap = document.getElementById("splashSub");       // wrapper div (IMPORTANT)
-  const subText = document.getElementById("splashSubText");   // text span
-  const spinner = document.getElementById("splashSpinner");
-
-  if (!splash) return;
-
-  document.body.classList.add("splashing");
-
-  // Add shimmer to title (CSS handles the effect)
-  if (title) title.classList.add("shimmer");
-
-  // ✅ IMPORTANT: NO built-in "…" here — the dancing dots handle that inline
-  const lines = [
-    "Indexing your universe",
-    "Syncing sessions",
-    "Entering RiffBank",
-  ];
-
-  // ---- timing knobs (premium, not rushed) ----
-  const HOLD_1 = 2400;
-  const HOLD_2 = 2400;
-  const HOLD_3 = 900;
-
-  // Read jump duration from CSS var if available (fallback to 520)
-  const cssJump = (() => {
-    try {
-      const raw = getComputedStyle(document.documentElement)
-        .getPropertyValue("--splash-jump-ms")
-        .trim();
-      const n = parseInt(raw, 10);
-      return Number.isFinite(n) ? n : 520;
-    } catch {
-      return 520;
-    }
-  })();
-
-  const JUMP_MS = cssJump;
-  const JUMP_IN_SETTLE = 80;
-
-  // Ensure initial DOM text is correct (DON’T wipe children)
-  if (subText) subText.textContent = lines[0];
-
-  // Start hidden; CSS should manage actual opacity/position
-  // ✅ Jump classes belong on the WRAPPER (#splashSub) because CSS animates #splashSub
-  if (subWrap) subWrap.classList.remove("show", "churn", "jumpIn", "jumpOut", "static");
-
-  // Hide spinner until after the 1.2s logo moment
-  if (spinner) spinner.classList.remove("show");
-
-  // --- 1.2s “logo shine” moment ---
-  await sleep(1200);
-
-  // Slide title up + fade in spinner/sub area
-  splash.classList.add("phase1");
-  if (spinner) spinner.classList.add("show");
-
-  if (subWrap) subWrap.classList.add("show", "churn", "static"); // phrase 1 = stable display
-
-  // Let the title slide animation complete before we start text transitions
-  await sleep(550);
-
-  async function jumpSwap(nextText) {
-    if (!subWrap || !subText) return;
-
-    // ✅ FIX: "static" disables animation via CSS (!important),
-    // so remove it during the jump, then restore after.
-    subWrap.classList.remove("static");
-
-    // OUT current phrase
-    subWrap.classList.remove("jumpIn", "jumpOut");
-    void subWrap.offsetHeight;          // ✅ restart animation reliably
-    subWrap.classList.add("jumpOut");
-    await sleep(JUMP_MS);
-
-    // swap text
-    subWrap.classList.remove("jumpOut");
-    void subWrap.offsetHeight;          // ✅ restart animation reliably
-    subText.textContent = nextText;
-
-    // IN next phrase
-    subWrap.classList.add("jumpIn");
-    await sleep(JUMP_MS);
-
-    subWrap.classList.remove("jumpIn");
-
-    // ✅ restore static "stable" state after jump completes
-    subWrap.classList.add("static");
-  }
-
-  // ---- Hold PHRASE 1 ----
-  await sleep(HOLD_1);
-
-  // ✅ Phrase 1 -> Phrase 2 (JUMP)
-  await jumpSwap(lines[1]);
-
-  // ---- Hold PHRASE 2 ----
-  await sleep(HOLD_2);
-
-  // ✅ Phrase 2 -> Phrase 3 (JUMP)
-  // ✅ AND: no "jump" after phrase 3 (only hold + fade out)
-  await jumpSwap(lines[2]);
-
-  // Hold briefly while app finishes rendering
-  await sleep(HOLD_3);
-
-  // Hide splash (no extra jump here)
-  splash.classList.add("hide");
-  splash.setAttribute("aria-hidden", "true");
-  await sleep(420);
-  splash.remove();
-
-  document.body.classList.remove("splashing");
 }
 
 const view = $("#view");
@@ -718,7 +596,7 @@ function shuffleArray(arr) {
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", async () => {
     try {
-      const reg = await navigator.serviceWorker.register("/service-worker.js");
+      const reg = await navigator.serviceWorker.register("/sw.js");
 
       // If a new SW activates, reload once so we’re on the newest cached assets
       let reloaded = false;
