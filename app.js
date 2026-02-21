@@ -613,7 +613,25 @@ function shuffleArray(arr) {
 
 // PWA SW register
 if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("./sw.js").catch(() => {});
+  window.addEventListener("load", async () => {
+    try {
+      const reg = await navigator.serviceWorker.register("/service-worker.js");
+      // Optional: listen for updates and prompt user
+      reg.addEventListener("updatefound", () => {
+        const newWorker = reg.installing;
+        if (!newWorker) return;
+
+        newWorker.addEventListener("statechange", () => {
+          if (newWorker.state === "installed" && navigator.serviceWorker.controller) {
+            // New version ready — you can toast + “Refresh” button here
+            console.log("New version available.");
+          }
+        });
+      });
+    } catch (e) {
+      console.warn("SW registration failed", e);
+    }
+  });
 }
 
 const TAB_TITLES = {
