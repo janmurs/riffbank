@@ -1676,6 +1676,20 @@ function render() {
   if (currentTab === "settings") return renderSettings();
 }
 
+window.addEventListener("DOMContentLoaded", async () => {
+  await runSplashSequence();
+
+  setHeader("RiffBank");
+  syncTabs();
+  render();
+
+  // ✅ Ensure miniPlayer + bottomNav exist, then dock them at the bottom
+  requestAnimationFrame(() => setupBottomDock());
+
+  preventRubberBandScroll(view);
+  syncMiniPlayerUI();
+});
+
 // ---------------------
 // Drawer views
 // ---------------------
@@ -3328,6 +3342,10 @@ window.addEventListener("DOMContentLoaded", async () => {
   setHeader("RiffBank");
   syncTabs();
   render();
+
+  // ✅ dock the mini player + nav AFTER they exist
+  setupBottomDock();
+
   preventRubberBandScroll(view);
   syncMiniPlayerUI();
 });

@@ -179,10 +179,13 @@ textarea{ min-height:100px; resize:vertical; }
    ========================= */
 .bottomNav{
   position: fixed;
-  left: 0;
+  left: 50%;
+  transform: translateX(-50%);
   bottom: 0;
 
-  width: 100%;
+  /* ✅ This is the fix */
+  width: min(var(--app-maxw), 100vw);
+  max-width: 100vw;
 
   padding: 10px 14px env(safe-area-inset-bottom);
   background: rgba(8,8,12,.82);
@@ -1725,4 +1728,64 @@ body.fullplayer-open .view{
 /* ✅ Hard-kill mini player while fullscreen is open */
 body.fullplayer-open #miniPlayer{
   display: none !important;
+}
+
+/* ---- iOS Safari viewport fix ---- */
+html, body {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+}
+
+body {
+  /* dynamic vh driven by JS; fixes Safari toolbar height changes */
+  min-height: calc(var(--vh, 1vh) * 100);
+  background: var(--bg);
+}
+
+/* ---- Single bottom dock that owns the bottom layout ---- */
+#bottomDock{
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+
+  /* paint the whole “URL bar area” so there’s no dead gutter */
+  background: linear-gradient(to top, rgba(0,0,0,.85), rgba(0,0,0,.35));
+
+  /* respect iPhone home indicator */
+  padding-bottom: env(safe-area-inset-bottom);
+
+  /* spacing */
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+
+  /* keep it above everything */
+  z-index: 9999;
+}
+
+/* mini player & bottom nav should NOT be fixed anymore ONLY when inside the dock */
+#bottomDock #miniPlayer,
+#bottomDock #bottomNav{
+  position: relative !important;
+  left: auto !important;
+  right: auto !important;
+  bottom: auto !important;
+}
+
+/* Your main content must make room for the dock */
+#view{
+  padding-bottom: calc(var(--dock-h, 160px) + 16px);
+}
+
+/* HARD OVERRIDE: mini player must behave like a normal block inside the dock */
+#bottomDock #miniPlayer{
+  position: relative !important;
+  inset: auto !important;
+  top: auto !important;
+  left: auto !important;
+  right: auto !important;
+  bottom: auto !important;
+  transform: none !important;
 }
