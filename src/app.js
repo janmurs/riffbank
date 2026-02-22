@@ -11,6 +11,9 @@ import { runSplashSequence } from "./splash/splash.js";
 
 const LS_KEY = "riffbank_v1";
 
+// Dev toggle: skip splash animation
+const DISABLE_SPLASH = true;
+
 let splashAlreadyRan = false;
 
 // ---------------------
@@ -205,6 +208,8 @@ const miniToggleEl = document.getElementById("miniToggle");
 const miniNextEl   = document.getElementById("miniNext");
 const miniPrevEl   = document.getElementById("miniPrev");
 const miniScrubEl  = document.getElementById("miniScrub");
+const miniTitleEl  = document.getElementById("miniTitle");
+const miniSubEl    = document.getElementById("miniSub");
 
 function isPlayable(v){
   return !!(v?.link || v?.fileId || v?.localAudioId);
@@ -222,13 +227,14 @@ async function syncMiniPlayerUI() {
 
   if (!miniPlayerEl) return;
 
-  if (isNowPlayingFullscreen) {
-    miniPlayerEl.classList.add("hidden");
-    miniPlayerEl.classList.remove("visible");
-    miniPlayerEl.setAttribute("aria-hidden", "true");
-    document.body.classList.remove("hasMiniPlayer");
-    return;
-  }
+// Guard: older builds may not define isNowPlayingFullscreen
+if (typeof isNowPlayingFullscreen !== "undefined" && isNowPlayingFullscreen) {
+  miniPlayerEl.classList.add("hidden");
+  miniPlayerEl.classList.remove("visible");
+  miniPlayerEl.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("hasMiniPlayer");
+  return;
+}
 
   const now = state.player?.nowPlaying;
   if (!now) {
@@ -261,6 +267,20 @@ async function syncMiniPlayerUI() {
     // Use your existing neon cover generator (lite for speed)
     miniArtEl.innerHTML = coverSvg(song, { lite: true });
   }
+
+// title / subtitle (set first so text always shows even if art generation fails)
+if (miniTitleEl) miniTitleEl.textContent = song.title || "Untitled";
+if (miniSubEl) miniSubEl.textContent = v.label || "";
+
+// album art
+if (miniArtEl) {
+  try {
+    miniArtEl.innerHTML = coverSvg(song, { lite: true });
+  } catch (e) {
+    console.warn("mini coverSvg failed:", e);
+    miniArtEl.innerHTML = "";
+  }
+}
 
   // play/pause icon
   if (miniToggleEl) miniToggleEl.textContent = globalAudio?.paused ? "▶" : "⏸";
@@ -1677,14 +1697,16 @@ function render() {
 }
 
 window.addEventListener("DOMContentLoaded", async () => {
+  if (!DISABLE_SPLASH) {
   await runSplashSequence();
+} else {
+  const splash = document.getElementById("splash");
+  if (splash) splash.remove();
+}
 
   setHeader("RiffBank");
   syncTabs();
   render();
-
-  // ✅ Ensure miniPlayer + bottomNav exist, then dock them at the bottom
-  requestAnimationFrame(() => setupBottomDock());
 
   preventRubberBandScroll(view);
   syncMiniPlayerUI();
@@ -3122,7 +3144,7 @@ function renderNowPlaying() {
       <input id="npScrub" class="npScrub" type="range" min="0" max="1000" value="0" aria-label="Progress" />
 
       <div class="npControls" role="group" aria-label="Playback controls">
-        <button class="npBtn" id="npPrev">⟲</button>
+        <button class="npBtn" id="npPrev">⏮</button>
         <button class="npBtn npPlay" id="npToggle">${globalAudio?.paused ? "▶" : "⏸"}</button>
         <button class="npBtn" id="npNext">⏭</button>
       </div>
@@ -3342,9 +3364,6 @@ window.addEventListener("DOMContentLoaded", async () => {
   setHeader("RiffBank");
   syncTabs();
   render();
-
-  // ✅ dock the mini player + nav AFTER they exist
-  setupBottomDock();
 
   preventRubberBandScroll(view);
   syncMiniPlayerUI();
