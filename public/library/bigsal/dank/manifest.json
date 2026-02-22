@@ -1,0 +1,23 @@
+{
+  "band": "bigsal",
+  "displayName": "BigSal",
+  "songs": [
+    {
+      "slug": "dank",
+      "title": "DAK",
+      "versions": [
+        {
+          "id": "dank_20251116",
+          "title": "DANK 20251116",
+          "file": "./library/j_n_th_n/empathy/dank_20251116.wav",
+          "date": "2025-11-16",
+          "format": "wav",
+          "best": true,
+          "bpm": null,
+          "key": null,
+          "notes": ""
+        }
+      ]
+    }
+  ]
+}
