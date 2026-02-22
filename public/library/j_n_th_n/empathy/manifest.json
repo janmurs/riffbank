@@ -1,0 +1,23 @@
+{
+  "band": "j_n_th_n",
+  "displayName": "j_n_th_n",
+  "songs": [
+    {
+      "slug": "empathy",
+      "title": "Empathy",
+      "versions": [
+        {
+          "id": "empathy_v4",
+          "title": "EMPATHY v4",
+          "file": "./library/j_n_th_n/empathy/empathy_v4.wav",
+          "date": "2025-11-13",
+          "format": "wav",
+          "best": true,
+          "bpm": null,
+          "key": null,
+          "notes": ""
+        }
+      ]
+    }
+  ]
+}
