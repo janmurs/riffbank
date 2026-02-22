@@ -1014,6 +1014,16 @@ body.splashing .app{
   background: rgba(255,255,255,.04);
 }
 
+/* Blurry cover background should NOT take up layout space */
+.albumBg{
+  position: absolute;
+  inset: 0;
+  filter: blur(22px) saturate(1.1);
+  opacity: .18;
+  transform: scale(1.08);
+  pointer-events: none;
+}
+
 /* Blurry cover as background */
 @media (max-width: 520px){
   .albumBg{
