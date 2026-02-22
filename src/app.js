@@ -572,7 +572,7 @@ async function seedDefaultLibraryIfNeeded({ force = false } = {}) {
 
   let index;
   try {
-    index = await fetchJson("./library/index.json");
+    index = await fetchJson("./public/library/index.json");
   } catch {
     return false;
   }
