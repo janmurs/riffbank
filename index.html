@@ -27,13 +27,17 @@
   <!-- Global audio element -->
   <audio id="globalAudio" playsinline preload="metadata"></audio>
 
-<!-- Mini Player -->
 <div id="miniPlayer" class="miniPlayer hidden" aria-hidden="true">
   <div class="miniTop">
     <div id="miniArt" class="miniArt" aria-hidden="true"></div>
 
+    <div class="miniMeta">
+      <div id="miniTitle" class="miniTitle"></div>
+      <div id="miniSub" class="miniSub"></div>
+    </div>
+
     <div class="miniControls" role="group" aria-label="Mini player controls">
-      <button id="miniPrev" class="miniBtn" aria-label="Previous">⟲</button>
+      <button id="miniPrev" class="miniBtn" aria-label="Previous">⏮</button>
       <button id="miniToggle" class="miniBtn miniPlay" aria-label="Play/Pause">▶</button>
       <button id="miniNext" class="miniBtn" aria-label="Next">⏭</button>
     </div>
