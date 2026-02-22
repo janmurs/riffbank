@@ -67,6 +67,38 @@ const AUDIO_DB = "riffbank_audio_v1";
 const AUDIO_STORE = "files";
 const audioUrlCache = new Map(); // localAudioId -> objectURL
 
+// ---------------------
+// iOS audio unlock (required if you do async before play())
+// ---------------------
+let audioUnlocked = false;
+
+// Tiny silent MP3 (very short). Used only to unlock iOS playback.
+const SILENT_MP3 =
+  "data:audio/mpeg;base64,//uQxAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCA" +
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" +
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+async function unlockAudioOnce() {
+  if (audioUnlocked || !globalAudio) return;
+
+  try {
+    const prevSrc = globalAudio.src;
+    globalAudio.src = SILENT_MP3;
+
+    // IMPORTANT: this must happen inside a user gesture handler
+    await globalAudio.play();
+    globalAudio.pause();
+
+    // restore whatever was there
+    if (prevSrc) globalAudio.src = prevSrc;
+
+    audioUnlocked = true;
+  } catch (e) {
+    // Even if unlock fails, don't hard-crash
+    console.warn("Audio unlock failed:", e);
+  }
+}
+
 function openAudioDB() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(AUDIO_DB, 1);
@@ -478,6 +510,83 @@ function normalizeFileUrl(file) {
   return "./" + f;
 }
 
+function extFromPath(p) {
+  const m = String(p || "").match(/\.([a-z0-9]+)$/i);
+  return (m?.[1] || "").toLowerCase();
+}
+
+function yyyymmddFromDate(d) {
+  const s = safeString(d);
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return "";
+  return `${m[1]}${m[2]}${m[3]}`;
+}
+
+function guessNumericSuffixFromTitle(t) {
+  const s = safeString(t);
+  // e.g. "Wasting 20260206 2" -> "2"
+  const m = s.match(/\b(\d{1,2})\b\s*$/);
+  return m ? m[1] : "";
+}
+
+function resolveSeedLibraryUrl({ bandId, songSlug, verObj }) {
+  // Only for seeded catalog items coming from /public/library manifests.
+  // Canonical layout:
+  //   /library/<band>/<songSlug>/<filename>
+  const raw = safeString(verObj?.file || verObj?.url || verObj?.path || "");
+  const normalized = normalizeFileUrl(raw);
+  const band = safeString(bandId);
+  const slug = safeString(songSlug);
+
+  if (!band || !slug) return normalized;
+
+  // If manifest already points at the correct canonical folder, keep it.
+  if (normalized.includes(`/library/${band}/${slug}/`)) return normalized;
+
+  // Derive extension (prefer explicit file path ext; fallback to format)
+  const ext =
+    extFromPath(raw) ||
+    extFromPath(normalized) ||
+    safeString(verObj?.format).toLowerCase() ||
+    "wav";
+
+  const rawBase = String(raw || "").split("/").pop() || "";
+  const normBase = String(normalized || "").split("/").pop() || "";
+  const id = safeString(verObj?.id);
+
+  // Prefer a filename that matches the song slug (most reliable)
+  const candidates = [];
+  if (rawBase && rawBase.toLowerCase().startsWith(slug.toLowerCase() + "_")) candidates.push(rawBase);
+  if (normBase && normBase.toLowerCase().startsWith(slug.toLowerCase() + "_")) candidates.push(normBase);
+
+  // If id looks like a filename base, use it
+  if (id && id.toLowerCase().startsWith(slug.toLowerCase())) candidates.push(`${id}.${ext}`);
+
+  // Heuristic: slug + date stamp (+ optional numeric suffix)
+  const ds = yyyymmddFromDate(verObj?.date || verObj?.createdAt);
+  if (ds) {
+    const suffix = guessNumericSuffixFromTitle(verObj?.title || verObj?.name || "");
+    if (suffix) candidates.push(`${slug}_${ds}_${suffix}.${ext}`);
+    candidates.push(`${slug}_${ds}.${ext}`);
+  }
+
+  // Fallbacks: whatever filename we were given, or slug.ext
+  if (rawBase) candidates.push(rawBase);
+  if (normBase) candidates.push(normBase);
+  candidates.push(`${slug}.${ext}`);
+
+  // Pick first unique candidate
+  const seen = new Set();
+  const filename = candidates.find((c) => {
+    const key = String(c || "").toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  return `./library/${band}/${slug}/${filename}`;
+}
+
 function guessSongTitle(songObj) {
   return (
     safeString(songObj?.title) ||
@@ -539,7 +648,7 @@ function buildSeedSong({ bandId, bandName, songObj }) {
     : (normalizedFallback ? [{ file: normalizedFallback, title: title }] : []);
 
   const versions = finalVersions.map((v, idx) => {
-    const fileUrl = normalizeFileUrl(v?.file || v?.url || v?.path || "");
+    const fileUrl = resolveSeedLibraryUrl({ bandId, songSlug: songObj?.slug, verObj: v });
     return {
       id: uid(),
       label: guessVersionLabel(title, v, fileUrl, idx),
@@ -692,6 +801,28 @@ function pickAudioFile() {
   });
 }
 
+function normalizeAudioLink(link) {
+  if (!link) return link;
+
+  // Leave absolute / special URLs alone
+  if (/^(https?:)?\/\//i.test(link)) return link;
+  if (link.startsWith("blob:")) return link;
+  if (link.startsWith("data:")) return link;
+
+  let out = String(link).trim();
+
+  // Remove leading "./"
+  if (out.startsWith("./")) out = out.slice(1); // "./public/.." -> "/public/.."
+
+  // Ensure it starts with "/"
+  if (!out.startsWith("/")) out = "/" + out;
+
+  // Fix "public/..." paths -> served from root
+  if (out.startsWith("/public/")) out = out.slice("/public".length); // "/public/library/.." -> "/library/.."
+
+  return out;
+}
+
 // Turn a version into a playable URL (blob or link)
 async function getPlayableUrlForVersion(songId, versionId) {
   const song = getSong(songId);
@@ -711,7 +842,9 @@ async function getPlayableUrlForVersion(songId, versionId) {
     if (url) return url;
   }
 
-  if (v.link) return v.link;
+  if (v.link) {
+    return normalizeAudioLink(v.link);
+  }
   return null;
 }
 
@@ -967,6 +1100,9 @@ function playVersion(songId, versionId, { goPlayer = true } = {}) {
   state.player.nowPlaying = { songId, versionId };
   saveState();
   toast("Playing ▶️");
+
+    // ✅ unlock inside the tap gesture
+  unlockAudioOnce();
 
   // start audio immediately (user gesture-safe)
   playNowPlaying({ autoplay: true });
@@ -1338,6 +1474,9 @@ document.addEventListener("touchend", () => {
 miniToggleEl?.addEventListener("click", async (e) => {
   e.stopPropagation();
   if (!globalAudio) return;
+
+  // ✅ unlock inside the tap gesture
+  await unlockAudioOnce();
 
   if (globalAudio.paused) {
     await playNowPlaying({ autoplay: true });
@@ -3384,6 +3523,10 @@ function renderNowPlaying() {
   // Controls
   $("#npToggle")?.addEventListener("click", async () => {
     if (!globalAudio) return;
+
+    // ✅ unlock inside the tap gesture
+    await unlockAudioOnce();
+
     if (globalAudio.paused) await playNowPlaying({ autoplay: true });
     else globalAudio.pause();
     syncMiniPlayerUI();
@@ -3538,17 +3681,3 @@ function preventRubberBandScroll(container) {
     { passive: false }
   );
 }
-
-// ---------------------
-// Boot (wait for splash)
-// ---------------------
-window.addEventListener("DOMContentLoaded", async () => {
-  await runSplashSequence();
-
-  setHeader("RiffBank");
-  syncTabs();
-  render();
-
-  preventRubberBandScroll(view);
-  syncMiniPlayerUI();
-});
