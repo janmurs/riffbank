@@ -2026,7 +2026,8 @@ window.addEventListener("DOMContentLoaded", async () => {
   syncTabs();
   render();
 
-  preventRubberBandScroll(view);
+  // Allow native elastic scrolling (iOS-style rubber band) inside the main view.
+  // NOTE: We intentionally do NOT call preventRubberBandScroll(view) here.
   syncMiniPlayerUI();
 });
 
@@ -3662,6 +3663,9 @@ function preventRubberBandScroll(container) {
     (e) => {
       // ✅ Never block touches on Home (otherwise taps can die)
       if (document.body.classList.contains("isHome")) return;
+
+      // ✅ Allow native scrolling on Songs detail screens (Song + Version detail)
+      if (currentTab === "songs" && selectedSongId) return;
 
       const canScroll = container.scrollHeight > container.clientHeight + 1;
       if (!canScroll) return;
