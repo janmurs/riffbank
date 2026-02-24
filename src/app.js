@@ -3663,6 +3663,9 @@ function preventRubberBandScroll(container) {
       // ✅ Never block touches on Home (otherwise taps can die)
       if (document.body.classList.contains("isHome")) return;
 
+      const canScroll = container.scrollHeight > container.clientHeight + 1;
+      if (!canScroll) return;
+
       const tag = (e.target?.tagName || "").toLowerCase();
       if (tag === "textarea" || tag === "input" || tag === "select") return;
 
@@ -3674,7 +3677,7 @@ function preventRubberBandScroll(container) {
 
       const atTop = container.scrollTop <= 0;
       const atBottom =
-        Math.ceil(container.scrollTop + container.clientHeight) >= container.scrollHeight;
+        Math.ceil(container.scrollTop + container.clientHeight + 1) >= container.scrollHeight;
 
       if ((atTop && dy > 0) || (atBottom && dy < 0)) e.preventDefault();
     },
