@@ -1233,6 +1233,9 @@ document.querySelectorAll(".tab").forEach((btn) => {
     if (targetTab === "player") {
       playerScreen = "list";
     }
+    // ✅ Fix: if we navigate back to Home, ensure the main scroll container
+    // doesn't carry over the previous tab's scroll position.
+    if (targetTab === "home" && view) view.scrollTop = 0;
     syncTabs();
     setHeader(TAB_TITLES[currentTab] || "RiffBank");
     render();
@@ -1247,6 +1250,8 @@ headerTitle?.addEventListener("click", () => {
   songsView = "list";
   currentTab = "home";
   songsBackTarget = null;
+  // ✅ Fix: header-tap Home should also reset the main scroll container.
+  if (view) view.scrollTop = 0;
   syncTabs();
   setHeader("RiffBank");
   render();
