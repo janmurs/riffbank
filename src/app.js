@@ -30,22 +30,29 @@ let fullPlayerOpen = false;
 // NEW: fullscreen player UI state (single source of truth)
 let isFullPlayerOpen = false;
 
+// Session-only: hide mini player until the user actually plays something after a fresh launch
+let hasPlayedThisSession = false;
+
 function setFullPlayerOpen(on) {
   isFullPlayerOpen = !!on;
 
   // One CSS toggle so fullscreen can take the whole space
   document.body.classList.toggle("fullplayer-open", isFullPlayerOpen);
 
-  // Hard guarantee: never show both at once
+  // Hard guarantee: never show both at once.
+  // IMPORTANT: when closing fullscreen, do NOT force-show the mini player.
+  // Let syncMiniPlayerUI decide based on session + nowPlaying state.
   if (miniPlayerEl) {
-    miniPlayerEl.classList.toggle("hidden", isFullPlayerOpen);
-    miniPlayerEl.classList.toggle("visible", !isFullPlayerOpen);
-    miniPlayerEl.setAttribute("aria-hidden", isFullPlayerOpen ? "true" : "false");
-  }
-
-  // Also remove the extra bottom padding that reserves space for mini player
-  if (isFullPlayerOpen) {
-    document.body.classList.remove("hasMiniPlayer");
+    if (isFullPlayerOpen) {
+      miniPlayerEl.classList.add("hidden");
+      miniPlayerEl.classList.remove("visible");
+      miniPlayerEl.setAttribute("aria-hidden", "true");
+      document.body.classList.remove("hasMiniPlayer");
+    } else {
+      // Re-evaluate whether the mini player should be shown.
+      // (e.g. hide it if nothing has played this session)
+      syncMiniPlayerUI?.();
+    }
   }
 }
 
@@ -260,6 +267,15 @@ async function syncMiniPlayerUI() {
 
   if (!miniPlayerEl) return;
 
+  // ✅ Fresh-launch behavior: don't show the mini player until the user plays something this session
+  if (!hasPlayedThisSession) {
+    miniPlayerEl.classList.add("hidden");
+    miniPlayerEl.classList.remove("visible");
+    miniPlayerEl.setAttribute("aria-hidden", "true");
+    document.body.classList.remove("hasMiniPlayer");
+    return;
+  }
+
 // Guard: older builds may not define isNowPlayingFullscreen
 if (typeof isNowPlayingFullscreen !== "undefined" && isNowPlayingFullscreen) {
   miniPlayerEl.classList.add("hidden");
@@ -348,6 +364,9 @@ async function playNowPlaying({ autoplay = true } = {}){
 
   const url = await getPlayableUrlForVersion(now.songId, now.versionId);
   if (!url) return toast("No playable audio 😅");
+
+  // Mark that this session has begun playback (so mini player can appear)
+  hasPlayedThisSession = true;
 
   // Ensure only ONE audio plays in the whole app
   document.querySelectorAll("audio").forEach(a => {
@@ -1233,9 +1252,16 @@ document.querySelectorAll(".tab").forEach((btn) => {
     if (targetTab === "player") {
       playerScreen = "list";
     }
-    // ✅ Fix: if we navigate back to Home, ensure the main scroll container
-    // doesn't carry over the previous tab's scroll position.
-    if (targetTab === "home" && view) view.scrollTop = 0;
+
+    // ✅ Fix: if we navigate back to Home, ensure NO scroll position carries over.
+    // (On iOS, the page can sometimes scroll the window instead of the inner scroller.)
+    if (targetTab === "home") {
+      if (view) view.scrollTop = 0;
+      try { window.scrollTo(0, 0); } catch {}
+      try { document.documentElement.scrollTop = 0; } catch {}
+      try { document.body.scrollTop = 0; } catch {}
+    }
+
     syncTabs();
     setHeader(TAB_TITLES[currentTab] || "RiffBank");
     render();
@@ -1250,8 +1276,13 @@ headerTitle?.addEventListener("click", () => {
   songsView = "list";
   currentTab = "home";
   songsBackTarget = null;
-  // ✅ Fix: header-tap Home should also reset the main scroll container.
+
+  // ✅ Fix: header-tap Home should also reset ALL scroll positions.
   if (view) view.scrollTop = 0;
+  try { window.scrollTo(0, 0); } catch {}
+  try { document.documentElement.scrollTop = 0; } catch {}
+  try { document.body.scrollTop = 0; } catch {}
+
   syncTabs();
   setHeader("RiffBank");
   render();
