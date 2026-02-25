@@ -1,0 +1,23 @@
+{
+  "band": "chasingechoes",
+  "displayName": "Chasing Echoes",
+  "songs": [
+    {
+      "slug": "wasting",
+      "title": "Wasting",
+      "versions": [
+        {
+          "id": "wasing_20260206_2",
+          "title": "Wasting 20260206 2",
+          "file": "./library/j_n_th_n/empathy/wasing_20260206_2.wav",
+          "date": "2026-02-06",
+          "format": "wav",
+          "best": true,
+          "bpm": null,
+          "key": null,
+          "notes": ""
+        }
+      ]
+    }
+  ]
+}

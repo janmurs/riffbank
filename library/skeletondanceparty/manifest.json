@@ -1,0 +1,23 @@
+{
+  "band": "skeletondanceparty",
+  "displayName": "SkeletonDanceParty",
+  "songs": [
+    {
+      "slug": "agony",
+      "title": "Agony",
+      "versions": [
+        {
+          "id": "empathy_v4",
+          "title": "EMPATHY v4",
+          "file": "./library/j_n_th_n/empathy/agony_20251106.wav",
+          "date": "2025-11-06",
+          "format": "wav",
+          "best": true,
+          "bpm": null,
+          "key": null,
+          "notes": ""
+        }
+      ]
+    }
+  ]
+}

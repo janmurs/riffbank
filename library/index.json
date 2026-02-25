@@ -1,0 +1,9 @@
+{
+  "manifests": [
+    "./public/library/bigsal/manifest.json",
+    "./public/library/chasingechoes/manifest.json",
+    "./public/library/j_n_th_n/manifest.json",
+    "./public/library/skeletondanceparty/manifest.json",
+    "./public/library/toiletsnake/manifest.json"
+  ]
+}
