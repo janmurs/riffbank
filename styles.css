@@ -16,7 +16,7 @@
   --tabbar-h: 74px;          /* approx bottomNav visible height (excluding safe area) */
   --bottom-nav-height: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
   --mini-gap: 10px;
-  --mini-h: 64px;            /* mini bar visual height */
+  --mini-h: 92px;            /* mini bar visual height */
   --app-maxw: 820px;
 
   --rCard: 18px;
