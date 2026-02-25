@@ -37,8 +37,9 @@ html,body{
   height:100%;
   background: var(--bg);
   overflow:hidden;
-  /* Allow native iOS-style elastic scrolling (rubber band) */
-  overscroll-behavior:auto;
+  /* Keep the app in "native app" mode: prevent the page itself from rubber-banding.
+     The .view element is the scroll container instead. */
+  overscroll-behavior:none;
 }
 
 body{
@@ -90,18 +91,28 @@ input, textarea { -webkit-user-select: text; user-select: text; }
   flex:1;
   min-height:0;
 
-  /* Let flexbox size the view to the remaining space between header + bottom nav */
-  overflow-y:auto;
+  /* Let flexbox size the view to the remaining space between header + bottom nav.
+     Use scroll (not auto) so iOS always treats this as the scroll container, which
+     avoids the whole app/page rubber-banding like a website when content is short. */
+  overflow-y:scroll;
   -webkit-overflow-scrolling: touch;
+
+  /* Hide scrollbars (desktop) without affecting scrolling */
+  scrollbar-width: none;            /* Firefox */
+  -ms-overflow-style: none;         /* IE/Edge legacy */
 
   padding: 10px 0 12px;
 
   touch-action: pan-y;
 }
 
-/* Home should still respond to swipe with elastic scroll even when content fits */
+.view::-webkit-scrollbar{ width:0; height:0; }
+
+/* Home should NOT scroll or rubber-band */
 body.isHome .view{
-  overflow-y:auto;
+  overflow-y:hidden;
+  overscroll-behavior:none;
+  touch-action:none;
 }
 
 /* When mini player is visible, add extra scroll room above the bottom nav */
