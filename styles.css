@@ -90,33 +90,42 @@ input, textarea { -webkit-user-select: text; user-select: text; }
 .view{
   flex:1;
   min-height:0;
-
-  /* Let flexbox size the view to the remaining space between header + bottom nav.
-     Use scroll (not auto) so iOS always treats this as the scroll container, which
-     avoids the whole app/page rubber-banding like a website when content is short. */
-  overflow-y:scroll;
-  -webkit-overflow-scrolling: touch;
-
-  /* Hide scrollbars (desktop) without affecting scrolling */
-  scrollbar-width: none;            /* Firefox */
-  -ms-overflow-style: none;         /* IE/Edge legacy */
-
-  padding: 10px 0 12px;
-
-  touch-action: pan-y;
+  position: relative;
+  overflow:hidden;
 }
 
-.view::-webkit-scrollbar{ width:0; height:0; }
+.screen{
+  position:absolute;
+  inset:0;
+
+  overflow-y:scroll;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+
+  padding: 10px 0 12px;
+  touch-action: pan-y;
+
+  opacity:0;
+  pointer-events:none;
+}
+
+.screen.is-active{
+  opacity:1;
+  pointer-events:auto;
+}
+
+.screen::-webkit-scrollbar{ width:0; height:0; }
 
 /* Home should NOT scroll or rubber-band */
-body.isHome .view{
+body.isHome #screen-home.is-active{
   overflow-y:hidden;
   overscroll-behavior:none;
   touch-action:none;
 }
 
 /* When mini player is visible, add extra scroll room above the bottom nav */
-body.hasMiniPlayer .view{
+body.hasMiniPlayer .screen{
   padding-bottom: calc(
     var(--mini-gap) + var(--mini-h) + 18px
   );
@@ -519,7 +528,7 @@ textarea{ min-height:100px; resize:vertical; }
 
 .drawerOpen .drawer{ transform: translateX(0); }
 .drawerOpen .drawerOverlay{ opacity: 1; pointer-events: auto; }
-.drawerOpen .view{ overflow: hidden; }
+.drawerOpen .screen.is-active{ overflow: hidden; }
 
 /* =========================
    Create sheet
@@ -1820,7 +1829,7 @@ body::before{
 }
 
 /* ✅ Fullscreen player: no mini-player space reserved, ever */
-body.fullplayer-open .view{
+body.fullplayer-open .screen{
   padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 22px) !important;
 }
 
@@ -1874,7 +1883,7 @@ body {
 }
 
 /* Your main content must make room for the dock */
-#view{
+.screen{
   padding-bottom: calc(var(--dock-h, 160px) + 16px);
 }.miniMeta{
   flex: 1 1 auto;
