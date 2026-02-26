@@ -6,14 +6,14 @@
 // - Dashboard + Settings
 // - Export / Import
 
+// Dev toggle: skip splash animation
+const DISABLE_SPLASH = false;
+
 import { $ } from "./ui/dom.js";
 import { runSplashSequence } from "./splash/splash.js";
 
 const LS_KEY = "riffbank_v1";
 const HAS_SAVED_STATE = !!localStorage.getItem(LS_KEY); // used to detect first-run seeding
-
-// Dev toggle: skip splash animation
-const DISABLE_SPLASH = true;
 
 let splashAlreadyRan = false;
 
@@ -86,22 +86,20 @@ const SILENT_MP3 =
   "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
 async function unlockAudioOnce() {
-  if (audioUnlocked || !globalAudio) return;
+  if (audioUnlocked) return;
 
   try {
-    const prevSrc = globalAudio.src;
-    globalAudio.src = SILENT_MP3;
+    // Use a separate one-shot audio element so we never disrupt globalAudio playback
+    const a = new Audio(SILENT_MP3);
+    a.preload = "auto";
+    a.volume = 0;
 
-    // IMPORTANT: this must happen inside a user gesture handler
-    await globalAudio.play();
-    globalAudio.pause();
-
-    // restore whatever was there
-    if (prevSrc) globalAudio.src = prevSrc;
+    // Must be inside a user gesture
+    await a.play();
+    a.pause();
 
     audioUnlocked = true;
   } catch (e) {
-    // Even if unlock fails, don't hard-crash
     console.warn("Audio unlock failed:", e);
   }
 }
@@ -178,6 +176,9 @@ function ensureNowPlayingOverlay() {
 }
 
 function openNowPlaying() {
+  // Ensure the full-screen overlay opens at the top even if the app view was scrolled
+  try { window.scrollTo(0, 0); } catch {}
+  try { document.getElementById("view")?.scrollTo?.(0, 0); } catch {}
   if (fullPlayerOpen) return;
 
   lastTabBeforeFullPlayer = getActiveTab(); // 👈 remember where we were
@@ -243,6 +244,65 @@ function toast(msg) {
 const globalAudio = document.getElementById("globalAudio");
 
 const miniPlayerEl = document.getElementById("miniPlayer");
+
+const bottomNavEl  = document.getElementById("bottomNav");
+
+let _dockRaf = 0;
+function scheduleDockSpaceSync() {
+  if (_dockRaf) cancelAnimationFrame(_dockRaf);
+  _dockRaf = requestAnimationFrame(() => {
+    _dockRaf = requestAnimationFrame(syncDockSpace);
+  });
+}
+
+function syncDockSpace() {
+  const vv = window.visualViewport;
+  const viewportH = vv ? vv.height : window.innerHeight;
+  const navTop = bottomNavEl ? bottomNavEl.getBoundingClientRect().top : viewportH;
+
+  let topDock = navTop;
+
+  if (miniPlayerEl && !miniPlayerEl.classList.contains("hidden")) {
+    const mr = miniPlayerEl.getBoundingClientRect();
+    if (mr.height > 0) topDock = Math.min(topDock, mr.top);
+  }
+
+  const dockH = Math.max(0, Math.round(viewportH - topDock));
+  document.documentElement.style.setProperty("--dock-h", dockH + "px");
+}
+
+function isMiniPlayerActuallyVisible() {
+  if (!miniPlayerEl) return false;
+  if (miniPlayerEl.classList.contains("hidden")) return false;
+  if (!miniPlayerEl.classList.contains("visible")) return false;
+  if (miniPlayerEl.getAttribute("aria-hidden") === "true") return false;
+  return true;
+}
+
+function updateDockSpace() {
+  // bottom nav is always present
+  const navH = bottomNavEl ? bottomNavEl.getBoundingClientRect().height : 0;
+
+  // if mini player is visible, reserve up to its TOP (includes nav + gap automatically)
+  let dockH = navH;
+  if (isMiniPlayerActuallyVisible()) {
+    const r = miniPlayerEl.getBoundingClientRect();
+    const fromBottomToMiniTop = window.innerHeight - r.top;
+    dockH = Math.max(dockH, fromBottomToMiniTop);
+  }
+
+  // write the CSS var used by #view padding-bottom
+  document.documentElement.style.setProperty("--dock-h", `${Math.ceil(dockH)}px`);
+}
+
+function syncMiniPlayerReserveSpace() {
+  document.body.classList.toggle("hasMiniPlayer", isMiniPlayerActuallyVisible());
+  updateDockSpace();
+}
+
+// keep dock height correct on resize/orientation changes
+window.addEventListener("resize", () => updateDockSpace(), { passive: true });
+
 const miniArtEl    = document.getElementById("miniArt");
 const miniToggleEl = document.getElementById("miniToggle");
 const miniNextEl   = document.getElementById("miniNext");
@@ -262,6 +322,7 @@ async function syncMiniPlayerUI() {
     miniPlayerEl.classList.remove("visible");
     miniPlayerEl.setAttribute("aria-hidden", "true");
     document.body.classList.remove("hasMiniPlayer");
+    syncMiniPlayerReserveSpace();
     return;
   }
 
@@ -273,6 +334,7 @@ async function syncMiniPlayerUI() {
     miniPlayerEl.classList.remove("visible");
     miniPlayerEl.setAttribute("aria-hidden", "true");
     document.body.classList.remove("hasMiniPlayer");
+    syncMiniPlayerReserveSpace();
     return;
   }
 
@@ -282,6 +344,7 @@ if (typeof isNowPlayingFullscreen !== "undefined" && isNowPlayingFullscreen) {
   miniPlayerEl.classList.remove("visible");
   miniPlayerEl.setAttribute("aria-hidden", "true");
   document.body.classList.remove("hasMiniPlayer");
+  syncMiniPlayerReserveSpace();
   return;
 }
 
@@ -291,6 +354,7 @@ if (typeof isNowPlayingFullscreen !== "undefined" && isNowPlayingFullscreen) {
     miniPlayerEl.classList.remove("visible");
     miniPlayerEl.setAttribute("aria-hidden", "true");
     document.body.classList.remove("hasMiniPlayer");
+    syncMiniPlayerReserveSpace();
     return;
   }
 
@@ -302,6 +366,7 @@ if (typeof isNowPlayingFullscreen !== "undefined" && isNowPlayingFullscreen) {
     miniPlayerEl.classList.remove("visible");
     miniPlayerEl.setAttribute("aria-hidden", "true");
     document.body.classList.remove("hasMiniPlayer");
+    syncMiniPlayerReserveSpace();
     return;
   }
 
@@ -309,7 +374,11 @@ if (typeof isNowPlayingFullscreen !== "undefined" && isNowPlayingFullscreen) {
   miniPlayerEl.classList.remove("hidden");
   miniPlayerEl.setAttribute("aria-hidden", "false");
   document.body.classList.add("hasMiniPlayer");
-  requestAnimationFrame(() => miniPlayerEl.classList.add("visible"));
+  requestAnimationFrame(() => {
+  miniPlayerEl.classList.add("visible");
+  miniPlayerEl.setAttribute("aria-hidden", "false");
+  syncMiniPlayerReserveSpace(); // <-- IMPORTANT: updates --dock-h so content isn't covered
+  });
 
   // album art
   if (miniArtEl) {
@@ -337,6 +406,10 @@ if (miniArtEl) {
   // keep scrub in sync
   syncMiniScrub();
 }
+
+scheduleDockSpaceSync();
+window.addEventListener("resize", scheduleDockSpaceSync);
+if (window.visualViewport) window.visualViewport.addEventListener("resize", scheduleDockSpaceSync);
 
 function syncMiniScrub(){
   if (!miniScrubEl || !globalAudio) return;
@@ -700,7 +773,13 @@ async function seedDefaultLibraryIfNeeded({ force = false } = {}) {
 
   let index;
   try {
-    index = await fetchJson("./public/library/index.json");
+    // library is served from the site root
+    try {
+      index = await fetchJson("/library/index.json");
+    } catch {
+      // fallback for some local setups
+      index = await fetchJson("./library/index.json");
+    }
   } catch {
     return false;
   }
@@ -850,9 +929,15 @@ async function getPlayableUrlForVersion(songId, versionId) {
 
   // Local file (fileId) beats link
   if (v.fileId) {
+    const cacheKey = `file:${v.fileId}`;
+    if (audioUrlCache.has(cacheKey)) return audioUrlCache.get(cacheKey);
+
     const rec = await audioGet(v.fileId);
     if (!rec?.blob) return null;
-    return URL.createObjectURL(rec.blob);
+
+    const url = URL.createObjectURL(rec.blob);
+    audioUrlCache.set(cacheKey, url);
+    return url;
   }
 
   // Local file (localAudioId) fallback
@@ -943,7 +1028,9 @@ function shuffleArray(arr) {
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", async () => {
     try {
-      const reg = await navigator.serviceWorker.register("/sw.js");
+      const reg = await navigator.serviceWorker.register("/sw.js", {
+      updateViaCache: "none",
+    });
 
       // If a new SW activates, reload once so we’re on the newest cached assets
       let reloaded = false;
@@ -1515,10 +1602,13 @@ miniToggleEl?.addEventListener("click", async (e) => {
   await unlockAudioOnce();
 
   if (globalAudio.paused) {
-    await playNowPlaying({ autoplay: true });
+    try {
+      await globalAudio.play();
+    } catch {
+      await playNowPlaying({ autoplay: true });
+    }
   } else {
     globalAudio.pause();
-    syncMiniPlayerUI();
   }
 });
 
@@ -2045,6 +2135,8 @@ function render() {
   }
   if (currentTab === "settings") return renderSettings();
 }
+
+scheduleDockSpaceSync();
 
 window.addEventListener("DOMContentLoaded", async () => {
   if (!DISABLE_SPLASH) {
@@ -2854,6 +2946,13 @@ function renderSongDetail(id) {
 
   setHeader("Song");
 
+    // ✅ Fix: entering Song detail should not inherit Songs list scroll position
+  if (view) view.scrollTop = 0;
+  try { window.scrollTo(0, 0); } catch {}
+  try { document.documentElement.scrollTop = 0; } catch {}
+  try { document.body.scrollTop = 0; } catch {}
+  requestAnimationFrame(() => { if (view) view.scrollTop = 0; });
+
   const fv = featuredVersion(song);
   const vCount = song.versions?.length || 0;
 
@@ -3005,6 +3104,13 @@ function renderVersionDetail(songId, versionId) {
   }
 
   setHeader("Version");
+
+    // ✅ Fix: entering Version detail should not inherit prior scroll position
+  if (view) view.scrollTop = 0;
+  try { window.scrollTo(0, 0); } catch {}
+  try { document.documentElement.scrollTop = 0; } catch {}
+  try { document.body.scrollTop = 0; } catch {}
+  requestAnimationFrame(() => { if (view) view.scrollTop = 0; });
 
   const isFeatured = song.featuredVersionId === v.id;
   const hasPlayable = !!(v.link || v.fileId || v.localAudioId);
@@ -3470,6 +3576,9 @@ function renderNowPlaying() {
     return renderPlayer();
   }
 
+  if (view) view.scrollTop = 0;
+  requestAnimationFrame(() => { if (view) view.scrollTop = 0; });
+
   const song = getSong(now.songId);
   const v = song ? getVersion(song, now.versionId) : null;
   if (!song || !v) {
@@ -3668,12 +3777,19 @@ function renderSettings() {
     state = loadState();
     normalizeState();
 
-    // Re-seed the default library so Reset gives you a usable test catalog
     await seedDefaultLibraryIfNeeded({ force: true });
 
     toast("Wiped 🧼");
     currentTab = "home";
     setHeader("RiffBank");
+
+    // ✅ Fix: this path bypasses the Home tab click handler, so reset scroll here too
+    if (view) view.scrollTop = 0;
+    try { window.scrollTo(0, 0); } catch {}
+    try { document.documentElement.scrollTop = 0; } catch {}
+    try { document.body.scrollTop = 0; } catch {}
+    requestAnimationFrame(() => { if (view) view.scrollTop = 0; });
+
     render();
   });
 }
