@@ -6,7 +6,7 @@
 // - cache-first for static assets
 // - versioned caches + cleanup
 
-const CACHE_VERSION = "2026-02-25_9"; // <-- bump this when you deploy
+const CACHE_VERSION = "2026-02-25_25"; // <-- bump this when you deploy
 const STATIC_CACHE = `riffbank-static-${CACHE_VERSION}`;
 const RUNTIME_CACHE = `riffbank-runtime-${CACHE_VERSION}`;
 
@@ -18,6 +18,12 @@ const PRECACHE_URLS = [
   "/manifest.json",
   "/icon-1024.png",
 ];
+
+self.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "SKIP_WAITING") {
+    self.skipWaiting();
+  }
+});
 
 self.addEventListener("install", (event) => {
   self.skipWaiting(); // activate ASAP
@@ -89,6 +95,12 @@ self.addEventListener("fetch", (event) => {
       p.endsWith(".webp") ||
       p.endsWith(".json") ||
       p.endsWith(".ico");
+
+    const isJSON = p.endsWith(".json");
+    if (isJSON) {
+      event.respondWith(networkFirst(req));
+      return;
+    }
 
     if (isStatic) {
       event.respondWith(cacheFirst(req));
