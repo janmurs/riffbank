@@ -64,6 +64,31 @@ if (!view) {
   view.classList.add("view");
 }
 
+const screens = {
+  home: document.getElementById("screen-home"),
+  songs: document.getElementById("screen-songs"),
+  player: document.getElementById("screen-player"),
+  settings: document.getElementById("screen-settings"),
+  drawer: document.getElementById("screen-drawer"),
+};
+
+let activeScreenName = "home";
+let activeScreenEl = screens.home || view;
+
+function setActiveScreen(name) {
+  const next = screens[name] || screens.home || view;
+  if (!next) return;
+  activeScreenName = name;
+  activeScreenEl = next;
+
+  Object.entries(screens).forEach(([screenName, el]) => {
+    if (!el) return;
+    const isActive = screenName === name;
+    el.classList.toggle("is-active", isActive);
+    if (!isActive) el.innerHTML = "";
+  });
+}
+
 const headerTitle = $("#headerTitle");
 const toastEl = $("#toast");
 
@@ -178,7 +203,7 @@ function ensureNowPlayingOverlay() {
 function openNowPlaying() {
   // Ensure the full-screen overlay opens at the top even if the app view was scrolled
   try { window.scrollTo(0, 0); } catch {}
-  try { document.getElementById("view")?.scrollTo?.(0, 0); } catch {}
+  try { activeScreenEl?.scrollTo?.(0, 0); } catch {}
   if (fullPlayerOpen) return;
 
   lastTabBeforeFullPlayer = getActiveTab(); // 👈 remember where we were
@@ -1343,7 +1368,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
     // ✅ Fix: if we navigate back to Home, ensure NO scroll position carries over.
     // (On iOS, the page can sometimes scroll the window instead of the inner scroller.)
     if (targetTab === "home") {
-      if (view) view.scrollTop = 0;
+      if (screens.home) screens.home.scrollTop = 0;
       try { window.scrollTo(0, 0); } catch {}
       try { document.documentElement.scrollTop = 0; } catch {}
       try { document.body.scrollTop = 0; } catch {}
@@ -1365,7 +1390,7 @@ headerTitle?.addEventListener("click", () => {
   songsBackTarget = null;
 
   // ✅ Fix: header-tap Home should also reset ALL scroll positions.
-  if (view) view.scrollTop = 0;
+  if (screens.home) screens.home.scrollTop = 0;
   try { window.scrollTo(0, 0); } catch {}
   try { document.documentElement.scrollTop = 0; } catch {}
   try { document.body.scrollTop = 0; } catch {}
@@ -2115,25 +2140,27 @@ function render() {
   );
 
   // Drawer screens
-  if (drawerView === "projects") return renderProjects();
-  if (drawerView === "eps") return renderEPs();
-  if (drawerView === "collabs") return renderCollaborators();
-  if (drawerView === "importExport") return renderImportExport();
-  if (drawerView === "about") return renderAbout();
+  if (drawerView === "projects") { setActiveScreen("drawer"); return renderProjects(); }
+  if (drawerView === "eps") { setActiveScreen("drawer"); return renderEPs(); }
+  if (drawerView === "collabs") { setActiveScreen("drawer"); return renderCollaborators(); }
+  if (drawerView === "importExport") { setActiveScreen("drawer"); return renderImportExport(); }
+  if (drawerView === "about") { setActiveScreen("drawer"); return renderAbout(); }
 
   // Normal screens
-  if (currentTab === "home") return renderHome();
+  if (currentTab === "home") { setActiveScreen("home"); return renderHome(); }
   if (currentTab === "songs") {
+    setActiveScreen("songs");
     if (selectedSongId && selectedVersionId) return renderVersionDetail(selectedSongId, selectedVersionId);
     if (selectedSongId) return renderSongDetail(selectedSongId);
     if (songsView === "create") return renderSongCreate();
     return renderSongsList();
   }
   if (currentTab === "player") {
-  if (playerScreen === "now") return renderNowPlaying();
+    setActiveScreen("player");
+    if (playerScreen === "now") return renderNowPlaying();
     return renderPlayer();
   }
-  if (currentTab === "settings") return renderSettings();
+  if (currentTab === "settings") { setActiveScreen("settings"); return renderSettings(); }
 }
 
 scheduleDockSpaceSync();
@@ -2192,7 +2219,7 @@ function renderProjects() {
     `;
   }).join("");
 
-  view.innerHTML = `
+  activeScreenEl.innerHTML = `
     <div class="card">
       <div class="row" style="justify-content:space-between; align-items:center">
         <h2>Projects</h2>
@@ -2236,7 +2263,7 @@ function renderProjects() {
     renderProjects();
   });
 
-  view.querySelectorAll("[data-set-default]").forEach(btn => {
+  activeScreenEl.querySelectorAll("[data-set-default]").forEach(btn => {
     btn.addEventListener("click", () => {
       const p = btn.getAttribute("data-set-default");
       state.settings.defaultProject = p;
@@ -2246,7 +2273,7 @@ function renderProjects() {
     });
   });
 
-view.querySelectorAll("[data-filter]").forEach(btn => {
+activeScreenEl.querySelectorAll("[data-filter]").forEach(btn => {
   btn.addEventListener("click", () => {
     const p = btn.getAttribute("data-filter");
 
@@ -2274,7 +2301,7 @@ view.querySelectorAll("[data-filter]").forEach(btn => {
 
 function renderEPs() {
   setHeader("EPs");
-  view.innerHTML = `
+  activeScreenEl.innerHTML = `
     <div class="card">
       <div class="row" style="justify-content:space-between; align-items:center">
         <h2>EPs</h2>
@@ -2313,7 +2340,7 @@ function renderCollaborators() {
       </div>
     `).join("");
 
-  view.innerHTML = `
+  activeScreenEl.innerHTML = `
     <div class="card">
       <div class="row" style="justify-content:space-between; align-items:center">
         <h2>Collaborators</h2>
@@ -2334,7 +2361,7 @@ function renderCollaborators() {
     render();
   });
 
-  view.querySelectorAll("[data-filter-collab]").forEach(btn => {
+  activeScreenEl.querySelectorAll("[data-filter-collab]").forEach(btn => {
     btn.addEventListener("click", () => {
       const name = btn.getAttribute("data-filter-collab");
       drawerView = null;
@@ -2359,7 +2386,7 @@ function renderCollaborators() {
 function renderImportExport() {
   setHeader("Import / Export");
 
-  view.innerHTML = `
+  activeScreenEl.innerHTML = `
     <div class="card">
       <div class="row" style="justify-content:space-between; align-items:center">
         <h2>Import / Export</h2>
@@ -2387,7 +2414,7 @@ function renderImportExport() {
 function renderAbout() {
   setHeader("About");
 
-  view.innerHTML = `
+  activeScreenEl.innerHTML = `
     <div class="card">
       <div class="row" style="justify-content:space-between; align-items:center">
         <h2>RiffBank</h2>
@@ -2429,7 +2456,7 @@ function renderHome() {
 
   const songCount = state.songs.length;
 
-  view.innerHTML = `
+  activeScreenEl.innerHTML = `
     <div class="homeReleaf">
       <div class="homeGridReleaf">
         <button class="homeCard" data-home="songs" aria-label="Songs">
@@ -2465,7 +2492,7 @@ function renderHome() {
     </div>
   `;
 
-  view.querySelectorAll("[data-home]").forEach((btn) => {
+  activeScreenEl.querySelectorAll("[data-home]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const target = btn.getAttribute("data-home");
       if (target === "songs") {
@@ -2539,7 +2566,7 @@ function renderLyricsScratch() {
   overlayView = "lyrics";
   setHeader("Lyrics");
   const value = state.settings.lyricsScratch || "";
-  view.innerHTML = `
+  activeScreenEl.innerHTML = `
     <div class="card">
       <div class="row" style="justify-content:space-between; align-items:center">
         <h2>Lyrics scratch</h2>
@@ -2568,7 +2595,7 @@ function renderNextActions() {
   overlayView = "next";
   setHeader("Next Actions");
   const songs = state.songs.filter((s) => (s.nextAction || "").trim());
-  view.innerHTML = `
+  activeScreenEl.innerHTML = `
     <div class="card">
       <div class="row" style="justify-content:space-between; align-items:center">
         <h2>Next Actions</h2>
@@ -2594,7 +2621,7 @@ function renderNextActions() {
     setHeader("RiffBank");
     renderHome();
   });
-  view.querySelectorAll("[data-open-song]").forEach((el) =>
+  activeScreenEl.querySelectorAll("[data-open-song]").forEach((el) =>
     el.addEventListener("click", () => {
       currentTab = "songs";
       selectedSongId = el.getAttribute("data-open-song");
@@ -2787,7 +2814,7 @@ function renderSongsList() {
     ])
   ).sort((a, b) => a.localeCompare(b));
 
-  view.innerHTML = `
+  activeScreenEl.innerHTML = `
     <div class="songsHead">
       <div class="songsBar">
         <input
@@ -2917,7 +2944,7 @@ function renderSongsList() {
 
 function renderSongCreate() {
   setHeader("Upload Song");
-  view.innerHTML = `
+  activeScreenEl.innerHTML = `
     <div class="card">
       <h2>Upload Song</h2>
       <div class="small">Use the center New Record button instead — this screen is legacy.</div>
@@ -2947,11 +2974,11 @@ function renderSongDetail(id) {
   setHeader("Song");
 
     // ✅ Fix: entering Song detail should not inherit Songs list scroll position
-  if (view) view.scrollTop = 0;
+  if (activeScreenEl) activeScreenEl.scrollTop = 0;
   try { window.scrollTo(0, 0); } catch {}
   try { document.documentElement.scrollTop = 0; } catch {}
   try { document.body.scrollTop = 0; } catch {}
-  requestAnimationFrame(() => { if (view) view.scrollTop = 0; });
+  requestAnimationFrame(() => { if (screens.home) screens.home.scrollTop = 0; });
 
   const fv = featuredVersion(song);
   const vCount = song.versions?.length || 0;
@@ -2965,7 +2992,7 @@ function renderSongDetail(id) {
     ? `${escapeHtml(fv.label || "Version")} ${fv.notes ? `• ${escapeHtml(fv.notes)}` : ""}`
     : "No versions yet — add one below";
 
-view.innerHTML = `
+activeScreenEl.innerHTML = `
   <div class="albumHero">
     <button class="songHeroBack" id="songHeroBack" aria-label="Back">←</button>
 
@@ -3106,16 +3133,16 @@ function renderVersionDetail(songId, versionId) {
   setHeader("Version");
 
     // ✅ Fix: entering Version detail should not inherit prior scroll position
-  if (view) view.scrollTop = 0;
+  if (activeScreenEl) activeScreenEl.scrollTop = 0;
   try { window.scrollTo(0, 0); } catch {}
   try { document.documentElement.scrollTop = 0; } catch {}
   try { document.body.scrollTop = 0; } catch {}
-  requestAnimationFrame(() => { if (view) view.scrollTop = 0; });
+  requestAnimationFrame(() => { if (screens.home) screens.home.scrollTop = 0; });
 
   const isFeatured = song.featuredVersionId === v.id;
   const hasPlayable = !!(v.link || v.fileId || v.localAudioId);
 
-  view.innerHTML = `
+  activeScreenEl.innerHTML = `
     <div class="card">
       <div class="row" style="justify-content:space-between; align-items:center">
         <h2>${escapeHtml(song.title)}</h2>
@@ -3416,7 +3443,7 @@ function renderPlayer() {
   }
 
   // Header + chips + list
-  view.innerHTML = `
+  activeScreenEl.innerHTML = `
     <div class="playerHeader">
       <div class="playerTitleRow">
         <div>
@@ -3493,13 +3520,13 @@ function renderPlayer() {
   `;
 
   // Filter chips
-  view.querySelectorAll("[data-pf]").forEach(btn => {
+  activeScreenEl.querySelectorAll("[data-pf]").forEach(btn => {
     btn.addEventListener("click", () => {
       playerFilter = btn.getAttribute("data-pf") || "all";
       renderPlayer();
     });
   });
-  view.querySelectorAll("[data-ps]").forEach(btn => {
+  activeScreenEl.querySelectorAll("[data-ps]").forEach(btn => {
     btn.addEventListener("click", () => {
       playerSort = btn.getAttribute("data-ps") || "recent";
       renderPlayer();
@@ -3535,7 +3562,7 @@ function renderPlayer() {
   });
 
   // Row interactions
-  view.querySelectorAll(".playerRow").forEach(row => {
+  activeScreenEl.querySelectorAll(".playerRow").forEach(row => {
     row.addEventListener("click", async (e) => {
       const isMore = e.target.closest(".playerMore");
       const songId = row.getAttribute("data-pr-song");
@@ -3576,8 +3603,8 @@ function renderNowPlaying() {
     return renderPlayer();
   }
 
-  if (view) view.scrollTop = 0;
-  requestAnimationFrame(() => { if (view) view.scrollTop = 0; });
+  if (activeScreenEl) activeScreenEl.scrollTop = 0;
+  requestAnimationFrame(() => { if (activeScreenEl) activeScreenEl.scrollTop = 0; });
 
   const song = getSong(now.songId);
   const v = song ? getVersion(song, now.versionId) : null;
@@ -3594,7 +3621,7 @@ function renderNowPlaying() {
   const subtitle = v.label || "Version";
   const art = coverSvg(song); // full-quality cover is fine here
 
-  view.innerHTML = `
+  activeScreenEl.innerHTML = `
     <div class="npWrap">
       <button class="npBack" id="npBackBtn">←</button>
 
@@ -3721,7 +3748,7 @@ function renderNowPlaying() {
 function renderSettings() {
   setHeader("Settings");
 
-  view.innerHTML = `
+  activeScreenEl.innerHTML = `
     <div class="card">
       <h2>Settings</h2>
 
@@ -3784,11 +3811,11 @@ function renderSettings() {
     setHeader("RiffBank");
 
     // ✅ Fix: this path bypasses the Home tab click handler, so reset scroll here too
-    if (view) view.scrollTop = 0;
+    if (screens.home) screens.home.scrollTop = 0;
     try { window.scrollTo(0, 0); } catch {}
     try { document.documentElement.scrollTop = 0; } catch {}
     try { document.body.scrollTop = 0; } catch {}
-    requestAnimationFrame(() => { if (view) view.scrollTop = 0; });
+    requestAnimationFrame(() => { if (activeScreenEl) activeScreenEl.scrollTop = 0; });
 
     render();
   });
