@@ -33,6 +33,9 @@ let isFullPlayerOpen = false;
 // Session-only: hide mini player until the user actually plays something after a fresh launch
 let hasPlayedThisSession = false;
 
+// Full-screen Now Playing is an overlay (independent of tabs)
+let isNowPlayingFullscreen = false;
+
 function setFullPlayerOpen(on) {
   isFullPlayerOpen = !!on;
 
@@ -201,38 +204,206 @@ function ensureNowPlayingOverlay() {
 }
 
 function openNowPlaying() {
-  // Ensure the full-screen overlay opens at the top even if the app view was scrolled
-  try { window.scrollTo(0, 0); } catch {}
-  try { activeScreenEl?.scrollTo?.(0, 0); } catch {}
+  // Only open if something is actually playing/loaded
+  if (!state.player?.nowPlaying) return;
   if (fullPlayerOpen) return;
 
-  lastTabBeforeFullPlayer = getActiveTab(); // 👈 remember where we were
+  // Ensure the overlay opens at the top even if the app view was scrolled
+  try { window.scrollTo(0, 0); } catch {}
+
+  lastTabBeforeFullPlayer = getActiveTab();
   fullPlayerOpen = true;
+  isNowPlayingFullscreen = true;
 
   document.body.classList.add("fullplayer-open");
 
   const overlay = ensureNowPlayingOverlay();
   overlay.style.display = "block";
-  overlay.innerHTML = renderNowPlayingHTML(); // 👈 you’ll add this next
+  overlay.innerHTML = renderNowPlayingHTML();
+  wireNowPlayingEvents(overlay);
 
-  wireNowPlayingEvents(overlay); // 👈 hook buttons
+  updateMiniPlayerPresence();
 }
 
 function closeNowPlaying() {
   if (!fullPlayerOpen) return;
 
   fullPlayerOpen = false;
+  isNowPlayingFullscreen = false;
   document.body.classList.remove("fullplayer-open");
 
-  const overlay = document.getElementById("nowPlayingOverlay");
-  if (overlay) {
-    overlay.style.display = "none";
-    overlay.innerHTML = "";
+  if (nowPlayingOverlayEl) {
+    nowPlayingOverlayEl.classList.remove("open");
+    nowPlayingOverlayEl.style.display = "none";
+    nowPlayingOverlayEl.innerHTML = "";
   }
 
-  // ✅ DO NOT navigate anywhere.
-  // ✅ Optional: just re-highlight the tab we were on (purely cosmetic)
   if (lastTabBeforeFullPlayer) setActiveTab(lastTabBeforeFullPlayer);
+
+  updateMiniPlayerPresence();
+}
+
+// Full-screen Now Playing overlay HTML (kept in sync with renderNowPlaying)
+function renderNowPlayingHTML() {
+  const np = state.player?.nowPlaying;
+  if (!np) return "";
+
+  const title = escapeHtml(np.title || "");
+  const subtitle = escapeHtml(np.subtitle || "");
+  const coverArt = escapeHtml(np.coverArt || "");
+  const dur = Number.isFinite(globalAudio?.duration) ? globalAudio.duration : 0;
+  const cur = Number.isFinite(globalAudio?.currentTime) ? globalAudio.currentTime : 0;
+  const pct = dur > 0 ? (cur / dur) * 100 : 0;
+
+  const shuffleOn = !!state.player.shuffle;
+  const repeatOn = !!state.player.repeat;
+
+  return `
+    <div class="fp" id="fpRoot">
+      <div class="fpBg" style="background-image:url('${coverArt}')"></div>
+      <div class="fpTop">
+        <button class="fpIconBtn" id="fpClose" aria-label="Close">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 15l-6-6-6 6"/></svg>
+        </button>
+        <div class="fpTopRight">
+          <button class="fpIconBtn" id="fpMore" aria-label="More">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="fpCoverWrap">
+        <img class="fpCover" src="${coverArt}" alt="" />
+      </div>
+
+      <div class="fpMeta">
+        <div class="fpTitle">${title}</div>
+        <div class="fpSubtitle">${subtitle}</div>
+      </div>
+
+      <div class="fpActions">
+        <button class="fpPill">Song</button>
+        <button class="fpPill">Up next</button>
+        <button class="fpPill">Save</button>
+        <button class="fpPill">Share</button>
+      </div>
+
+      <div class="fpScrub">
+        <div class="fpTime">${formatTime(cur)}</div>
+        <input id="fpSeek" class="fpSeek" type="range" min="0" max="100" value="${pct}" />
+        <div class="fpTime">${formatTime(dur)}</div>
+      </div>
+
+      <div class="fpControls">
+        <button class="fpCtrl ${shuffleOn ? "is-active" : ""}" id="fpShuffle" aria-label="Shuffle">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M4 20l8-8"/><path d="M21 3l-7 7"/><path d="M16 21h5v-5"/><path d="M4 4l5 5"/><path d="M15 15l6 6"/></svg>
+        </button>
+        <button class="fpCtrl" id="fpPrev" aria-label="Previous">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6z"/><path d="M20 6v12l-10-6z"/></svg>
+        </button>
+        <button class="fpCtrl fpPlay" id="fpPlay" aria-label="Play/Pause">
+          ${globalAudio?.paused
+            ? `<svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>`
+            : `<svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h4v14H6z"/><path d="M14 5h4v14h-4z"/></svg>`
+          }
+        </button>
+        <button class="fpCtrl" id="fpNext" aria-label="Next">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2z"/><path d="M4 6v12l10-6z"/></svg>
+        </button>
+        <button class="fpCtrl ${repeatOn ? "is-active" : ""}" id="fpRepeat" aria-label="Repeat">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+        </button>
+      </div>
+
+      <div class="fpBottomTabs">
+        <button class="fpBottomTab is-active" type="button">UP NEXT</button>
+        <button class="fpBottomTab" type="button">LYRICS</button>
+        <button class="fpBottomTab" type="button">RELATED</button>
+      </div>
+    </div>
+  `;
+}
+
+function wireNowPlayingEvents(overlay) {
+  overlay.querySelector("#fpClose")?.addEventListener("click", closeNowPlaying);
+
+  // Swipe down to close
+  const root = overlay.querySelector("#fpRoot");
+  if (root) {
+    let startY = 0, dy = 0, dragging = false;
+
+    root.addEventListener("touchstart", (e) => {
+      if (e.touches.length !== 1) return;
+      dragging = true;
+      startY = e.touches[0].clientY;
+      dy = 0;
+    }, { passive: true });
+
+    root.addEventListener("touchmove", (e) => {
+      if (!dragging || e.touches.length !== 1) return;
+      dy = e.touches[0].clientY - startY;
+      if (dy < 0) dy = 0;
+      if (dy > 0) {
+        root.style.transform = `translateY(${dy}px)`;
+        root.style.transition = "none";
+      }
+    }, { passive: true });
+
+    root.addEventListener("touchend", () => {
+      dragging = false;
+      if (dy > 120) closeNowPlaying();
+      else {
+        root.style.transition = "transform 160ms ease";
+        root.style.transform = "translateY(0px)";
+      }
+    }, { passive: true });
+  }
+
+  overlay.querySelector("#fpSeek")?.addEventListener("input", (e) => {
+    const dur = globalAudio?.duration || 0;
+    if (!dur) return;
+    const pct = parseFloat(e.target.value || "0") / 100;
+    globalAudio.currentTime = Math.max(0, Math.min(dur, dur * pct));
+  });
+
+  overlay.querySelector("#fpPlay")?.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (!state.player?.nowPlaying) return;
+
+    if (globalAudio.paused) await playNowPlaying();
+    else globalAudio.pause();
+
+    overlay.innerHTML = renderNowPlayingHTML();
+    wireNowPlayingEvents(overlay);
+  });
+
+  overlay.querySelector("#fpPrev")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    try { globalAudio.currentTime = 0; } catch {}
+  });
+
+  overlay.querySelector("#fpNext")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (!state.player?.queue?.length) return;
+    const next = state.player.queue.shift();
+    state.player.nowPlaying = next;
+    saveState();
+    playNowPlaying();
+    overlay.innerHTML = renderNowPlayingHTML();
+    wireNowPlayingEvents(overlay);
+  });
+
+  overlay.querySelector("#fpShuffle")?.addEventListener("click", () => {
+    state.player.shuffle = !state.player.shuffle;
+    saveState();
+    overlay.querySelector("#fpShuffle")?.classList.toggle("is-active", state.player.shuffle);
+  });
+
+  overlay.querySelector("#fpRepeat")?.addEventListener("click", () => {
+    state.player.repeat = !state.player.repeat;
+    saveState();
+    overlay.querySelector("#fpRepeat")?.classList.toggle("is-active", state.player.repeat);
+  });
 }
 
 async function getLocalObjectUrl(localAudioId) {
@@ -327,6 +498,10 @@ function syncMiniPlayerReserveSpace() {
 
 // keep dock height correct on resize/orientation changes
 window.addEventListener("resize", () => updateDockSpace(), { passive: true });
+
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", () => updateDockSpace(), { passive: true });
+}
 
 const miniArtEl    = document.getElementById("miniArt");
 const miniToggleEl = document.getElementById("miniToggle");
@@ -582,6 +757,10 @@ function normalizeState() {
   state.player = state.player || {};
   state.player.queue = Array.isArray(state.player.queue) ? state.player.queue : [];
   state.player.nowPlaying = state.player.nowPlaying || null;
+
+  // Playback toggles (persisted)
+  if (typeof state.player.shuffle !== "boolean") state.player.shuffle = false;
+  if (typeof state.player.repeat !== "boolean") state.player.repeat = false;
 }
 
 normalizeState();
@@ -1658,24 +1837,80 @@ miniPlayerEl?.addEventListener("click", (e) => {
   const isControl = e.target.closest("#miniPrev, #miniToggle, #miniNext, #miniScrub");
   if (isControl) return;
 
-  // If nothing is playing, do nothing (or fallback to Player list)
+  // If nothing is playing, do nothing
   if (!state.player?.nowPlaying) return;
 
-  // Open full-screen Now Playing
-  currentTab = "player";
-  playerScreen = "now";
-
-  setFullPlayerOpen(true); // ✅ hide mini instantly before render
-
-  drawerView = null;
-  overlayView = null;
-  selectedSongId = null;
-  selectedVersionId = null;
-
-  setHeader("Now Playing");
-  syncTabs();
-  render();
+  // Open full-screen overlay (no tab switching)
+  openNowPlaying();
 });
+
+// Swipe down on mini player = stop + reset + hide
+miniPlayerEl?.addEventListener(
+  "touchstart",
+  (e) => {
+    if (!miniPlayerEl) return;
+    if (e.touches.length !== 1) return;
+
+    const isControl = e.target.closest("#miniPrev, #miniToggle, #miniNext, #miniScrub");
+    if (isControl) return;
+
+    miniPlayerEl.dataset.dragStartY = String(e.touches[0].clientY);
+    miniPlayerEl.dataset.dragDy = "0";
+  },
+  { passive: true }
+);
+
+miniPlayerEl?.addEventListener(
+  "touchmove",
+  (e) => {
+    if (!miniPlayerEl) return;
+
+    const startY = parseFloat(miniPlayerEl.dataset.dragStartY || "NaN");
+    if (!Number.isFinite(startY)) return;
+    if (e.touches.length !== 1) return;
+
+    let dy = e.touches[0].clientY - startY;
+    if (dy < 0) dy = 0;
+
+    miniPlayerEl.dataset.dragDy = String(dy);
+
+    if (dy > 0) {
+      miniPlayerEl.style.transform = `translateY(${dy}px)`;
+      miniPlayerEl.style.transition = "none";
+    }
+  },
+  { passive: true }
+);
+
+miniPlayerEl?.addEventListener(
+  "touchend",
+  () => {
+    if (!miniPlayerEl) return;
+
+    const dy = parseFloat(miniPlayerEl.dataset.dragDy || "0");
+    delete miniPlayerEl.dataset.dragStartY;
+    delete miniPlayerEl.dataset.dragDy;
+
+    const threshold = 90;
+
+    if (dy > threshold) {
+      try { globalAudio.pause(); } catch {}
+      try { globalAudio.currentTime = 0; } catch {}
+
+      state.player.nowPlaying = null;
+      state.player.queue = [];
+      hasPlayedThisSession = false;
+
+      saveState();
+      closeNowPlaying();
+      render();
+    }
+
+    miniPlayerEl.style.transition = "transform 160ms ease";
+    miniPlayerEl.style.transform = "translateY(0px)";
+  },
+  { passive: true }
+);
 
 miniScrubEl?.addEventListener("pointerdown", (e) => e.stopPropagation());
 miniScrubEl?.addEventListener("touchstart", (e) => e.stopPropagation(), { passive: true });
@@ -1683,10 +1918,22 @@ miniScrubEl?.addEventListener("touchstart", (e) => e.stopPropagation(), { passiv
 globalAudio?.addEventListener("play", syncMiniPlayerUI);
 globalAudio?.addEventListener("pause", syncMiniPlayerUI);
 globalAudio?.addEventListener("ended", () => {
-  // auto-next if queue exists
+  // Repeat = replay current track
+  if (state.player?.repeat && state.player?.nowPlaying) {
+    try { globalAudio.currentTime = 0; } catch {}
+    playNowPlaying({ autoplay: true });
+    return;
+  }
+
+  // Auto-next if queue exists (shuffle optional)
   const q = state.player?.queue || [];
   if (q.length) {
-    state.player.nowPlaying = q.shift();
+    if (state.player?.shuffle) {
+      const idx = Math.floor(Math.random() * q.length);
+      state.player.nowPlaying = q.splice(idx, 1)[0];
+    } else {
+      state.player.nowPlaying = q.shift();
+    }
     saveState();
     playNowPlaying({ autoplay: true });
   } else {
@@ -1973,7 +2220,7 @@ function renderSheet() {
 
     $("#vmPlay")?.addEventListener("click", () => {
       closeSheet();
-      playVersion(song.id, v.id, { goPlayer: true });
+      playVersion(song.id, v.id, { goPlayer: false });
     });
 
     $("#vmQueue")?.addEventListener("click", () => {
@@ -2132,7 +2379,7 @@ function render() {
   syncTabs();
 
     // ✅ Enforce fullscreen player state every render (no overlap, no reserved padding)
-  setFullPlayerOpen(currentTab === "player" && playerScreen === "now");
+  setFullPlayerOpen(!!fullPlayerOpen);
 
   document.body.classList.toggle(
     "isHome",
@@ -3041,7 +3288,7 @@ activeScreenEl.innerHTML = `
 
   $("#songBigPlay")?.addEventListener("click", () => {
     if (!(fv?.link || fv?.fileId || fv?.localAudioId)) return toast("No playable audio yet 😅");
-    playVersion(song.id, fv.id, { goPlayer: true });
+    playVersion(song.id, fv.id, { goPlayer: false });
   });
 
   $("#songBigQueue")?.addEventListener("click", () => {
@@ -3277,7 +3524,7 @@ function renderVersionDetail(songId, versionId) {
   });
 
   // Play / Queue
-  $("#playThis")?.addEventListener("click", () => playVersion(songId, versionId, { goPlayer: true }));
+  $("#playThis")?.addEventListener("click", () => playVersion(songId, versionId, { goPlayer: false }));
   $("#queueThis")?.addEventListener("click", () => addToQueue(songId, versionId));
 
   // Featured / Active / Best
@@ -3614,60 +3861,91 @@ function renderNowPlaying() {
   }
 
   setHeader("Now Playing");
-
   setFullPlayerOpen(true);
 
   const title = song.title || "Untitled";
   const subtitle = v.label || "Version";
-  const art = coverSvg(song); // full-quality cover is fine here
+  const art = coverSvg(song);
 
   activeScreenEl.innerHTML = `
-    <div class="npWrap">
-      <button class="npBack" id="npBackBtn">←</button>
+    <section class="fp" id="fullPlayer" aria-label="Now playing">
+      <div class="fpBg" aria-hidden="true">${art}</div>
 
-      <div class="npArt" aria-hidden="true">${art}</div>
+      <header class="fpHeader">
+        <button class="fpIcon" id="npBackBtn" aria-label="Close">⌄</button>
 
-      <div class="npText">
-        <div class="npTitle">${escapeHtml(title)}</div>
-        <div class="npSub">${escapeHtml(subtitle)}</div>
+        <div class="fpHeaderRight">
+          <button class="fpIcon" type="button" aria-label="Cast" disabled>⎚</button>
+          <button class="fpIcon" type="button" aria-label="More" disabled>⋮</button>
+        </div>
+      </header>
+
+      <div class="fpArtCard" aria-hidden="true">
+        <div class="fpArt">${art}</div>
       </div>
 
-      <input id="npScrub" class="npScrub" type="range" min="0" max="1000" value="0" aria-label="Progress" />
-
-      <div class="npControls" role="group" aria-label="Playback controls">
-        <button class="npBtn" id="npPrev">⏮</button>
-        <button class="npBtn npPlay" id="npToggle">${globalAudio?.paused ? "▶" : "⏸"}</button>
-        <button class="npBtn" id="npNext">⏭</button>
+      <div class="fpMeta">
+        <div class="fpTitle">${escapeHtml(title)}</div>
+        <div class="fpSub">${escapeHtml(subtitle)}</div>
       </div>
 
-      <div class="npActions">
-        <button class="btn" id="npGoSong">Go to Song</button>
-        <button class="btn" id="npGoList">Playlist</button>
+      <div class="fpActions" aria-label="Actions">
+        <button class="fpPill" id="npGoList" type="button">Up next</button>
+        <button class="fpPill" type="button" disabled>Save</button>
+        <button class="fpPill" type="button" disabled>Share</button>
       </div>
-    </div>
+
+      <div class="fpScrub">
+        <span class="fpTime" id="npTimeCur">0:00</span>
+        <input id="npScrub" class="fpScrubBar" type="range" min="0" max="1000" value="0" aria-label="Progress" />
+        <span class="fpTime" id="npTimeDur">0:00</span>
+      </div>
+
+      <div class="fpControls" role="group" aria-label="Playback controls">
+        <button class="fpCtrl" type="button" aria-label="Shuffle" id="npShuffle">🔀</button>
+        <button class="fpCtrl" id="npPrev" type="button" aria-label="Previous">⏮</button>
+        <button class="fpCtrl fpPlay" id="npToggle" type="button" aria-label="Play / Pause">${globalAudio?.paused ? "▶" : "⏸"}</button>
+        <button class="fpCtrl" id="npNext" type="button" aria-label="Next">⏭</button>
+        <button class="fpCtrl" type="button" aria-label="Repeat" id="npRepeat">🔁</button>
+      </div>
+
+      <nav class="fpBottomTabs" aria-label="Now playing tabs">
+        <button class="fpTab is-active" type="button">UP NEXT</button>
+        <button class="fpTab" type="button" disabled>LYRICS</button>
+        <button class="fpTab" type="button" disabled>RELATED</button>
+      </nav>
+    </section>
   `;
 
   const npScrub = $("#npScrub");
 
+  function fmtTime(sec) {
+    if (!Number.isFinite(sec) || sec < 0) return "0:00";
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${String(s).padStart(2, "0")}`;
+  }
+
   function syncNowScrub() {
     if (!npScrub || !globalAudio) return;
+
     if (Number.isFinite(globalAudio.duration) && globalAudio.duration > 0) {
       npScrub.value = String(Math.floor((globalAudio.currentTime / globalAudio.duration) * 1000));
     } else {
       npScrub.value = "0";
     }
+
     $("#npToggle").textContent = globalAudio?.paused ? "▶" : "⏸";
+    $("#npTimeCur").textContent = fmtTime(globalAudio.currentTime || 0);
+    $("#npTimeDur").textContent = fmtTime(globalAudio.duration || 0);
   }
 
-  // Initial sync + live sync
   syncNowScrub();
   globalAudio?.addEventListener("timeupdate", syncNowScrub);
   globalAudio?.addEventListener("loadedmetadata", syncNowScrub);
   globalAudio?.addEventListener("play", syncNowScrub);
   globalAudio?.addEventListener("pause", syncNowScrub);
 
-  // Clean up listeners when we navigate away (simple pattern)
-  // (Because you're not using a framework, we remove them on next render)
   const cleanup = () => {
     globalAudio?.removeEventListener("timeupdate", syncNowScrub);
     globalAudio?.removeEventListener("loadedmetadata", syncNowScrub);
@@ -3675,16 +3953,65 @@ function renderNowPlaying() {
     globalAudio?.removeEventListener("pause", syncNowScrub);
   };
 
-  // Back = go to playlist list (or whatever you prefer)
-  $("#npBackBtn")?.addEventListener("click", () => {
+  const closeFullPlayer = () => {
     cleanup();
     setFullPlayerOpen(false);
     playerScreen = "list";
     setHeader("Player");
     render();
-  });
+  };
 
-  // Scrub input
+  $("#npBackBtn")?.addEventListener("click", closeFullPlayer);
+
+  // ✅ Swipe down to close
+  const fp = $("#fullPlayer");
+  let swipeOn = false;
+  let startY = 0;
+  let startX = 0;
+  let lastDy = 0;
+
+  fp?.addEventListener("touchstart", (e) => {
+    const t = e.touches?.[0];
+    if (!t) return;
+    if (e.target?.closest?.("button, input, a")) return;
+
+    swipeOn = true;
+    startY = t.clientY;
+    startX = t.clientX;
+    lastDy = 0;
+  }, { passive: true });
+
+  fp?.addEventListener("touchmove", (e) => {
+    if (!swipeOn) return;
+    const t = e.touches?.[0];
+    if (!t) return;
+
+    const dy = t.clientY - startY;
+    const dx = t.clientX - startX;
+    if (dy < 0) return;
+    if (Math.abs(dx) > Math.abs(dy)) return;
+
+    e.preventDefault();
+
+    lastDy = dy;
+    const clamped = Math.min(dy, 160);
+    fp.style.transform = `translateY(${clamped}px)`;
+    fp.style.transition = "none";
+    fp.style.opacity = String(1 - (clamped / 240));
+  }, { passive: false });
+
+  fp?.addEventListener("touchend", () => {
+    if (!swipeOn) return;
+    swipeOn = false;
+
+    const shouldClose = lastDy > 80;
+    fp.style.transition = "transform 180ms ease, opacity 180ms ease";
+    fp.style.transform = "translateY(0px)";
+    fp.style.opacity = "1";
+
+    if (shouldClose) closeFullPlayer();
+  }, { passive: true });
+
   npScrub?.addEventListener("input", (e) => {
     if (!globalAudio) return;
     const val = Number(e.target.value || 0) / 1000;
@@ -3693,13 +4020,9 @@ function renderNowPlaying() {
     }
   });
 
-  // Controls
   $("#npToggle")?.addEventListener("click", async () => {
     if (!globalAudio) return;
-
-    // ✅ unlock inside the tap gesture
     await unlockAudioOnce();
-
     if (globalAudio.paused) await playNowPlaying({ autoplay: true });
     else globalAudio.pause();
     syncMiniPlayerUI();
@@ -3718,7 +4041,6 @@ function renderNowPlaying() {
     globalAudio.currentTime = 0;
   });
 
-  // Actions
   $("#npGoSong")?.addEventListener("click", () => {
     cleanup();
     setFullPlayerOpen(false);
