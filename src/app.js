@@ -1,21 +1,36 @@
-// RiffBank v1.2 (Local-only PWA)
+// RiffBank v1.3 (Local-first PWA + Google Drive sync)
 // - Song creation + editing
 // - Upload Helper (suggested filename + Drive path)
 // - Version history + Best flag
 // - Best-only Player (plays links)
 // - Dashboard + Settings
 // - Export / Import
+// - Google Drive integration (auto-sync uploads, stream playback)
 
 window.onerror = (m, src, line, col) => alert(`JS ERROR:\n${m}\n${line}:${col}`);
 
 // Dev toggle: skip splash animation
- const DISABLE_SPLASH = true;
+ const DISABLE_SPLASH = false;
 
 // console.log("RIFFBANK APP.JS LOADED ✅", new Date().toISOString());
 // alert("RIFFBANK APP.JS LOADED ✅ " + new Date().toISOString());
 
 import { $ } from "./ui/dom.js";
 import { runSplashSequence } from "./splash/splash.js";
+import {
+  gdriveLoadGIS,
+  gdriveIsConnected,
+  gdriveGetConfig,
+  gdriveConnect,
+  gdriveConnectNewFolder,
+  gdriveDisconnect,
+  gdriveUploadAudio,
+  gdriveGetStreamUrl,
+  gdriveDeleteFile,
+  gdriveSyncStateSoon,
+  gdriveSyncStateNow,
+  gdrivePullState,
+} from "./gdrive.js";
 
 const LS_KEY = "riffbank_v1";
 const HAS_SAVED_STATE = !!localStorage.getItem(LS_KEY); // used to detect first-run seeding
@@ -521,7 +536,7 @@ const miniTitleEl  = document.getElementById("miniTitle");
 const miniSubEl    = document.getElementById("miniSub");
 
 function isPlayable(v){
-  return !!(v?.link || v?.fileId || v?.localAudioId);
+  return !!(v?.link || v?.fileId || v?.localAudioId || v?.driveFileId);
 }
 
 async function syncMiniPlayerUI() {
@@ -755,6 +770,9 @@ function normalizeState() {
 
       if (v.localAudioId === undefined) v.localAudioId = null;
       if (v.originalFileName === undefined) v.originalFileName = "";
+      // Google Drive support
+      if (v.driveFileId === undefined) v.driveFileId = null;
+      if (v.driveWebViewLink === undefined) v.driveWebViewLink = "";
             // Player playlist flags
       if (typeof v.playerYes !== "boolean") v.playerYes = false;
       if (typeof v.favorite !== "boolean") v.favorite = false;
@@ -776,6 +794,8 @@ normalizeState();
 
 function saveState() {
   localStorage.setItem(LS_KEY, JSON.stringify(state));
+  // Auto-sync to Google Drive (debounced — pushes 5s after last save)
+  gdriveSyncStateSoon(state);
 }
 
 // ---------------------
@@ -1134,31 +1154,38 @@ function normalizeAudioLink(link) {
   return out;
 }
 
-// Turn a version into a playable URL (blob or link)
 async function getPlayableUrlForVersion(songId, versionId) {
   const song = getSong(songId);
   const v = getVersion(song, versionId);
   if (!song || !v) return null;
 
-  // Local file (fileId) beats link
+  // Priority 1: Local file (fileId in IndexedDB)
   if (v.fileId) {
     const cacheKey = `file:${v.fileId}`;
     if (audioUrlCache.has(cacheKey)) return audioUrlCache.get(cacheKey);
 
     const rec = await audioGet(v.fileId);
-    if (!rec?.blob) return null;
-
-    const url = URL.createObjectURL(rec.blob);
-    audioUrlCache.set(cacheKey, url);
-    return url;
+    if (rec?.blob) {
+      const url = URL.createObjectURL(rec.blob);
+      audioUrlCache.set(cacheKey, url);
+      return url;
+    }
+    // Local file missing — fall through to other sources
   }
 
-  // Local file (localAudioId) fallback
+  // Priority 2: Local audio (localAudioId — legacy path)
   if (v.localAudioId) {
     const url = await getLocalObjectUrl(v.localAudioId);
     if (url) return url;
   }
 
+  // Priority 3: Google Drive streaming
+  if (v.driveFileId && gdriveIsConnected()) {
+    const driveUrl = await gdriveGetStreamUrl(v.driveFileId);
+    if (driveUrl) return driveUrl;
+  }
+
+  // Priority 4: Direct URL link
   if (v.link) {
     return normalizeAudioLink(v.link);
   }
@@ -1413,7 +1440,7 @@ function featuredVersion(song){
 function playVersion(songId, versionId, { goPlayer = true } = {}) {
   const song = getSong(songId);
   const v = getVersion(song, versionId);
-  if (!song || !v || (!v.link && !v.fileId && !v.localAudioId))
+  if (!song || !v || (!v.link && !v.fileId && !v.localAudioId && !v.driveFileId))
     return toast("No playable audio for that version 😅");
 
   state.player.nowPlaying = { songId, versionId };
@@ -1446,7 +1473,7 @@ function playVersion(songId, versionId, { goPlayer = true } = {}) {
 function addToQueue(songId, versionId) {
   const song = getSong(songId);
   const v = getVersion(song, versionId);
-  if (!song || !v || (!v.link && !v.fileId && !v.localAudioId))
+  if (!song || !v || (!v.link && !v.fileId && !v.localAudioId && !v.driveFileId))
   return toast("No playable audio for that version 😅");
 
   state.player.queue.push({ songId, versionId });
@@ -1467,9 +1494,8 @@ function setFeatured(songId, versionId){
 function drivePathFor(song) {
   const root = slug(state.settings.driveRoot || "RiffBank");
   const project = slug(song.project || "Project");
-  const sprint = slug(song.sprint || "Unsorted");
   const title = slug(song.title || "Untitled");
-  return `${root}/${project}/${sprint}/${title}/Versions`;
+  return `${root}/${project}/${title}/Versions`;
 }
 
 function suggestedFileName(song, originalFileName, makeBest) {
@@ -2268,7 +2294,7 @@ function renderSheet() {
       return;
     }
 
-    const playable = !!(v.link || v.fileId || v.localAudioId);
+    const playable = !!(v.link || v.fileId || v.localAudioId || v.driveFileId);
 
     sheetContent.innerHTML = `
       <div class="sheetTitle">${escapeHtml(song.title)}</div>
@@ -2494,8 +2520,46 @@ async function init() {
     if (splash) splash.remove();
   }
 
-  const seeded = await seedDefaultLibraryIfNeeded({ force: false });
-  if (seeded) toast("Seeded library 🎧");
+  // Auto-seed disabled — use Drive sync or manual import instead
+  // const seeded = await seedDefaultLibraryIfNeeded({ force: false });
+  // if (seeded) toast("Seeded library 🎧");
+
+  // Load Google Identity Services (non-blocking, for Drive integration)
+  gdriveLoadGIS();
+
+  // Try to pull latest state from Drive (if connected + token still valid)
+  if (gdriveIsConnected()) {
+    try {
+      const driveState = await gdrivePullState();
+      if (driveState && driveState.songs) {
+        // Compare: use Drive state if it has songs and local doesn't,
+        // or if Drive has a newer updatedAt on any song
+        const localHasSongs = state.songs && state.songs.length > 0;
+        const driveHasSongs = driveState.songs && driveState.songs.length > 0;
+
+        let useDrive = false;
+
+        if (driveHasSongs && !localHasSongs) {
+          // Local is empty, Drive has data — use Drive
+          useDrive = true;
+        } else if (driveHasSongs && localHasSongs) {
+          // Both have data — compare most recent updatedAt
+          const localNewest = Math.max(...state.songs.map(s => new Date(s.updatedAt || 0).getTime()));
+          const driveNewest = Math.max(...driveState.songs.map(s => new Date(s.updatedAt || 0).getTime()));
+          if (driveNewest > localNewest) useDrive = true;
+        }
+
+        if (useDrive) {
+          state = driveState;
+          normalizeState();
+          localStorage.setItem(LS_KEY, JSON.stringify(state));
+          toast("Synced from Drive ☁️");
+        }
+      }
+    } catch (err) {
+      console.warn("RiffBank: Drive state pull failed on init", err);
+    }
+  }
 
   setHeader("RiffBank");
   syncTabs();
@@ -3339,10 +3403,10 @@ activeScreenEl.innerHTML = `
     </div>
 
     <div class="albumActions">
-      <button class="songHeroPlay" id="songBigPlay" ${(fv?.link || fv?.fileId || fv?.localAudioId) ? "" : "disabled"}>
+      <button class="songHeroPlay" id="songBigPlay" ${(fv?.link || fv?.fileId || fv?.localAudioId || fv?.driveFileId) ? "" : "disabled"}>
         ▶ Play
       </button>
-      <button class="songHeroQueue" id="songBigQueue" ${(fv?.link || fv?.fileId || fv?.localAudioId) ? "" : "disabled"}>
+      <button class="songHeroQueue" id="songBigQueue" ${(fv?.link || fv?.fileId || fv?.localAudioId || fv?.driveFileId) ? "" : "disabled"}>
         + Queue
       </button>
       <button class="songHeroDetails" id="songDetailsBtn">
@@ -3364,12 +3428,12 @@ activeScreenEl.innerHTML = `
   $("#songHeroBack")?.addEventListener("click", () => goBack({ animate: true }));
 
   $("#songBigPlay")?.addEventListener("click", () => {
-    if (!(fv?.link || fv?.fileId || fv?.localAudioId)) return toast("No playable audio yet 😅");
+    if (!(fv?.link || fv?.fileId || fv?.localAudioId || fv?.driveFileId)) return toast("No playable audio yet 😅");
     playVersion(song.id, fv.id, { goPlayer: false });
   });
 
   $("#songBigQueue")?.addEventListener("click", () => {
-    if (!(fv?.link || fv?.fileId || fv?.localAudioId)) return toast("No playable audio yet 😅");
+    if (!(fv?.link || fv?.fileId || fv?.localAudioId || fv?.driveFileId)) return toast("No playable audio yet 😅");
     addToQueue(song.id, fv.id);
   });
 
@@ -3464,7 +3528,10 @@ function renderVersionDetail(songId, versionId) {
   requestAnimationFrame(() => { if (screens.home) screens.home.scrollTop = 0; });
 
   const isFeatured = song.featuredVersionId === v.id;
-  const hasPlayable = !!(v.link || v.fileId || v.localAudioId);
+  const hasPlayable = !!(v.link || v.fileId || v.localAudioId || v.driveFileId);
+  const hasLocal = !!(v.fileId || v.localAudioId);
+  const hasDrive = !!v.driveFileId;
+  const driveConnected = gdriveIsConnected();
 
   activeScreenEl.innerHTML = `
     <div class="card">
@@ -3495,15 +3562,27 @@ function renderVersionDetail(songId, versionId) {
 
       <div class="row" style="margin-top:10px; gap:10px; flex-wrap:wrap">
         <button class="btn" id="importAudioBtn">Import audio (Files) 📁</button>
-        <button class="btn" id="clearLocalBtn" ${(v.fileId || v.localAudioId) ? "" : "disabled"}>Remove local file</button>
+        <button class="btn" id="clearLocalBtn" ${hasLocal ? "" : "disabled"}>Remove local file</button>
+        ${hasLocal && driveConnected && !hasDrive ? `
+          <button class="btn" id="uploadToDriveBtn">Upload to Drive ☁️</button>
+        ` : ""}
       </div>
 
-      ${(v.fileId || v.localAudioId) ? `
+      ${hasLocal ? `
         <div class="small" style="margin-top:8px">
           Local: <b>${escapeHtml(v.fileName || v.originalFileName || "audio file")}</b>
           ${v.fileSize ? ` • ${(v.fileSize/1024/1024).toFixed(1)} MB` : ""}
         </div>
       ` : `<div class="small" style="margin-top:8px">No local file attached.</div>`}
+
+      ${hasDrive ? `
+        <div class="small" style="margin-top:6px; color: #4ecdc4;">
+          ☁️ On Drive: <b>${escapeHtml(v.fileName || v.originalFileName || "audio")}</b>
+          ${v.driveWebViewLink ? ` <a href="${escapeHtml(v.driveWebViewLink)}" target="_blank" style="color:#4ecdc4; text-decoration:underline; margin-left:4px;">View ↗</a>` : ""}
+        </div>
+      ` : (driveConnected ? `
+        <div class="small" style="margin-top:6px; opacity:.5">☁️ Not yet synced to Drive.</div>
+      ` : ``)}
 
       <div class="row" style="margin-top:12px; gap:10px; flex-wrap:wrap">
         <button class="btn primary" id="saveVersion">Save</button>
@@ -3536,7 +3615,7 @@ function renderVersionDetail(songId, versionId) {
     renderVersionDetail(songId, versionId);
   });
 
-  // Import audio (local file)
+  // Import audio (local file + Drive)
   $("#importAudioBtn")?.addEventListener("click", async () => {
     try {
       const file = await pickAudioFile();
@@ -3544,7 +3623,7 @@ function renderVersionDetail(songId, versionId) {
 
       const id = uid();
 
-      // store into IndexedDB (your audioPut)
+      // Always store locally first (fast, offline)
       await audioPut({
         id,
         name: file.name || "audio",
@@ -3554,22 +3633,43 @@ function renderVersionDetail(songId, versionId) {
         createdAt: nowStamp(),
       });
 
-      // use fileId path for this screen
       v.fileId = id;
       v.fileName = file.name || "audio";
       v.fileType = file.type || "audio/*";
       v.fileSize = file.size || 0;
 
-      // clear old localAudioId if you want (optional)
-      // v.localAudioId = null;
-
       song.updatedAt = nowStamp();
       saveState();
-      toast("Imported ✅");
+      toast("Imported locally ✅");
+
+      // Also upload to Google Drive (if connected)
+      if (gdriveIsConnected()) {
+        toast("Uploading to Drive… ☁️");
+
+        const suggested = suggestedFileName(song, file.name, v.isBest);
+
+        const result = await gdriveUploadAudio({
+          file,
+          fileName: suggested,
+          project: song.project,
+          songTitle: song.title,
+        });
+
+        if (result.success) {
+          v.driveFileId = result.driveFileId;
+          v.driveWebViewLink = result.driveWebViewLink || "";
+          saveState();
+          toast("Synced to Drive ✅ ☁️");
+        } else {
+          console.warn("Drive upload failed:", result.error);
+          toast("Local saved, Drive failed 😅");
+        }
+      }
+
       renderVersionDetail(songId, versionId);
     } catch (err) {
       console.error(err);
-      toast("Import failed 😅");
+      toast("Import failed 😭");
     }
   });
 
@@ -3604,6 +3704,44 @@ function renderVersionDetail(songId, versionId) {
   $("#playThis")?.addEventListener("click", () => playVersion(songId, versionId, { goPlayer: false }));
   $("#queueThis")?.addEventListener("click", () => addToQueue(songId, versionId));
 
+  // Upload to Drive (manual push for local-only files)
+  $("#uploadToDriveBtn")?.addEventListener("click", async () => {
+    if (!gdriveIsConnected()) return toast("Connect Drive first in Settings ⚙️");
+
+    let blob = null;
+    let fileName = v.fileName || v.originalFileName || "audio.wav";
+
+    if (v.fileId) {
+      const rec = await audioGet(v.fileId);
+      if (rec?.blob) blob = rec.blob;
+    } else if (v.localAudioId) {
+      const rec = await getAudioBlob(v.localAudioId);
+      if (rec?.blob) blob = rec.blob;
+    }
+
+    if (!blob) return toast("No local file to upload 😅");
+
+    toast("Uploading to Drive… ☁️");
+    const suggested = suggestedFileName(song, fileName, v.isBest);
+    const result = await gdriveUploadAudio({
+      file: blob,
+      fileName: suggested,
+      project: song.project,
+      songTitle: song.title,
+    });
+
+    if (result.success) {
+      v.driveFileId = result.driveFileId;
+      v.driveWebViewLink = result.driveWebViewLink || "";
+      song.updatedAt = nowStamp();
+      saveState();
+      toast("Uploaded to Drive ✅ ☁️");
+      renderVersionDetail(songId, versionId);
+    } else {
+      toast("Upload failed: " + (result.error || "unknown") + " 😅");
+    }
+  });
+
   // Featured / Active / Best
   $("#setFeaturedBtn")?.addEventListener("click", () => {
     setFeatured(songId, versionId);
@@ -3632,8 +3770,13 @@ function renderVersionDetail(songId, versionId) {
   });
 
   // Delete
-  $("#deleteVersionBtn")?.addEventListener("click", () => {
+  $("#deleteVersionBtn")?.addEventListener("click", async () => {
     if (!confirm("Delete this version?")) return;
+
+    // Also delete from Drive if synced
+    if (v.driveFileId && gdriveIsConnected()) {
+      try { await gdriveDeleteFile(v.driveFileId); } catch {}
+    }
 
     song.versions = (song.versions || []).filter(x => x.id !== versionId);
 
@@ -4153,9 +4296,95 @@ $("#npRepeat")?.addEventListener("click", () => {
 function renderSettings() {
   setHeader("Settings");
 
+  const driveConnected = gdriveIsConnected();
+  const driveCfg = gdriveGetConfig();
+
   activeScreenEl.innerHTML = `
     <div class="card">
       <h2>Settings</h2>
+
+      <div style="
+        background: ${driveConnected ? "rgba(78,205,196,.08)" : "rgba(255,255,255,.04)"};
+        border: 1px solid ${driveConnected ? "rgba(78,205,196,.25)" : "rgba(255,255,255,.08)"};
+        border-radius: 12px;
+        padding: 16px;
+        margin-bottom: 16px;
+      ">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="${driveConnected ? "#4ecdc4" : "currentColor"}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12A10 10 0 1 1 12 2"/><path d="M22 2L12 12"/><path d="M16 2h6v6"/></svg>
+          <span style="font-weight:900; font-size:15px;">Google Drive</span>
+          ${driveConnected
+            ? `<span style="
+                background: rgba(78,205,196,.15);
+                color: #4ecdc4;
+                font-size: 11px;
+                font-weight: 700;
+                padding: 2px 8px;
+                border-radius: 6px;
+                margin-left: auto;
+              ">Connected</span>`
+            : `<span style="
+                background: rgba(255,255,255,.06);
+                color: rgba(255,255,255,.4);
+                font-size: 11px;
+                font-weight: 700;
+                padding: 2px 8px;
+                border-radius: 6px;
+                margin-left: auto;
+              ">Not connected</span>`
+          }
+        </div>
+
+        ${driveConnected ? `
+          <div class="small" style="margin-bottom:6px">
+            Signed in as <b>${escapeHtml(driveCfg.userEmail || "Google account")}</b>
+          </div>
+          <div class="small" style="margin-bottom:10px; opacity:.6">
+            Home folder: <b>${escapeHtml(driveCfg.homeFolderName || "RiffBank")}</b><br>
+            Structure: <code style="font-size:11px">${escapeHtml(driveCfg.homeFolderName)}/Project/Song/Versions/</code>
+          </div>
+          <div class="small" style="margin-bottom:10px; opacity:.7">
+            Audio imports are automatically uploaded to Drive. Your files also stay on this device for offline playback.
+          </div>
+          <div class="row" style="gap:10px">
+            <button id="driveOpenFolder" class="btn" style="flex:1">Open in Drive ↗</button>
+            <button id="driveDisconnect" class="btn" style="flex:1; background: rgba(255,92,119,.08); border-color: rgba(255,92,119,.2); color: #ff5c77;">Disconnect</button>
+          </div>
+          <div class="row" style="gap:10px; margin-top:10px">
+            <button id="driveSyncPush" class="btn" style="flex:1">Push state to Drive ⬆</button>
+            <button id="driveSyncPull" class="btn" style="flex:1">Pull state from Drive ⬇</button>
+          </div>
+        ` : `
+          <div class="small" style="margin-bottom:12px; opacity:.7">
+            Connect your Google Drive to automatically back up audio files to the cloud.
+            RiffBank creates organized folders for each project and song.
+          </div>
+
+          <button id="drivePickBtn" class="btn primary" style="width:100%; margin-bottom:10px">
+            Choose existing folder
+          </button>
+          <div class="small" style="margin-bottom:14px; opacity:.5; text-align:center">
+            Browse your Drive and pick a folder to use as RiffBank's home
+          </div>
+
+          <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px">
+            <div style="flex:1; height:1px; background:rgba(255,255,255,.1)"></div>
+            <div style="font-size:12px; opacity:.4">or</div>
+            <div style="flex:1; height:1px; background:rgba(255,255,255,.1)"></div>
+          </div>
+
+          <div class="label" style="margin-bottom:4px">Create a new folder</div>
+          <div class="row" style="gap:10px">
+            <input id="driveNewName" type="text" value="${escapeHtml(state.settings.driveRoot || "RiffBank")}" placeholder="e.g. RiffBank" style="flex:1" />
+            <button id="driveCreateBtn" class="btn">Create</button>
+          </div>
+          <div class="small" style="margin-top:4px; opacity:.5">
+            Creates a new folder at the root of your Google Drive
+          </div>
+        `}
+      </div>
+
+      <div class="hr"></div>
 
       <div class="label">Drive root folder name</div>
       <input id="driveRoot" type="text" value="${escapeHtml(state.settings.driveRoot || "RiffBank")}" />
@@ -4193,6 +4422,83 @@ function renderSettings() {
     </div>
   `;
 
+  // Google Drive: Pick existing folder
+  $("#drivePickBtn")?.addEventListener("click", async () => {
+    toast("Connecting to Google Drive… ☁️");
+
+    const result = await gdriveConnect();
+
+    if (result.success) {
+      state.settings.driveRoot = result.homeFolderName || "RiffBank";
+      saveState();
+      toast("Connected to Google Drive ✅");
+      renderSettings();
+    } else {
+      toast(result.error || "Connection failed 😅");
+    }
+  });
+
+  // Google Drive: Create new folder
+  $("#driveCreateBtn")?.addEventListener("click", async () => {
+    const folderName = ($("#driveNewName")?.value || "").trim() || "RiffBank";
+    toast("Connecting to Google Drive… ☁️");
+
+    const result = await gdriveConnectNewFolder(folderName);
+
+    if (result.success) {
+      state.settings.driveRoot = folderName;
+      saveState();
+      toast("Connected to Google Drive ✅");
+      renderSettings();
+    } else {
+      toast(result.error || "Connection failed 😅");
+    }
+  });
+
+  // Google Drive: Disconnect
+  $("#driveDisconnect")?.addEventListener("click", () => {
+    if (!confirm("Disconnect from Google Drive? Your files on Drive stay — RiffBank just won't sync new uploads.")) return;
+    gdriveDisconnect();
+    toast("Disconnected 🔌");
+    renderSettings();
+  });
+
+  // Google Drive: Open home folder
+  $("#driveOpenFolder")?.addEventListener("click", () => {
+    const folderId = driveCfg.homeFolderId;
+    if (folderId) {
+      window.open(`https://drive.google.com/drive/folders/${folderId}`, "_blank");
+    }
+  });
+
+  // Google Drive: Push state now
+  $("#driveSyncPush")?.addEventListener("click", async () => {
+    toast("Pushing state to Drive… ☁️");
+    const ok = await gdriveSyncStateNow(state);
+    if (ok) {
+      toast("State pushed to Drive ✅");
+    } else {
+      toast("Push failed — try reconnecting 😅");
+    }
+  });
+
+  // Google Drive: Pull state now
+  $("#driveSyncPull")?.addEventListener("click", async () => {
+    toast("Pulling state from Drive… ☁️");
+    const driveState = await gdrivePullState();
+    if (driveState && driveState.songs) {
+      if (!confirm(`Found ${driveState.songs.length} songs on Drive. Replace local data?`)) return;
+      state = driveState;
+      normalizeState();
+      localStorage.setItem(LS_KEY, JSON.stringify(state));
+      toast("Synced from Drive ✅ ☁️");
+      render();
+    } else {
+      toast("No state found on Drive (or token expired) 😅");
+    }
+  });
+
+  // Existing settings
   $("#saveSettings").addEventListener("click", () => {
     state.settings.driveRoot = $("#driveRoot").value.trim() || "RiffBank";
     state.settings.defaultProject = $("#defProject").value.trim() || "";
@@ -4208,14 +4514,12 @@ function renderSettings() {
     localStorage.removeItem(LS_KEY);
     state = loadState();
     normalizeState();
-
-    await seedDefaultLibraryIfNeeded({ force: true });
+    saveState();
 
     toast("Wiped 🧼");
     currentTab = "home";
     setHeader("RiffBank");
 
-    // ✅ Fix: this path bypasses the Home tab click handler, so reset scroll here too
     if (screens.home) screens.home.scrollTop = 0;
     try { window.scrollTo(0, 0); } catch {}
     try { document.documentElement.scrollTop = 0; } catch {}
