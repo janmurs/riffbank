@@ -1267,12 +1267,27 @@ body.splashing .app{
   border: 1px solid rgba(255,255,255,.10);
   opacity: .95;
   position: relative;
+  cursor: pointer;
 }
 
 .vThumb svg{
   width:100%;
   height:100%;
   display:block;
+}
+
+.vThumb.is-active {
+  border-color: rgba(34,197,94,.5);
+}
+
+.vThumbCheck {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,.45);
+  border-radius: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .vDur{

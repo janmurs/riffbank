@@ -20,12 +20,13 @@ import { runSplashSequence } from "./splash/splash.js";
 import {
   gdriveLoadGIS,
   gdriveIsConnected,
+  gdriveHasValidToken,
   gdriveGetConfig,
   gdriveConnect,
   gdriveConnectNewFolder,
   gdriveDisconnect,
   gdriveUploadAudio,
-  gdriveGetStreamUrl,
+  gdriveFetchBlob,
   gdriveDeleteFile,
   gdriveSyncStateSoon,
   gdriveSyncStateNow,
@@ -54,6 +55,9 @@ let fullPlayerOpen = false;
 
 // NEW: fullscreen player UI state (single source of truth)
 let isFullPlayerOpen = false;
+
+// Projects sub-screen ("list" = project list, string = selected project name)
+let projectDetailScreen = null;
 
 // Session-only: hide mini player until the user actually plays something after a fresh launch
 let hasPlayedThisSession = false;
@@ -663,6 +667,7 @@ async function playNowPlaying({ autoplay = true } = {}){
 
   const url = await getPlayableUrlForVersion(now.songId, now.versionId);
   if (!url) return toast("No playable audio 😅");
+  if (url === "drive-auth-required") return toast("Sign in to Google Drive to stream this file — tap Settings > Drive to reconnect 🔑");
 
   // Mark that this session has begun playback (so mini player can appear)
   hasPlayedThisSession = true;
@@ -787,6 +792,7 @@ function normalizeState() {
   // Player state (queue)
   state.player = state.player || {};
   state.player.queue = Array.isArray(state.player.queue) ? state.player.queue : [];
+  state.player.repeatQueue = Array.isArray(state.player.repeatQueue) ? state.player.repeatQueue : [];
   state.player.nowPlaying = state.player.nowPlaying || null;
 
   // Playback toggles (persisted)
@@ -1183,10 +1189,33 @@ async function getPlayableUrlForVersion(songId, versionId) {
     if (url) return url;
   }
 
-  // Priority 3: Google Drive streaming
-  if (v.driveFileId && gdriveIsConnected()) {
-    const driveUrl = await gdriveGetStreamUrl(v.driveFileId);
-    if (driveUrl) return driveUrl;
+  // Priority 3a: IndexedDB-cached Drive blob — instant, zero auth required
+  if (v.driveFileId) {
+    const cacheKey = `drive:${v.driveFileId}`;
+    if (audioUrlCache.has(cacheKey)) return audioUrlCache.get(cacheKey);
+
+    const cached = await audioGet(`gdrive:${v.driveFileId}`);
+    if (cached?.blob) {
+      const url = URL.createObjectURL(cached.blob);
+      audioUrlCache.set(cacheKey, url);
+      return url;
+    }
+  }
+
+  // Priority 3b: Live fetch from Drive (only if a valid token is already in memory —
+  // never triggers a sign-in popup mid-playback)
+  if (v.driveFileId && gdriveIsConnected() && gdriveHasValidToken()) {
+    const blob = await gdriveFetchBlob(v.driveFileId);
+    if (blob) {
+      const url = URL.createObjectURL(blob);
+      audioUrlCache.set(`drive:${v.driveFileId}`, url);
+      putAudioBlob({ id: `gdrive:${v.driveFileId}`, blob, name: v.fileName || v.label || "audio", type: v.fileType || blob.type || "audio/*", size: blob.size }).catch(() => {});
+      return url;
+    }
+    if (!v.link) return "drive-auth-required";
+  } else if (v.driveFileId && gdriveIsConnected() && !v.link) {
+    // Drive file exists but no token — tell user to reconnect rather than silently failing
+    return "drive-auth-required";
   }
 
   // Priority 4: Direct URL link
@@ -1227,21 +1256,20 @@ function pickCoverUrl(song, v) {
 function playerItems(data) {
   const items = [];
   for (const s of (data.songs || [])) {
-    for (const vv of (s.versions || [])) {
-      const v = ensureVersionFlags(vv);
-      if (v.playerYes) {
-        items.push({
-          songId: s.id,
-          versionId: v.id,
-          songName: s.title || "Untitled",
-          artistName: s.artist || "You",
-          coverUrl: pickCoverUrl(s, v),
-          favorite: !!v.favorite,
-          updatedAt: v.updatedAt || v.stamp || "",
-          label: versionLabel(v)
-        });
-      }
-    }
+    if (!(s.versions || []).length) continue;
+    // One row per song — always the active version (or first as fallback)
+    const vv = s.versions.find(v => v.isActive) || s.versions[0];
+    const v = ensureVersionFlags(vv);
+    items.push({
+      songId: s.id,
+      versionId: v.id,
+      songName: s.title || "Untitled",
+      artistName: s.artist || "You",
+      coverUrl: pickCoverUrl(s, v),
+      favorite: !!v.favorite,
+      updatedAt: v.updatedAt || v.stamp || s.updatedAt || "",
+      label: versionLabel(v)
+    });
   }
 
   // filter
@@ -1842,11 +1870,7 @@ miniToggleEl?.addEventListener("click", async (e) => {
 
 miniNextEl?.addEventListener("click", (e) => {
   e.stopPropagation();
-  const q = state.player?.queue || [];
-  if (!q.length) return toast("Queue empty 😅");
-  state.player.nowPlaying = q.shift();
-  saveState();
-  playNowPlaying({ autoplay: true });
+  if (!advanceToNextTrack()) toast("Queue empty 😅");
 });
 
 miniPrevEl?.addEventListener("click", (e) => {
@@ -1998,28 +2022,35 @@ miniScrubEl?.addEventListener("touchstart", (e) => e.stopPropagation(), { passiv
 
 globalAudio?.addEventListener("play", syncMiniPlayerUI);
 globalAudio?.addEventListener("pause", syncMiniPlayerUI);
-globalAudio?.addEventListener("ended", () => {
-  // Repeat = replay current track
-  if (state.player?.repeat && state.player?.nowPlaying) {
-    try { globalAudio.currentTime = 0; } catch {}
-    playNowPlaying({ autoplay: true });
-    return;
-  }
-
-  // Auto-next if queue exists (shuffle optional)
+// Advance to the next track, respecting repeat (queue-level loop) and shuffle.
+// Returns true if something will play, false if queue is truly empty.
+function advanceToNextTrack({ render: doRender = false } = {}) {
   const q = state.player?.queue || [];
   if (q.length) {
-    if (state.player?.shuffle) {
-      const idx = Math.floor(Math.random() * q.length);
-      state.player.nowPlaying = q.splice(idx, 1)[0];
-    } else {
-      state.player.nowPlaying = q.shift();
-    }
+    state.player.nowPlaying = q.shift();
     saveState();
     playNowPlaying({ autoplay: true });
-  } else {
-    syncMiniPlayerUI();
+    if (doRender) render();
+    return true;
   }
+  // Queue exhausted — rebuild from repeatQueue if repeat is on
+  if (state.player?.repeat) {
+    const rq = state.player?.repeatQueue || [];
+    if (rq.length) {
+      const fresh = state.player.shuffle ? shuffleArray([...rq]) : [...rq];
+      state.player.nowPlaying = fresh.shift();
+      state.player.queue = fresh;
+      saveState();
+      playNowPlaying({ autoplay: true });
+      if (doRender) render();
+      return true;
+    }
+  }
+  return false;
+}
+
+globalAudio?.addEventListener("ended", () => {
+  if (!advanceToNextTrack()) syncMiniPlayerUI();
 });
 
 // ---------------------
@@ -2344,13 +2375,41 @@ function renderSheet() {
     $("#vmCancel")?.addEventListener("click", closeSheet);
     return;
   }
+
+  if (sheetMode === "projectMenu") {
+    const p = sheetProjectMenuName;
+    if (!p) { closeSheet(); return; }
+    const isDefault = (state.settings.defaultProject || "").trim() === p;
+    sheetContent.innerHTML = `
+      <div class="sheetTitle">${escapeHtml(p)}</div>
+      <div class="sheetForm" style="gap:10px; margin-top:12px">
+        <button class="sheetChoice" id="pmSetDefault" ${isDefault ? "disabled" : ""}>${isDefault ? "Default ✅" : "Set as default"}</button>
+        <button class="sheetChoice" id="pmCancel">Cancel</button>
+      </div>
+    `;
+    $("#pmSetDefault")?.addEventListener("click", () => {
+      state.settings.defaultProject = p;
+      saveState();
+      toast("Default set ✅");
+      closeSheet();
+      renderProjects();
+    });
+    $("#pmCancel")?.addEventListener("click", closeSheet);
+    return;
+  }
 }
 
 let sheetVersionMenu = { songId: null, versionId: null };
+let sheetProjectMenuName = null;
 
 function openVersionMenu(songId, versionId){
   sheetVersionMenu = { songId, versionId };
   openSheet("versionMenu");
+}
+
+function openProjectMenu(projectName) {
+  sheetProjectMenuName = projectName;
+  openSheet("projectMenu");
 }
 
 sheetOverlay?.addEventListener("click", closeSheet);
@@ -2449,7 +2508,7 @@ function render() {
   );
 
   // Drawer screens
-  if (drawerView === "projects") { setActiveScreen("drawer"); return renderProjects(); }
+  if (drawerView === "projects") { setActiveScreen("drawer"); return projectDetailScreen ? renderProjectSongs(projectDetailScreen) : renderProjects(); }
   if (drawerView === "eps") { setActiveScreen("drawer"); return renderEPs(); }
   if (drawerView === "collabs") { setActiveScreen("drawer"); return renderCollaborators(); }
   if (drawerView === "importExport") { setActiveScreen("drawer"); return renderImportExport(); }
@@ -2473,6 +2532,30 @@ function render() {
 }
 
 scheduleDockSpaceSync();
+
+// Pre-fetch the active version's Drive audio for every song so first play is instant.
+// Runs in the background after init — caches blobs in IndexedDB keyed by driveFileId.
+async function preFetchDriveAudio() {
+  // Only run when a token is already in memory — never triggers a sign-in popup
+  if (!gdriveIsConnected() || !gdriveHasValidToken()) return;
+  for (const song of (state.songs || [])) {
+    const av = (song.versions || []).find(v => v.isActive) || song.versions?.[0];
+    if (!av?.driveFileId || av.fileId) continue; // no Drive file, or local copy already exists
+    const dbKey = `gdrive:${av.driveFileId}`;
+    const existing = await audioGet(dbKey);
+    if (existing?.blob) continue; // already cached
+    const blob = await gdriveFetchBlob(av.driveFileId);
+    if (blob) {
+      await putAudioBlob({
+        id: dbKey,
+        blob,
+        name: av.fileName || av.label || "audio",
+        type: av.fileType || blob.type || "audio/*",
+        size: blob.size,
+      });
+    }
+  }
+}
 
 async function init() {
   if (!DISABLE_SPLASH) {
@@ -2526,6 +2609,11 @@ async function init() {
   syncTabs();
   render();
   syncMiniPlayerUI();
+
+  // Background: pre-fetch Drive audio so first play is instant (non-blocking)
+  if (gdriveIsConnected()) {
+    preFetchDriveAudio().catch(console.warn);
+  }
 }
 
 // ES modules run after DOM is parsed, so DOMContentLoaded may already be gone
@@ -2546,23 +2634,28 @@ function renderProjects() {
       ...(state.settings?.defaultProject ? [state.settings.defaultProject.trim()] : []),
       ...state.songs.map(s => (s.project || "").trim()).filter(Boolean)
     ])
-  ).sort((a,b) => a.localeCompare(b));
+  ).sort((a, b) => a.localeCompare(b));
 
   const rows = projects.map(p => {
     const count = state.songs.filter(s => (s.project || "").trim() === p).length;
     const isDefault = (state.settings.defaultProject || "").trim() === p;
+    const fakeSong = { id: p, title: p, project: p, genre: "" };
     return `
-      <div class="item" style="cursor:default">
-        <div class="row" style="justify-content:space-between; align-items:center">
-          <div class="title"><b>${escapeHtml(p)}</b></div>
-          <div class="row" style="gap:8px; justify-content:flex-end">
-            ${isDefault ? `<span class="badge good">Default</span>` : `<span class="badge">—</span>`}
-          </div>
+      <div class="songRow" data-open-proj="${escapeHtml(p)}">
+        <div class="songThumb" aria-hidden="true">
+          ${coverSvg(fakeSong, { lite: true })}
         </div>
-        <div class="meta">${count} song${count === 1 ? "" : "s"}</div>
-        <div class="row" style="margin-top:10px; gap:8px; flex-wrap:wrap">
-          <button class="btn" data-set-default="${escapeHtml(p)}">Set default</button>
-          <button class="btn" data-filter="${escapeHtml(p)}">View songs</button>
+        <div class="songMain">
+          <div class="songTop">
+            <div class="songTitleRow">
+              <div class="songTitle">${escapeHtml(p)}</div>
+              <div class="songPills">
+                ${isDefault ? `<span class="pill good">Default</span>` : ""}
+              </div>
+            </div>
+            <button class="songMore" data-proj-more="${escapeHtml(p)}" aria-label="Project menu">⋯</button>
+          </div>
+          <div class="songSub">${count} song${count === 1 ? "" : "s"}</div>
         </div>
       </div>
     `;
@@ -2591,7 +2684,7 @@ function renderProjects() {
       <div class="hr"></div>
 
       <h2>All projects (${projects.length})</h2>
-      <div class="list">
+      <div id="projList">
         ${rows || `<div class="small">No projects yet. Create one above.</div>`}
       </div>
     </div>
@@ -2612,40 +2705,126 @@ function renderProjects() {
     renderProjects();
   });
 
-  activeScreenEl.querySelectorAll("[data-set-default]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const p = btn.getAttribute("data-set-default");
-      state.settings.defaultProject = p;
-      saveState();
-      toast("Default set ✅");
-      renderProjects();
+  activeScreenEl.querySelectorAll("[data-open-proj]").forEach(row => {
+    row.addEventListener("click", (e) => {
+      if (e.target.closest("[data-proj-more]")) return;
+      projectDetailScreen = row.getAttribute("data-open-proj");
+      render();
     });
   });
 
-activeScreenEl.querySelectorAll("[data-filter]").forEach(btn => {
-  btn.addEventListener("click", () => {
-    const p = btn.getAttribute("data-filter");
-
-    songsBackTarget = "projects"; // ✅ remember where we came from
-
-    drawerView = null;
-    currentTab = "songs";
-    songsView = "list";
-    selectedSongId = null;
-    setHeader("Songs");
-    syncTabs();
-    renderSongsList();
-
-    setTimeout(() => {
-      const q = $("#q");
-      if (q) {
-        q.value = p;
-        q.dispatchEvent(new Event("input"));
-        toast(`Showing: ${p}`);
-      }
-    }, 0);
+  activeScreenEl.querySelectorAll("[data-proj-more]").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openProjectMenu(btn.getAttribute("data-proj-more"));
+    });
   });
-});
+}
+
+function renderProjectSongs(projectName) {
+  setHeader(projectName);
+
+  const songs = state.songs.filter(s => (s.project || "").trim() === projectName);
+
+  const items = songs
+    .filter(s => (s.versions || []).length)
+    .map(s => {
+      const vv = s.versions.find(v => v.isActive) || s.versions[0];
+      return { songId: s.id, versionId: vv.id };
+    });
+
+  const rows = songs.map(s => {
+    const vCount = (s.versions || []).length;
+    const updated = s.updatedAt ? timeAgo(s.updatedAt) : "—";
+    return `
+      <div class="songRow" data-open-song="${s.id}">
+        <div class="songThumb" aria-hidden="true">
+          ${coverSvg(s, { lite: true })}
+          <div class="songDur">—:—</div>
+        </div>
+        <div class="songMain">
+          <div class="songTop">
+            <div class="songTitleRow">
+              <div class="songTitle">${escapeHtml(s.title || "Untitled")}</div>
+            </div>
+          </div>
+          <div class="songSub">${escapeHtml(s.genre || "—")}</div>
+          <div class="songMetaRow">
+            <span>🎧 ${vCount}</span>
+            <span class="sep">•</span>
+            <span>🕒 ${escapeHtml(updated)}</span>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  activeScreenEl.innerHTML = `
+    <div class="card">
+      <div class="row" style="justify-content:space-between; align-items:center">
+        <button id="projBack" class="ghost">← Back</button>
+        <button id="closeDrawerView" class="ghost">Close</button>
+      </div>
+      <h2>${escapeHtml(projectName)}</h2>
+      <div class="meta">${songs.length} song${songs.length === 1 ? "" : "s"}</div>
+      <div class="hr"></div>
+      <div class="row" style="gap:8px; margin-bottom:12px">
+        <button id="projPlayAll" class="btn primary" ${!items.length ? "disabled" : ""}>▶ Play All</button>
+        <button id="projShuffle" class="btn" ${!items.length ? "disabled" : ""}>⇄ Shuffle</button>
+      </div>
+      <div id="projSongList">
+        ${rows || `<div class="small">No songs in this project yet.</div>`}
+      </div>
+    </div>
+  `;
+
+  $("#projBack").addEventListener("click", () => {
+    projectDetailScreen = null;
+    render();
+  });
+
+  $("#closeDrawerView").addEventListener("click", () => {
+    projectDetailScreen = null;
+    drawerView = null;
+    setHeader(TAB_TITLES[currentTab] || "RiffBank");
+    render();
+  });
+
+  $("#projPlayAll")?.addEventListener("click", async () => {
+    if (!items.length) return toast("No playable songs 😅");
+    const all = [...items];
+    state.player.nowPlaying = all[0];
+    state.player.queue = all.slice(1);
+    state.player.repeatQueue = all;
+    saveState();
+    await playNowPlaying({ autoplay: true });
+    toast("Playing ▶️");
+  });
+
+  $("#projShuffle")?.addEventListener("click", async () => {
+    if (!items.length) return toast("No playable songs 😅");
+    const all = shuffleArray([...items]);
+    state.player.nowPlaying = all[0];
+    state.player.queue = all.slice(1);
+    state.player.repeatQueue = all;
+    saveState();
+    await playNowPlaying({ autoplay: true });
+    toast("Shuffled ▶️");
+  });
+
+  activeScreenEl.querySelectorAll("[data-open-song]").forEach(row => {
+    row.addEventListener("click", () => {
+      const sid = row.getAttribute("data-open-song");
+      projectDetailScreen = null;
+      drawerView = null;
+      currentTab = "songs";
+      songsView = "detail";
+      selectedSongId = sid;
+      selectedVersionId = null;
+      setHeader("Song");
+      render();
+    });
+  });
 }
 
 function renderEPs() {
@@ -3380,7 +3559,6 @@ activeScreenEl.innerHTML = `
     <div class="versionsHeader">
       <div class="versionsTitle">Versions</div>
       <div class="versionsHeaderRight">
-        <span class="versionsActiveCol">Active</span>
         <button class="btn" id="addVersionJump">Add version</button>
       </div>
     </div>
@@ -3434,13 +3612,13 @@ $("#addVersionJump")?.addEventListener("click", () => {
   rowsEl.innerHTML = versions.length
     ? versions.map((v) => {
         const sub = `${escapeHtml(v.createdAt || "")}${v.notes ? ` • ${escapeHtml(v.notes)}` : ""}`;
-        const activeIcon = v.isActive
-          ? `<svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" width="22" height="22"><rect x="1.5" y="1.5" width="17" height="17" rx="4.5" fill="rgba(34,197,94,.18)" stroke="rgba(34,197,94,.7)" stroke-width="1.5"/><path d="M5.5 10l3 3 5.5-6" stroke="#22c55e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`
-          : `<svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" width="22" height="22"><rect x="1.5" y="1.5" width="17" height="17" rx="4.5" fill="none" stroke="rgba(255,255,255,.22)" stroke-width="1.5"/></svg>`;
+        const activeOverlay = v.isActive
+          ? `<div class="vThumbCheck"><svg viewBox="0 0 20 20" fill="none" width="16" height="16"><path d="M3.5 10.5l4.5 4.5 8.5-9" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div>`
+          : "";
 
         return `
           <div class="vRow" data-vrow="${v.id}">
-            <div class="vThumb">${rowCover}<div class="vDur">—:—</div></div>
+            <div class="vThumb ${v.isActive ? "is-active" : ""}" data-vactive="${v.id}" role="button" aria-label="Set active">${rowCover}${activeOverlay}</div>
 
             <div class="vMain">
               <div class="vTop">
@@ -3449,7 +3627,6 @@ $("#addVersionJump")?.addEventListener("click", () => {
               <div class="vSub">${sub}</div>
             </div>
 
-            <button class="vActiveBtn ${v.isActive ? "is-active" : ""}" data-vactive="${v.id}" aria-label="Set active">${activeIcon}</button>
             <button class="vMore" data-vmore="${v.id}" aria-label="Version menu">⋯</button>
           </div>
         `;
@@ -3459,6 +3636,17 @@ $("#addVersionJump")?.addEventListener("click", () => {
   rowsEl.querySelectorAll("[data-vrow]").forEach((row) => {
     row.addEventListener("click", () => {
       selectedVersionId = row.getAttribute("data-vrow");
+      render();
+    });
+  });
+
+  rowsEl.querySelectorAll("[data-vactive]").forEach((thumb) => {
+    thumb.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const vid = thumb.getAttribute("data-vactive");
+      song.versions.forEach(vv => { vv.isActive = vv.id === vid; });
+      song.updatedAt = nowStamp();
+      saveState();
       render();
     });
   });
@@ -3861,8 +4049,8 @@ function renderPlayer() {
       <div class="playerTitleRow">
         <div>
           <div class="small">Playlist</div>
-          <h2 class="playerTitle">Liked Versions</h2>
-          <div class="playerCount">${items.length} version${items.length === 1 ? "" : "s"}</div>
+          <h2 class="playerTitle">Active Versions</h2>
+          <div class="playerCount">${items.length} song${items.length === 1 ? "" : "s"}</div>
         </div>
 
         <div class="playerActions">
@@ -3919,7 +4107,7 @@ function renderPlayer() {
                 </div>
               `;
             }).join("")
-          : `<div class="emptyState">No playlist versions yet. Mark a version as “Player ✅” to add it here.</div>`
+          : `<div class=”emptyState”>No songs yet. Add songs from the Songs tab.</div>`
       }
     </div>
   `;
@@ -3941,12 +4129,11 @@ function renderPlayer() {
   // Play all (in current filter/sort order)
   $("#playerPlayAll")?.addEventListener("click", async () => {
     if (!items.length) return toast("Playlist empty 😅");
-
-    // Set queue to remaining items after the first
-    state.player.nowPlaying = { songId: items[0].songId, versionId: items[0].versionId };
-    state.player.queue = items.slice(1).map(x => ({ songId: x.songId, versionId: x.versionId }));
+    const all = items.map(x => ({ songId: x.songId, versionId: x.versionId }));
+    state.player.nowPlaying = all[0];
+    state.player.queue = all.slice(1);
+    state.player.repeatQueue = all; // stored so repeat can rebuild
     saveState();
-
     await playNowPlaying({ autoplay: true });
     toast("Playing ▶️");
     renderPlayer();
@@ -3955,12 +4142,11 @@ function renderPlayer() {
   // Shuffle
   $("#playerShuffle")?.addEventListener("click", async () => {
     if (!items.length) return toast("Playlist empty 😅");
-    const shuffled = shuffleArray(items);
-
-    state.player.nowPlaying = { songId: shuffled[0].songId, versionId: shuffled[0].versionId };
-    state.player.queue = shuffled.slice(1).map(x => ({ songId: x.songId, versionId: x.versionId }));
+    const all = shuffleArray(items).map(x => ({ songId: x.songId, versionId: x.versionId }));
+    state.player.nowPlaying = all[0];
+    state.player.queue = all.slice(1);
+    state.player.repeatQueue = all;
     saveState();
-
     await playNowPlaying({ autoplay: true });
     toast("Shuffled ▶️");
     renderPlayer();
@@ -4070,7 +4256,8 @@ function renderNowPlaying() {
   const npScrub = $("#npScrub");
 
   function syncNowScrub() {
-    if (!npScrub || !globalAudio) return;
+    // Bail if the now-playing view has been torn down (stale closure)
+    if (!npScrub || !globalAudio || !document.contains(npScrub)) return;
 
     if (Number.isFinite(globalAudio.duration) && globalAudio.duration > 0) {
       npScrub.value = String(Math.floor((globalAudio.currentTime / globalAudio.duration) * 1000));
@@ -4078,9 +4265,12 @@ function renderNowPlaying() {
       npScrub.value = "0";
     }
 
-    $("#npToggle").textContent = globalAudio?.paused ? "▶" : "⏸";
-    $("#npTimeCur").textContent = fmtTime(globalAudio.currentTime || 0);
-    $("#npTimeDur").textContent = fmtTime(globalAudio.duration || 0);
+    const toggleEl = $("#npToggle");
+    const curEl    = $("#npTimeCur");
+    const durEl    = $("#npTimeDur");
+    if (toggleEl) toggleEl.textContent = globalAudio.paused ? "▶" : "⏸";
+    if (curEl)    curEl.textContent    = fmtTime(globalAudio.currentTime || 0);
+    if (durEl)    durEl.textContent    = fmtTime(globalAudio.duration    || 0);
   }
 
   syncNowScrub();
@@ -4188,12 +4378,7 @@ function renderNowPlaying() {
   });
 
   $("#npNext")?.addEventListener("click", () => {
-    const q = state.player?.queue || [];
-    if (!q.length) return toast("Queue empty 😅");
-    state.player.nowPlaying = q.shift();
-    saveState();
-    playNowPlaying({ autoplay: true });
-    render();
+    if (!advanceToNextTrack({ render: true })) toast("Queue empty 😅");
   });
 
   $("#npPrev")?.addEventListener("click", () => {

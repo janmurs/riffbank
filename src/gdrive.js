@@ -92,6 +92,14 @@ export function gdriveIsConnected() {
 }
 
 /**
+ * Does the app already have a valid in-memory token?
+ * Use this to avoid triggering a sign-in popup unexpectedly.
+ */
+export function gdriveHasValidToken() {
+  return !!(_accessToken && Date.now() < _tokenExpiry);
+}
+
+/**
  * Get current config (read-only snapshot)
  */
 export function gdriveGetConfig() {
@@ -329,7 +337,8 @@ export async function gdriveUploadAudio({ file, fileName, project, songTitle }) 
 
 /**
  * Get a streamable download URL for a Drive file.
- * SILENT: will NOT trigger a sign-in popup. Returns null if token expired.
+ * If the token is missing or expired, attempts a silent refresh via GIS
+ * (uses prompt:"" so no disruptive popup if the user has an active session).
  *
  * @param {string} driveFileId
  * @returns {string|null}
@@ -337,10 +346,16 @@ export async function gdriveUploadAudio({ file, fileName, project, songTitle }) 
 export async function gdriveGetStreamUrl(driveFileId) {
   if (!driveFileId) return null;
 
-  // Silent check — don't prompt user just for playback
-  if (!_accessToken || Date.now() >= _tokenExpiry) return null;
+  // Token still valid — return URL immediately
+  if (_accessToken && Date.now() < _tokenExpiry) {
+    return `https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media&access_token=${encodeURIComponent(_accessToken)}`;
+  }
 
-  return `https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media&access_token=${encodeURIComponent(_accessToken)}`;
+  // Token missing/expired — attempt a silent refresh before giving up
+  const token = await _ensureToken();
+  if (!token) return null;
+
+  return `https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media&access_token=${encodeURIComponent(token)}`;
 }
 
 /**
@@ -825,9 +840,11 @@ function _requestToken() {
 
 /**
  * Ensure we have a valid token, refresh if expired.
+ * Loads GIS if not yet loaded so this is safe to call at any time.
  */
 async function _ensureToken() {
   if (_accessToken && Date.now() < _tokenExpiry) return _accessToken;
+  if (!_gisLoaded) await gdriveLoadGIS();
   return await _requestToken();
 }
 
