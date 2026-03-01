@@ -3,13 +3,13 @@
   "displayName": "BigSal",
   "songs": [
     {
-      "slug": "dank",
-      "title": "DANK",
+      "slug": "bigsal",
+      "title": "BIG SAL",
       "versions": [
         {
-          "id": "dank_20251116",
-          "title": "DANK 20251116",
-          "file": "/library/bigsal/dank/dank_20251116.m4a",
+          "id": "bigsal",
+          "title": "BIG SAL",
+          "file": "/library/bigsal/bigsal/bigsal.m4a",
           "date": "2025-11-16",
           "format": "m4a",
           "best": true,
