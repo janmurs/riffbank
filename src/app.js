@@ -6,14 +6,22 @@
 // - Dashboard + Settings
 // - Export / Import
 
+window.onerror = (m, src, line, col) => alert(`JS ERROR:\n${m}\n${line}:${col}`);
+
 // Dev toggle: skip splash animation
-const DISABLE_SPLASH = false;
+ const DISABLE_SPLASH = true;
+
+// console.log("RIFFBANK APP.JS LOADED ✅", new Date().toISOString());
+// alert("RIFFBANK APP.JS LOADED ✅ " + new Date().toISOString());
 
 import { $ } from "./ui/dom.js";
 import { runSplashSequence } from "./splash/splash.js";
 
 const LS_KEY = "riffbank_v1";
 const HAS_SAVED_STATE = !!localStorage.getItem(LS_KEY); // used to detect first-run seeding
+
+let prevTabBeforeFullPlayer = null;
+let prevSelectedSongIdBeforeFullPlayer = null;
 
 let splashAlreadyRan = false;
 
@@ -197,60 +205,60 @@ function ensureNowPlayingOverlay() {
   el.style.position = "fixed";
   el.style.inset = "0";
   el.style.zIndex = "9998";
-  el.style.display = "none";         // hidden by default
   el.style.background = "transparent"; // your CSS handles background vibes
   document.body.appendChild(el);
   return el;
 }
 
+let nowPlayingOverlayEl = null;
+
+function getNowPlayingOverlayEl() {
+  if (!nowPlayingOverlayEl) nowPlayingOverlayEl = ensureNowPlayingOverlay();
+  return nowPlayingOverlayEl;
+}
+
+  function fmtTime(sec) {
+    if (!Number.isFinite(sec) || sec < 0) return "0:00";
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${String(s).padStart(2, "0")}`;
+  }
+
 function openNowPlaying() {
-  // Only open if something is actually playing/loaded
   if (!state.player?.nowPlaying) return;
-  if (fullPlayerOpen) return;
 
-  // Ensure the overlay opens at the top even if the app view was scrolled
-  try { window.scrollTo(0, 0); } catch {}
-
-  lastTabBeforeFullPlayer = getActiveTab();
   fullPlayerOpen = true;
   isNowPlayingFullscreen = true;
 
-  document.body.classList.add("fullplayer-open");
-
-  const overlay = ensureNowPlayingOverlay();
-  overlay.style.display = "block";
+  const overlay = getNowPlayingOverlayEl();
   overlay.innerHTML = renderNowPlayingHTML();
   wireNowPlayingEvents(overlay);
-
-  updateMiniPlayerPresence();
+  overlay.classList.add("is-open");
 }
 
 function closeNowPlaying() {
-  if (!fullPlayerOpen) return;
-
   fullPlayerOpen = false;
   isNowPlayingFullscreen = false;
-  document.body.classList.remove("fullplayer-open");
 
-  if (nowPlayingOverlayEl) {
-    nowPlayingOverlayEl.classList.remove("open");
-    nowPlayingOverlayEl.style.display = "none";
-    nowPlayingOverlayEl.innerHTML = "";
-  }
+  const overlay = getNowPlayingOverlayEl();renderNowPlayingHTML
+  overlay.classList.remove("is-open");
 
-  if (lastTabBeforeFullPlayer) setActiveTab(lastTabBeforeFullPlayer);
-
-  updateMiniPlayerPresence();
+  setTimeout(() => {
+    if (!fullPlayerOpen) overlay.innerHTML = "";
+  }, 200);
 }
 
 // Full-screen Now Playing overlay HTML (kept in sync with renderNowPlaying)
 function renderNowPlayingHTML() {
-  const np = state.player?.nowPlaying;
+const np = state.player?.nowPlaying;
   if (!np) return "";
 
-  const title = escapeHtml(np.title || "");
-  const subtitle = escapeHtml(np.subtitle || "");
-  const coverArt = escapeHtml(np.coverArt || "");
+  const song = getSong(np.songId);
+  const v = song ? getVersion(song, np.versionId) : null;
+
+  const title = escapeHtml(song?.title || "");
+  const subtitle = escapeHtml(v?.label || "");
+  const coverArt = ""; // coverSvg generates SVG not a URL, so leave blank for now
   const dur = Number.isFinite(globalAudio?.duration) ? globalAudio.duration : 0;
   const cur = Number.isFinite(globalAudio?.currentTime) ? globalAudio.currentTime : 0;
   const pct = dur > 0 ? (cur / dur) * 100 : 0;
@@ -260,7 +268,6 @@ function renderNowPlayingHTML() {
 
   return `
     <div class="fp" id="fpRoot">
-      <div class="fpBg" style="background-image:url('${coverArt}')"></div>
       <div class="fpTop">
         <button class="fpIconBtn" id="fpClose" aria-label="Close">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 15l-6-6-6 6"/></svg>
@@ -273,7 +280,9 @@ function renderNowPlayingHTML() {
       </div>
 
       <div class="fpCoverWrap">
-        <img class="fpCover" src="${coverArt}" alt="" />
+        <div class="fpCoverWrap">
+        ${song ? coverSvg(song) : ""}
+      </div>
       </div>
 
       <div class="fpMeta">
@@ -289,9 +298,9 @@ function renderNowPlayingHTML() {
       </div>
 
       <div class="fpScrub">
-        <div class="fpTime">${formatTime(cur)}</div>
+        <div class="fpTime">${fmtTime(cur)}</div>
         <input id="fpSeek" class="fpSeek" type="range" min="0" max="100" value="${pct}" />
-        <div class="fpTime">${formatTime(dur)}</div>
+        <div class="fpTime">${fmtTime(dur)}</div>
       </div>
 
       <div class="fpControls">
@@ -1408,6 +1417,8 @@ function playVersion(songId, versionId, { goPlayer = true } = {}) {
     return toast("No playable audio for that version 😅");
 
   state.player.nowPlaying = { songId, versionId };
+  state.player.shuffle = false;  // ← ADD
+  state.player.repeat = false;   // ← ADD
   saveState();
   toast("Playing ▶️");
 
@@ -1682,8 +1693,11 @@ function goBack({ animate = false } = {}) {
 
     if (selectedSongId) {
       selectedSongId = null;
+      selectedVersionId = null;  // ← ADD: always clear this too
       currentTab = "songs";
       songsView = "list";
+      drawerView = null;          // ← ADD: clear any drawer bleed
+      overlayView = null;         // ← ADD: clear any overlay bleed
       setHeader("Songs");
       syncTabs();
       render();
@@ -1745,15 +1759,18 @@ document.addEventListener("touchstart", (e) => {
   const t = e.changedTouches?.[0];
   if (!t) return;
 
-  // Left-edge gesture
-  if (!drawerOpen && t.clientX <= 24) {
-    touchTracking = true;
-    const onHomeRoot = (currentTab === "home" && !drawerView && !overlayView);
-    touchMode = onHomeRoot ? "open" : "back";
-    touchStartX = t.clientX;
-    touchStartY = t.clientY;
-    return;
-  }
+// Left-edge gesture
+if (!drawerOpen && t.clientX <= 24) {
+  // ← ADD THIS: disable swipe when fullscreen player is open
+  if (playerScreen === "now" && currentTab === "player") return;
+  
+  touchTracking = true;
+  const onHomeRoot = (currentTab === "home" && !drawerView && !overlayView);
+  touchMode = onHomeRoot ? "open" : "back";
+  touchStartX = t.clientX;
+  touchStartY = t.clientY;
+  return;
+}
 
   // Drawer close gesture
   if (drawerOpen) {
@@ -1832,19 +1849,37 @@ miniPrevEl?.addEventListener("click", (e) => {
   globalAudio.currentTime = 0;
 });
 
-miniPlayerEl?.addEventListener("click", (e) => {
-  // If user tapped a control button or scrubber, do NOT open fullscreen player
-  const isControl = e.target.closest("#miniPrev, #miniToggle, #miniNext, #miniScrub");
-  if (isControl) return;
+// Hard stop + reset to "fresh launch" state (no mini player, no overlay, no audio playing)
+function stopAndResetPlayback() {
+  // Stop audio immediately
+  try { globalAudio.pause(); } catch {}
+  try { globalAudio.currentTime = 0; } catch {}
 
-  // If nothing is playing, do nothing
-  if (!state.player?.nowPlaying) return;
+  // Detach the current source so iOS stops the media session cleanly
+  try {
+    globalAudio.removeAttribute("src");
+    globalAudio.load();
+  } catch {}
 
-  // Open full-screen overlay (no tab switching)
-  openNowPlaying();
-});
+  // Clear app playback state
+  if (state.player) {
+    state.player.nowPlaying = null;
+    state.player.queue = [];
+  }
 
-// Swipe down on mini player = stop + reset + hide
+  // Fresh-launch behavior: mini player stays hidden until a new play action this session
+  hasPlayedThisSession = false;
+
+  // Ensure fullscreen overlay is fully closed + removed from hit testing
+  try { closeNowPlaying(); } catch {}
+  setFullPlayerOpen(false);
+
+  saveState();
+  syncMiniPlayerUI();
+  scheduleDockSpaceSync();
+}
+
+// Swipe down on mini player = stop + reset + hide (tap-safe + center-safe)
 miniPlayerEl?.addEventListener(
   "touchstart",
   (e) => {
@@ -1856,6 +1891,7 @@ miniPlayerEl?.addEventListener(
 
     miniPlayerEl.dataset.dragStartY = String(e.touches[0].clientY);
     miniPlayerEl.dataset.dragDy = "0";
+    miniPlayerEl.dataset.didDrag = "0";
   },
   { passive: true }
 );
@@ -1872,12 +1908,15 @@ miniPlayerEl?.addEventListener(
     let dy = e.touches[0].clientY - startY;
     if (dy < 0) dy = 0;
 
+    const ACTIVATE_PX = 14;
+    if (dy < ACTIVATE_PX) return;
+
+    miniPlayerEl.dataset.didDrag = "1";
     miniPlayerEl.dataset.dragDy = String(dy);
 
-    if (dy > 0) {
-      miniPlayerEl.style.transform = `translateY(${dy}px)`;
-      miniPlayerEl.style.transition = "none";
-    }
+    miniPlayerEl.style.transition = "none";
+    // ✅ preserve centering
+    miniPlayerEl.style.transform = `translateX(-50%) translateY(${Math.min(dy, 240)}px)`;
   },
   { passive: true }
 );
@@ -1887,30 +1926,65 @@ miniPlayerEl?.addEventListener(
   () => {
     if (!miniPlayerEl) return;
 
+    const didDrag = miniPlayerEl.dataset.didDrag === "1";
     const dy = parseFloat(miniPlayerEl.dataset.dragDy || "0");
+
     delete miniPlayerEl.dataset.dragStartY;
     delete miniPlayerEl.dataset.dragDy;
+    delete miniPlayerEl.dataset.didDrag;
 
-    const threshold = 90;
+    const CLOSE_PX = 90;
 
-    if (dy > threshold) {
-      try { globalAudio.pause(); } catch {}
-      try { globalAudio.currentTime = 0; } catch {}
+    // snap back always
+    miniPlayerEl.style.transition = "transform 160ms ease";
+    miniPlayerEl.style.transform = "translateX(-50%) translateY(0px)";
 
+    if (didDrag && dy > CLOSE_PX) {
+      // ✅ HARD STOP audio (iOS needs src cleared sometimes)
+    if (dy > 80) {
+      stopAndResetPlayback();     // ✅ the full reset you already wrote
+      // syncMiniPlayerUI handles visibility
+      return;
+    }
+
+      // ✅ Reset state to "fresh launch"
       state.player.nowPlaying = null;
       state.player.queue = [];
       hasPlayedThisSession = false;
 
+      // ✅ Close fullscreen if it was open (now safe)
+      try { closeNowPlaying(); } catch {}
+
       saveState();
-      closeNowPlaying();
+      syncMiniPlayerUI();
+      scheduleDockSpaceSync?.();
       render();
     }
-
-    miniPlayerEl.style.transition = "transform 160ms ease";
-    miniPlayerEl.style.transform = "translateY(0px)";
   },
   { passive: true }
 );
+
+miniPlayerEl?.addEventListener("click", (e) => {
+  const isControl = e.target.closest("#miniPrev, #miniToggle, #miniNext, #miniScrub");
+  if (miniPlayerEl?.dataset?.suppressClick === "1") {
+    delete miniPlayerEl.dataset.suppressClick;
+    return;
+  }
+  if (isControl) return;
+  if (!state.player?.nowPlaying) return;
+
+  prevTabBeforeFullPlayer = currentTab;
+  prevSelectedSongIdBeforeFullPlayer = selectedSongId;
+  currentTab = "player";
+  playerScreen = "now";
+
+  // ← REPLACE openNowPlaying() with this:
+  currentTab = "player";
+  playerScreen = "now";
+  setHeader("Now Playing");
+  syncTabs();
+  render();
+});
 
 miniScrubEl?.addEventListener("pointerdown", (e) => e.stopPropagation());
 miniScrubEl?.addEventListener("touchstart", (e) => e.stopPropagation(), { passive: true });
@@ -2412,26 +2486,29 @@ function render() {
 
 scheduleDockSpaceSync();
 
-window.addEventListener("DOMContentLoaded", async () => {
+async function init() {
   if (!DISABLE_SPLASH) {
-  await runSplashSequence();
-} else {
-  const splash = document.getElementById("splash");
-  if (splash) splash.remove();
-}
+    await runSplashSequence();
+  } else {
+    const splash = document.getElementById("splash");
+    if (splash) splash.remove();
+  }
 
-  // Seed default library on first run (or if user wiped data)
   const seeded = await seedDefaultLibraryIfNeeded({ force: false });
   if (seeded) toast("Seeded library 🎧");
 
   setHeader("RiffBank");
   syncTabs();
   render();
-
-  // Allow native elastic scrolling (iOS-style rubber band) inside the main view.
-  // NOTE: We intentionally do NOT call preventRubberBandScroll(view) here.
   syncMiniPlayerUI();
-});
+}
+
+// ES modules run after DOM is parsed, so DOMContentLoaded may already be gone
+if (document.readyState === "loading") {
+  window.addEventListener("DOMContentLoaded", init);
+} else {
+  init(); // DOM already ready by the time the module ran
+}
 
 // ---------------------
 // Drawer views
@@ -3756,14 +3833,6 @@ function renderPlayer() {
           : `<div class="emptyState">No playlist versions yet. Mark a version as “Player ✅” to add it here.</div>`
       }
     </div>
-
-    <div class="card" style="margin-top:12px">
-      <div class="row" style="justify-content:space-between; align-items:center">
-        <h2 style="margin:0">Queue</h2>
-        <button class="ghost" id="clearQueueMini">Clear</button>
-      </div>
-      <div class="small" style="margin-top:6px">${(state.player?.queue || []).length} item(s)</div>
-    </div>
   `;
 
   // Filter chips
@@ -3833,14 +3902,6 @@ function renderPlayer() {
       renderPlayer();
     });
   });
-
-  // Queue clear
-  $("#clearQueueMini")?.addEventListener("click", () => {
-    state.player.queue = [];
-    saveState();
-    toast("Queue cleared 🧼");
-    renderPlayer();
-  });
 }
 
 function renderNowPlaying() {
@@ -3902,11 +3963,11 @@ function renderNowPlaying() {
       </div>
 
       <div class="fpControls" role="group" aria-label="Playback controls">
-        <button class="fpCtrl" type="button" aria-label="Shuffle" id="npShuffle">🔀</button>
+        <button class="fpCtrl ${state.player?.shuffle ? 'is-active' : ''}" type="button" aria-label="Shuffle" id="npShuffle">🔀</button>
         <button class="fpCtrl" id="npPrev" type="button" aria-label="Previous">⏮</button>
         <button class="fpCtrl fpPlay" id="npToggle" type="button" aria-label="Play / Pause">${globalAudio?.paused ? "▶" : "⏸"}</button>
         <button class="fpCtrl" id="npNext" type="button" aria-label="Next">⏭</button>
-        <button class="fpCtrl" type="button" aria-label="Repeat" id="npRepeat">🔁</button>
+        <button class="fpCtrl ${state.player?.repeat ? 'is-active' : ''}" type="button" aria-label="Repeat" id="npRepeat">🔁</button>
       </div>
 
       <nav class="fpBottomTabs" aria-label="Now playing tabs">
@@ -3918,13 +3979,6 @@ function renderNowPlaying() {
   `;
 
   const npScrub = $("#npScrub");
-
-  function fmtTime(sec) {
-    if (!Number.isFinite(sec) || sec < 0) return "0:00";
-    const m = Math.floor(sec / 60);
-    const s = Math.floor(sec % 60);
-    return `${m}:${String(s).padStart(2, "0")}`;
-  }
 
   function syncNowScrub() {
     if (!npScrub || !globalAudio) return;
@@ -3957,7 +4011,16 @@ function renderNowPlaying() {
     cleanup();
     setFullPlayerOpen(false);
     playerScreen = "list";
-    setHeader("Player");
+    if (prevTabBeforeFullPlayer) {
+      currentTab = prevTabBeforeFullPlayer;
+      selectedSongId = prevSelectedSongIdBeforeFullPlayer;
+      prevTabBeforeFullPlayer = null;
+      prevSelectedSongIdBeforeFullPlayer = null;
+      setHeader(currentTab === "songs" && selectedSongId ? "Song" : TAB_TITLES[currentTab] || "RiffBank");
+    } else {
+      setHeader("Player");
+    }
+    syncTabs();
     render();
   };
 
@@ -4023,8 +4086,15 @@ function renderNowPlaying() {
   $("#npToggle")?.addEventListener("click", async () => {
     if (!globalAudio) return;
     await unlockAudioOnce();
-    if (globalAudio.paused) await playNowPlaying({ autoplay: true });
-    else globalAudio.pause();
+    if (globalAudio.paused) {
+      if (!globalAudio.src) {
+        await playNowPlaying({ autoplay: true }); // first time, no src yet
+      } else {
+        await globalAudio.play(); // resume from current position
+      }
+    } else {
+      globalAudio.pause();
+    }
     syncMiniPlayerUI();
   });
 
@@ -4034,12 +4104,25 @@ function renderNowPlaying() {
     state.player.nowPlaying = q.shift();
     saveState();
     playNowPlaying({ autoplay: true });
+    render();
   });
 
   $("#npPrev")?.addEventListener("click", () => {
     if (!globalAudio) return;
     globalAudio.currentTime = 0;
   });
+
+  $("#npShuffle")?.addEventListener("click", () => {
+  state.player.shuffle = !state.player.shuffle;
+  saveState();
+  $("#npShuffle")?.classList.toggle("is-active", !!state.player.shuffle);
+});
+
+$("#npRepeat")?.addEventListener("click", () => {
+  state.player.repeat = !state.player.repeat;
+  saveState();
+  $("#npRepeat")?.classList.toggle("is-active", !!state.player.repeat);
+});
 
   $("#npGoSong")?.addEventListener("click", () => {
     cleanup();
