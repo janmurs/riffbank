@@ -10,7 +10,7 @@
 window.onerror = (m, src, line, col) => alert(`JS ERROR:\n${m}\n${line}:${col}`);
 
 // Dev toggle: skip splash animation
- const DISABLE_SPLASH = true;
+ const DISABLE_SPLASH = false;
 
 // console.log("RIFFBANK APP.JS LOADED ✅", new Date().toISOString());
 // alert("RIFFBANK APP.JS LOADED ✅ " + new Date().toISOString());
@@ -31,6 +31,7 @@ import {
   gdriveSyncStateNow,
   gdrivePullState,
   gdrivePullStateSilent,
+  gdriveRebuildFromFolders,
 } from "./gdrive.js";
 
 const LS_KEY = "riffbank_v1";
@@ -774,12 +775,14 @@ function normalizeState() {
       // Google Drive support
       if (v.driveFileId === undefined) v.driveFileId = null;
       if (v.driveWebViewLink === undefined) v.driveWebViewLink = "";
-            // Player playlist flags
+      // Player playlist flags
       if (typeof v.playerYes !== "boolean") v.playerYes = false;
       if (typeof v.favorite !== "boolean") v.favorite = false;
     });
-    // ✅ new: featured version pointer
-    if (song.featuredVersionId === undefined) song.featuredVersionId = null;
+    // Ensure exactly one active version if versions exist and none is currently active
+    if (song.versions.length && !song.versions.some(v => v.isActive)) {
+      song.versions[0].isActive = true;
+    }
   });
   // Player state (queue)
   state.player = state.player || {};
@@ -1381,14 +1384,14 @@ function getSong(id) {
 
 function bestVersion(song) {
   if (!song?.versions?.length) return null;
-  return song.versions.find((v) => v.isBest) || song.versions[0];
+  return song.versions.find((v) => v.isActive) || song.versions[0];
 }
 
 function getVersion(song, versionId){
   return (song?.versions || []).find(v => v.id === versionId) || null;
 }
 
-function createVersion(song, { makeBest = true } = {}) {
+function createVersion(song) {
   if (!song) return null;
 
   const vNum = (song.versions?.length || 0) + 1;
@@ -1398,19 +1401,14 @@ function createVersion(song, { makeBest = true } = {}) {
     label: `${song.title || "Song"} - v${vNum}`,
     notes: "",
     link: "",
-    isBest: false,
     isActive: true,
     createdAt: nowStamp(),
   };
 
   song.versions = Array.isArray(song.versions) ? song.versions : [];
+  // New version becomes the active one — deactivate all others
+  song.versions.forEach(x => x.isActive = false);
   song.versions.unshift(v);
-
-  // First version defaults
-  if (makeBest) {
-    song.versions.forEach(x => x.isBest = (x.id === v.id));
-  }
-  song.featuredVersionId = v.id;
   song.updatedAt = nowStamp();
 
   saveState();
@@ -1419,23 +1417,7 @@ function createVersion(song, { makeBest = true } = {}) {
 
 function featuredVersion(song){
   if (!song) return null;
-
-  // 1) Explicit featured
-  if (song.featuredVersionId) {
-    const fv = getVersion(song, song.featuredVersionId);
-    if (fv) return fv;
-  }
-
-  // 2) Best
-  const bv = bestVersion(song);
-  if (bv) return bv;
-
-  // 3) Most recent active
-  const av = (song.versions || []).find(v => v.isActive);
-  if (av) return av;
-
-  // 4) Anything
-  return (song.versions || [])[0] || null;
+  return (song.versions || []).find(v => v.isActive) || (song.versions || [])[0] || null;
 }
 
 function playVersion(songId, versionId, { goPlayer = true } = {}) {
@@ -1482,14 +1464,13 @@ function addToQueue(songId, versionId) {
   toast("Queued ➕");
 }
 
-function setFeatured(songId, versionId){
+function setActive(songId, versionId){
   const song = getSong(songId);
   const v = getVersion(song, versionId);
   if (!song || !v) return;
-  song.featuredVersionId = versionId;
+  song.versions.forEach(x => x.isActive = (x.id === versionId));
   song.updatedAt = nowStamp();
   saveState();
-  toast("Featured ⭐");
 }
 
 function drivePathFor(song) {
@@ -1499,14 +1480,13 @@ function drivePathFor(song) {
   return `${root}/${project}/${title}/Versions`;
 }
 
-function suggestedFileName(song, originalFileName, makeBest) {
+function suggestedFileName(song, originalFileName) {
   const extMatch = (originalFileName || "").match(/\.([a-z0-9]+)$/i);
   const ext = extMatch ? extMatch[1] : "wav";
   const title = slug(song.title || "Untitled");
   const vNum = (song.versions?.length || 0) + 1;
   const stamp = nowStamp();
-  const bestTag = makeBest ? " (BEST)" : "";
-  return `${title} - v${vNum} - ${stamp}${bestTag}.${ext}`;
+  return `${title} - v${vNum} - ${stamp}.${ext}`;
 }
 
 async function copyText(txt) {
@@ -2304,9 +2284,7 @@ function renderSheet() {
       <div class="sheetForm" style="gap:10px; margin-top:12px">
         <button class="sheetChoice" id="vmPlay" ${playable ? "" : "disabled"}>Play</button>
         <button class="sheetChoice" id="vmQueue" ${playable ? "" : "disabled"}>Add to Queue</button>
-        <button class="sheetChoice" id="vmFeatured">Set as Featured ⭐</button>
-        <button class="sheetChoice" id="vmToggleActive">${v.isActive ? "Active ✅ (toggle)" : "Set Active 🎧"}</button>
-        <button class="sheetChoice" id="vmSetBest">${v.isBest ? "Best ✅" : "Set Best ⭐"}</button>
+        <button class="sheetChoice" id="vmSetActive" ${v.isActive ? "disabled" : ""}>${v.isActive ? "Active ✅" : "Set Active ✅"}</button>
         <button class="sheetChoice" id="vmOpen" ${playable ? "" : "disabled"}>Open link</button>
         <button class="sheetChoice" id="vmCopy">Copy name</button>
 
@@ -2329,26 +2307,9 @@ function renderSheet() {
       closeSheet();
     });
 
-    $("#vmFeatured")?.addEventListener("click", () => {
-      setFeatured(song.id, v.id);
-      closeSheet();
-      render(); // refresh UI
-    });
-
-    $("#vmToggleActive")?.addEventListener("click", () => {
-      v.isActive = !v.isActive;
-      song.updatedAt = nowStamp();
-      saveState();
-      toast("Active updated 🎧");
-      closeSheet();
-      render();
-    });
-
-    $("#vmSetBest")?.addEventListener("click", () => {
-      song.versions.forEach(x => x.isBest = (x.id === v.id));
-      song.updatedAt = nowStamp();
-      saveState();
-      toast("Best updated ⭐");
+    $("#vmSetActive")?.addEventListener("click", () => {
+      setActive(song.id, v.id);
+      toast("Active ✅");
       closeSheet();
       render();
     });
@@ -2365,13 +2326,13 @@ function renderSheet() {
 
     $("#vmDelete")?.addEventListener("click", () => {
       if (!confirm(`Delete this version?`)) return;
+      const wasActive = v.isActive;
       song.versions = (song.versions || []).filter(x => x.id !== v.id);
 
-      // If featured got deleted, clear it
-      if (song.featuredVersionId === v.id) song.featuredVersionId = null;
-
-      // Ensure at least one best remains if versions exist
-      if (song.versions.length && !song.versions.some(x => x.isBest)) song.versions[0].isBest = true;
+      // If the deleted version was active, promote the first remaining
+      if (wasActive && song.versions.length && !song.versions.some(x => x.isActive)) {
+        song.versions[0].isActive = true;
+      }
 
       song.updatedAt = nowStamp();
       saveState();
@@ -3418,7 +3379,10 @@ activeScreenEl.innerHTML = `
   <div class="versionsWrap">
     <div class="versionsHeader">
       <div class="versionsTitle">Versions</div>
-      <button class="btn" id="addVersionJump">Add version</button>
+      <div class="versionsHeaderRight">
+        <span class="versionsActiveCol">Active</span>
+        <button class="btn" id="addVersionJump">Add version</button>
+      </div>
     </div>
 
     <div id="versionsRows" class="versionsRows"></div>
@@ -3444,7 +3408,7 @@ activeScreenEl.innerHTML = `
 $("#songDetailsBtn")?.addEventListener("click", () => {
   // If no versions yet, create the first one and open it
   if (!fv) {
-    const first = createVersion(song, { makeBest: true });
+    const first = createVersion(song);
     if (!first) return toast("Couldn’t create version 😅");
     selectedVersionId = first.id;
     render();
@@ -3457,7 +3421,7 @@ $("#songDetailsBtn")?.addEventListener("click", () => {
 
 $("#addVersionJump")?.addEventListener("click", () => {
   // Always create a brand new version (even if versions already exist)
-  const newV = createVersion(song, { makeBest: false });
+  const newV = createVersion(song);
   if (!newV) return toast("Couldn’t create version 😅");
   selectedVersionId = newV.id;
   render();
@@ -3469,11 +3433,10 @@ $("#addVersionJump")?.addEventListener("click", () => {
 
   rowsEl.innerHTML = versions.length
     ? versions.map((v) => {
-        const pillBest = v.isBest ? `<span class="vPill good">Best</span>` : "";
-        const pillActive = v.isActive ? `<span class="vPill">Active</span>` : "";
-        const pillFeatured = song.featuredVersionId === v.id ? `<span class="vPill warn">Featured</span>` : "";
-
         const sub = `${escapeHtml(v.createdAt || "")}${v.notes ? ` • ${escapeHtml(v.notes)}` : ""}`;
+        const activeIcon = v.isActive
+          ? `<svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" width="22" height="22"><rect x="1.5" y="1.5" width="17" height="17" rx="4.5" fill="rgba(34,197,94,.18)" stroke="rgba(34,197,94,.7)" stroke-width="1.5"/><path d="M5.5 10l3 3 5.5-6" stroke="#22c55e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+          : `<svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" width="22" height="22"><rect x="1.5" y="1.5" width="17" height="17" rx="4.5" fill="none" stroke="rgba(255,255,255,.22)" stroke-width="1.5"/></svg>`;
 
         return `
           <div class="vRow" data-vrow="${v.id}">
@@ -3482,11 +3445,11 @@ $("#addVersionJump")?.addEventListener("click", () => {
             <div class="vMain">
               <div class="vTop">
                 <div class="vTitle">${escapeHtml(v.label || "Version")}</div>
-                <div class="vPills">${pillFeatured}${pillBest}${pillActive}</div>
               </div>
               <div class="vSub">${sub}</div>
             </div>
 
+            <button class="vActiveBtn ${v.isActive ? "is-active" : ""}" data-vactive="${v.id}" aria-label="Set active">${activeIcon}</button>
             <button class="vMore" data-vmore="${v.id}" aria-label="Version menu">⋯</button>
           </div>
         `;
@@ -3527,7 +3490,6 @@ function renderVersionDetail(songId, versionId) {
   try { document.body.scrollTop = 0; } catch {}
   requestAnimationFrame(() => { if (screens.home) screens.home.scrollTop = 0; });
 
-  const isFeatured = song.featuredVersionId === v.id;
   const hasPlayable = !!(v.link || v.fileId || v.localAudioId || v.driveFileId);
   const hasLocal = !!(v.fileId || v.localAudioId);
   const hasDrive = !!v.driveFileId;
@@ -3544,9 +3506,7 @@ function renderVersionDetail(songId, versionId) {
       <div class="hr"></div>
 
       <div class="row" style="gap:10px; align-items:center; flex-wrap:wrap">
-        <div class="badge ${isFeatured ? "warn" : ""}">${isFeatured ? "⭐ Featured" : "Featured —"}</div>
-        <div class="badge ${v.isBest ? "good" : ""}">${v.isBest ? "⭐ Best" : "Best —"}</div>
-        <div class="badge ${v.isActive ? "good" : ""}">${v.isActive ? "🎧 Active" : "Active —"}</div>
+        <div class="badge ${v.isActive ? "good" : ""}">${v.isActive ? "✅ Active" : "Active —"}</div>
       </div>
 
       <div class="hr"></div>
@@ -3591,9 +3551,7 @@ function renderVersionDetail(songId, versionId) {
       </div>
 
       <div class="row" style="margin-top:10px; gap:10px; flex-wrap:wrap">
-        <button class="btn" id="setFeaturedBtn">Set Featured ⭐</button>
-        <button class="btn" id="toggleActiveBtn">${v.isActive ? "Active ✅ (toggle)" : "Set Active 🎧"}</button>
-        <button class="btn" id="setBestBtn">${v.isBest ? "Best ✅" : "Set Best ⭐"}</button>
+        <button class="btn" id="toggleActiveBtn">${v.isActive ? "Active ✅" : "Set Active ✅"}</button>
         <button class="btn" id="openLinkBtn" ${v.link ? "" : "disabled"}>Open link</button>
         <button class="btn" id="deleteVersionBtn">Delete</button>
       </div>
@@ -3646,7 +3604,7 @@ function renderVersionDetail(songId, versionId) {
       if (gdriveIsConnected()) {
         toast("Uploading to Drive… ☁️");
 
-        const suggested = suggestedFileName(song, file.name, v.isBest);
+        const suggested = suggestedFileName(song, file.name);
 
         const result = await gdriveUploadAudio({
           file,
@@ -3722,7 +3680,7 @@ function renderVersionDetail(songId, versionId) {
     if (!blob) return toast("No local file to upload 😅");
 
     toast("Uploading to Drive… ☁️");
-    const suggested = suggestedFileName(song, fileName, v.isBest);
+    const suggested = suggestedFileName(song, fileName);
     const result = await gdriveUploadAudio({
       file: blob,
       fileName: suggested,
@@ -3742,25 +3700,10 @@ function renderVersionDetail(songId, versionId) {
     }
   });
 
-  // Featured / Active / Best
-  $("#setFeaturedBtn")?.addEventListener("click", () => {
-    setFeatured(songId, versionId);
-    renderVersionDetail(songId, versionId);
-  });
-
+  // Active (exclusive — only one version active at a time)
   $("#toggleActiveBtn")?.addEventListener("click", () => {
-    v.isActive = !v.isActive;
-    song.updatedAt = nowStamp();
-    saveState();
-    toast("Active updated 🎧");
-    renderVersionDetail(songId, versionId);
-  });
-
-  $("#setBestBtn")?.addEventListener("click", () => {
-    song.versions.forEach(x => x.isBest = (x.id === versionId));
-    song.updatedAt = nowStamp();
-    saveState();
-    toast("Best updated ⭐");
+    setActive(songId, versionId);
+    toast("Active ✅");
     renderVersionDetail(songId, versionId);
   });
 
@@ -3778,10 +3721,13 @@ function renderVersionDetail(songId, versionId) {
       try { await gdriveDeleteFile(v.driveFileId); } catch {}
     }
 
+    const wasActive = v.isActive;
     song.versions = (song.versions || []).filter(x => x.id !== versionId);
 
-    if (song.featuredVersionId === versionId) song.featuredVersionId = null;
-    if (song.versions.length && !song.versions.some(x => x.isBest)) song.versions[0].isBest = true;
+    // If the deleted version was active, promote the first remaining version
+    if (wasActive && song.versions.length && !song.versions.some(x => x.isActive)) {
+      song.versions[0].isActive = true;
+    }
 
     song.updatedAt = nowStamp();
     saveState();
@@ -4354,6 +4300,12 @@ function renderSettings() {
             <button id="driveSyncPush" class="btn" style="flex:1">Push state to Drive ⬆</button>
             <button id="driveSyncPull" class="btn" style="flex:1">Pull state from Drive ⬇</button>
           </div>
+          <div class="row" style="gap:10px; margin-top:10px">
+            <button id="driveRebuild" class="btn" style="flex:1; background: rgba(255,200,50,.08); border-color: rgba(255,200,50,.2); color: #ffc832;">Rebuild from Drive folders 🔄</button>
+          </div>
+          <div class="small" style="margin-top:6px; opacity:.5">
+            Rebuild scans your Drive folder structure and recreates song metadata from the files it finds.
+          </div>
         ` : `
           <div class="small" style="margin-bottom:12px; opacity:.7">
             Connect your Google Drive to automatically back up audio files to the cloud.
@@ -4496,6 +4448,25 @@ function renderSettings() {
     } else {
       toast("No state found on Drive (or token expired) 😅");
     }
+  });
+
+  // Google Drive: Rebuild from folder structure
+  $("#driveRebuild")?.addEventListener("click", async () => {
+    toast("Scanning Drive folders… 🔄");
+    const songs = await gdriveRebuildFromFolders();
+
+    if (!songs || songs.length === 0) {
+      toast("No songs found in Drive folders 😅");
+      return;
+    }
+
+    if (!confirm(`Found ${songs.length} songs from Drive folders. Replace local library?`)) return;
+
+    state.songs = songs;
+    normalizeState();
+    saveState();
+    toast(`Rebuilt ${songs.length} songs from Drive ✅ 🔄`);
+    render();
   });
 
   // Existing settings

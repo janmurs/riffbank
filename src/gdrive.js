@@ -431,6 +431,120 @@ export async function gdriveListFiles(relativePath = "") {
 }
 
 
+/**
+ * Rebuild song metadata by walking the Drive folder structure.
+ * Reads: HomeFolder/{Project}/{SongTitle}/Versions/{audiofiles}
+ * Returns an array of song objects ready to merge into app state.
+ * Skips the .riffbank-state.json file and any non-folder items at project level.
+ *
+ * @returns {Array} songs array, or empty array on failure
+ */
+export async function gdriveRebuildFromFolders() {
+  if (!gdriveIsConnected()) return [];
+
+  const token = await _ensureToken();
+  if (!token) return [];
+
+  const homeId = _config.homeFolderId;
+  const songs = [];
+
+  try {
+    // Level 1: list projects (folders in home)
+    const projects = await _listChildren(homeId, token, true);
+
+    for (const project of projects) {
+      // Level 2: list songs (folders in project)
+      const songFolders = await _listChildren(project.id, token, true);
+
+      for (const songFolder of songFolders) {
+        // Level 3: look for a "Versions" subfolder
+        const subfolders = await _listChildren(songFolder.id, token, true);
+        const versionsFolder = subfolders.find(f => f.name === "Versions");
+
+        const versions = [];
+
+        if (versionsFolder) {
+          // Level 4: list audio files in Versions
+          const audioFiles = await _listChildren(versionsFolder.id, token, false);
+
+          for (const file of audioFiles) {
+            // Skip non-audio files
+            if (file.mimeType && file.mimeType.startsWith("application/")) continue;
+
+            const versionId = "v_" + Math.random().toString(36).slice(2, 10);
+            versions.push({
+              id: versionId,
+              label: file.name.replace(/\.[^.]+$/, ""), // strip extension for label
+              fileName: file.name,
+              originalFileName: file.name,
+              fileSize: parseInt(file.size || "0", 10),
+              fileType: file.mimeType || "audio/*",
+              link: "",
+              fileId: null,
+              localAudioId: null,
+              driveFileId: file.id,
+              driveWebViewLink: "",
+              notes: "",
+              isBest: false,
+              isActive: true,
+              playerYes: false,
+              favorite: false,
+              createdAt: file.modifiedTime || new Date().toISOString(),
+            });
+          }
+        }
+
+        if (versions.length === 0) continue; // skip empty songs
+
+        const songId = "s_" + Math.random().toString(36).slice(2, 10);
+        songs.push({
+          id: songId,
+          title: songFolder.name,
+          project: project.name,
+          genre: "",
+          sprint: "",
+          notes: "",
+          status: "idea",
+          featuredVersionId: versions.length > 0 ? versions[0].id : null,
+          versions,
+          createdAt: songFolder.modifiedTime || new Date().toISOString(),
+          updatedAt: songFolder.modifiedTime || new Date().toISOString(),
+        });
+      }
+    }
+
+    return songs;
+  } catch (err) {
+    console.error("RiffBank: Rebuild from Drive failed", err);
+    return [];
+  }
+}
+
+/**
+ * List children of a folder by ID.
+ * @param {string} parentId - Drive folder ID
+ * @param {string} token - access token
+ * @param {boolean} foldersOnly - if true, only return folders
+ * @returns {Array} list of { id, name, mimeType, size, modifiedTime }
+ */
+async function _listChildren(parentId, token, foldersOnly = false) {
+  try {
+    let q = `'${parentId}' in parents and trashed = false`;
+    if (foldersOnly) q += ` and mimeType = '${FOLDER_MIME}'`;
+
+    const res = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,mimeType,size,modifiedTime)&pageSize=200`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.files || [];
+  } catch {
+    return [];
+  }
+}
+
+
 // ============================================================
 // STATE SYNC — save/load app state JSON to/from Drive
 // ============================================================
