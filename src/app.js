@@ -10,7 +10,7 @@
 window.onerror = (m, src, line, col) => alert(`JS ERROR:\n${m}\n${line}:${col}`);
 
 // Dev toggle: skip splash animation
- const DISABLE_SPLASH = false;
+ const DISABLE_SPLASH = true;
 
 // console.log("RIFFBANK APP.JS LOADED ✅", new Date().toISOString());
 // alert("RIFFBANK APP.JS LOADED ✅ " + new Date().toISOString());
@@ -30,6 +30,7 @@ import {
   gdriveSyncStateSoon,
   gdriveSyncStateNow,
   gdrivePullState,
+  gdrivePullStateSilent,
 } from "./gdrive.js";
 
 const LS_KEY = "riffbank_v1";
@@ -2530,8 +2531,7 @@ async function init() {
   // Try to pull latest state from Drive (if connected + token still valid)
   if (gdriveIsConnected()) {
     try {
-      const driveState = await gdrivePullState();
-      if (driveState && driveState.songs) {
+      const driveState = await gdrivePullStateSilent();      if (driveState && driveState.songs) {
         // Compare: use Drive state if it has songs and local doesn't,
         // or if Drive has a newer updatedAt on any song
         const localHasSongs = state.songs && state.songs.length > 0;
@@ -4514,9 +4514,10 @@ function renderSettings() {
     localStorage.removeItem(LS_KEY);
     state = loadState();
     normalizeState();
-    saveState();
+    // Save locally only — do NOT sync empty state to Drive
+    localStorage.setItem(LS_KEY, JSON.stringify(state));
 
-    toast("Wiped 🧼");
+    toast("Wiped 🧼 (Drive state untouched)");
     currentTab = "home";
     setHeader("RiffBank");
 

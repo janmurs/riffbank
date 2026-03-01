@@ -474,15 +474,16 @@ export async function gdriveSyncStateNow(stateObj) {
 }
 
 /**
- * Pull app state from Drive.
+ * Pull app state from Drive (ACTIVE — will prompt for sign-in if needed).
+ * Use this for the manual "Pull" button.
  * Returns the parsed state object, or null if not found / not connected.
- * SILENT: does NOT trigger sign-in popup. Returns null if token expired.
  */
 export async function gdrivePullState() {
   if (!gdriveIsConnected()) return null;
 
-  // Silent token check — don't prompt just for loading state
-  if (!_accessToken || Date.now() >= _tokenExpiry) return null;
+  // Active token request — will prompt sign-in if expired
+  const token = await _ensureToken();
+  if (!token) return null;
 
   try {
     // Find the state file in the home folder
@@ -490,6 +491,36 @@ export async function gdrivePullState() {
     if (!fileId) return null;
 
     // Download contents
+    const res = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+
+    if (!res.ok) return null;
+
+    const stateObj = await res.json();
+    return stateObj;
+  } catch (err) {
+    console.warn("RiffBank: Failed to pull state from Drive", err);
+    return null;
+  }
+}
+
+/**
+ * Pull app state from Drive (SILENT — will NOT prompt for sign-in).
+ * Use this for auto-load on startup.
+ * Returns the parsed state object, or null if not found / token expired.
+ */
+export async function gdrivePullStateSilent() {
+  if (!gdriveIsConnected()) return null;
+
+  // Silent check — don't prompt just for loading state
+  if (!_accessToken || Date.now() >= _tokenExpiry) return null;
+
+  try {
+    const fileId = await _findStateFile();
+    if (!fileId) return null;
+
     const res = await fetch(
       `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
       { headers: { Authorization: `Bearer ${_accessToken}` } }
@@ -699,10 +730,11 @@ function _pickFolder(token) {
     }
 
     try {
-      const folderView = new google.picker.DocsView(google.picker.ViewId.FOLDERS)
-        .setSelectFolderEnabled(true)
+      const folderView = new google.picker.DocsView()
         .setIncludeFolders(true)
-        .setMimeTypes(FOLDER_MIME);
+        .setSelectFolderEnabled(true)
+        .setMimeTypes(FOLDER_MIME)
+        .setParent("root");
 
       const picker = new google.picker.PickerBuilder()
         .setTitle("Choose a home folder for RiffBank")
