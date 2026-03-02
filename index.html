@@ -65,6 +65,7 @@
   <!-- App shell -->
   <div class="app">
     <header class="topbar">
+      <button id="headerBack" class="headerBack" aria-label="Back">‹</button>
       <div class="titleblock">
         <h1 id="headerTitle">RiffBank</h1>
       </div>
@@ -103,6 +104,7 @@
       <div id="screen-songs" class="screen screen--songs"></div>
       <div id="screen-player" class="screen screen--player"></div>
       <div id="screen-settings" class="screen screen--settings"></div>
+      <div id="screen-collab" class="screen screen--collab"></div>
       <div id="screen-drawer" class="screen screen--drawer"></div>
     </main>
 
@@ -115,34 +117,45 @@
 
     <!-- Bottom Nav -->
     <nav id="bottomNav" class="bottomNav" aria-label="Bottom navigation">
+      <button class="navBtn tab" data-tab="home" aria-label="Home">
+        <span class="navIcon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+            <polyline points="9,22 9,12 15,12 15,22"/>
+          </svg>
+        </span>
+        <span class="navLabel">Home</span>
+      </button>
+
       <button class="navBtn tab" data-tab="player" aria-label="Player">
         <span class="navIcon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none">
-            <path d="M9 7l10 5-10 5V7Z" fill="currentColor"></path>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="5,3 19,12 5,21"/>
           </svg>
         </span>
         <span class="navLabel">Player</span>
       </button>
 
-      <button class="tab navHomePill" data-tab="home" aria-label="Home">
+      <button class="navBtn tab" data-tab="collab" aria-label="Collab">
         <span class="navIcon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none">
-            <path d="M9 18a2 2 0 1 1-2-2h2v2Z" fill="currentColor"></path>
-            <path d="M9 16V6l12-2v12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
-            <path d="M21 16a2 2 0 1 1-2-2h2v2Z" fill="currentColor"></path>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+            <circle cx="9" cy="7" r="4"/>
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+            <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
           </svg>
         </span>
+        <span class="navLabel">Collab</span>
       </button>
 
-      <button class="navBtn tab" data-tab="settings" aria-label="Settings">
+      <button class="navBtn createNavBtn" aria-label="Create">
         <span class="navIcon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none">
-            <path d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4Z" stroke="currentColor" stroke-width="2"></path>
-            <path d="M19.4 13.5c.04-.5.04-1 0-1.5l2-1.5-2-3.4-2.4 1a8.7 8.7 0 0 0-1.3-.8l-.4-2.6H10l-.4 2.6c-.45.23-.9.5-1.3.8l-2.4-1-2 3.4 2 1.5c-.04.5-.04 1 0 1.5l-2 1.5 2 3.4 2.4-1c.4.3.85.56 1.3.8L10 21h4l.4-2.6c.45-.23 1.3-.8l2.4 1 2-3.4-2-1.5Z"
-              stroke="currentColor" stroke-width="2" stroke-linejoin="round"></path>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+            <line x1="12" y1="5" x2="12" y2="19"/>
+            <line x1="5" y1="12" x2="19" y2="12"/>
           </svg>
         </span>
-        <span class="navLabel">Settings</span>
+        <span class="navLabel">Create</span>
       </button>
     </nav>
   </div>

@@ -10,7 +10,7 @@
 window.onerror = (m, src, line, col) => alert(`JS ERROR:\n${m}\n${line}:${col}`);
 
 // Dev toggle: skip splash animation
- const DISABLE_SPLASH = false;
+ const DISABLE_SPLASH = true;
 
 // console.log("RIFFBANK APP.JS LOADED ✅", new Date().toISOString());
 // alert("RIFFBANK APP.JS LOADED ✅ " + new Date().toISOString());
@@ -59,6 +59,9 @@ let isFullPlayerOpen = false;
 // Projects sub-screen ("list" = project list, string = selected project name)
 let projectDetailScreen = null;
 
+// Releases sub-screen (null = list, string = release ID being viewed)
+let releaseDetailId = null;
+
 // Session-only: hide mini player until the user actually plays something after a fresh launch
 let hasPlayedThisSession = false;
 
@@ -101,6 +104,7 @@ const screens = {
   songs: document.getElementById("screen-songs"),
   player: document.getElementById("screen-player"),
   settings: document.getElementById("screen-settings"),
+  collab: document.getElementById("screen-collab"),
   drawer: document.getElementById("screen-drawer"),
 };
 
@@ -122,6 +126,7 @@ function setActiveScreen(name) {
 }
 
 const headerTitle = $("#headerTitle");
+const headerBackEl = document.getElementById("headerBack");
 const toastEl = $("#toast");
 
 // ---------------------
@@ -486,6 +491,10 @@ function syncDockSpace() {
   const viewportH = vv ? vv.height : window.innerHeight;
   const navTop = bottomNavEl ? bottomNavEl.getBoundingClientRect().top : viewportH;
 
+  // Track actual nav height so mini player can anchor flush against it
+  const navH = Math.round(viewportH - navTop);
+  document.documentElement.style.setProperty("--nav-h", navH + "px");
+
   let topDock = navTop;
 
   if (miniPlayerEl && !miniPlayerEl.classList.contains("hidden")) {
@@ -508,6 +517,9 @@ function isMiniPlayerActuallyVisible() {
 function updateDockSpace() {
   // bottom nav is always present
   const navH = bottomNavEl ? bottomNavEl.getBoundingClientRect().height : 0;
+
+  // Track actual nav height so mini player can anchor flush against it
+  document.documentElement.style.setProperty("--nav-h", `${Math.ceil(navH)}px`);
 
   // if mini player is visible, reserve up to its TOP (includes nav + gap automatically)
   let dockH = navH;
@@ -618,7 +630,7 @@ if (typeof isNowPlayingFullscreen !== "undefined" && isNowPlayingFullscreen) {
 
 // title / subtitle (set first so text always shows even if art generation fails)
 if (miniTitleEl) miniTitleEl.textContent = song.title || "Untitled";
-if (miniSubEl) miniSubEl.textContent = v.label || "";
+if (miniSubEl) miniSubEl.textContent = song.project || "";
 
 // album art
 if (miniArtEl) {
@@ -644,9 +656,12 @@ if (window.visualViewport) window.visualViewport.addEventListener("resize", sche
 function syncMiniScrub(){
   if (!miniScrubEl || !globalAudio) return;
   if (Number.isFinite(globalAudio.duration) && globalAudio.duration > 0) {
-    miniScrubEl.value = String(Math.floor((globalAudio.currentTime / globalAudio.duration) * 1000));
+    const pct = (globalAudio.currentTime / globalAudio.duration) * 100;
+    miniScrubEl.value = String(Math.floor(pct * 10));
+    miniScrubEl.style.background = `linear-gradient(to right, #a855f7 0%, #ec4899 ${pct}%, rgba(255,255,255,.12) ${pct}%)`;
   } else {
     miniScrubEl.value = "0";
+    miniScrubEl.style.background = "rgba(255,255,255,.12)";
   }
 }
 
@@ -690,6 +705,45 @@ async function playNowPlaying({ autoplay = true } = {}){
       console.warn(e);
       toast("Tap Play to start audio (iOS rule) 😅");
     }
+  }
+
+  // Media Session API: lock screen, CarPlay, headphones, keyboard media keys
+  if ("mediaSession" in navigator) {
+    const song = getSong(now.songId);
+    const v = song ? getVersion(song, now.versionId) : null;
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: song?.title || "Untitled",
+      artist: song?.project || "",
+      album: v?.label || "",
+    });
+    navigator.mediaSession.setActionHandler("play", () => {
+      globalAudio.play()
+        .then(() => {
+          navigator.mediaSession.playbackState = "playing";
+          if (miniToggleEl) miniToggleEl.textContent = "⏸";
+        })
+        .catch(() => {
+          // Blob URL may have expired after backgrounding — reload from source and play
+          playNowPlaying({ autoplay: true });
+        });
+    });
+    navigator.mediaSession.setActionHandler("pause", () => {
+      globalAudio.pause();
+      navigator.mediaSession.playbackState = "paused";
+      if (miniToggleEl) miniToggleEl.textContent = "▶";
+    });
+    navigator.mediaSession.setActionHandler("nexttrack", () => {
+      advanceToNextTrack({ render: true });
+    });
+    navigator.mediaSession.setActionHandler("previoustrack", () => {
+      globalAudio.currentTime = 0;
+    });
+    navigator.mediaSession.setActionHandler("seekto", (details) => {
+      if (details.seekTime != null && Number.isFinite(globalAudio.duration)) {
+        globalAudio.currentTime = details.seekTime;
+      }
+    });
+    navigator.mediaSession.playbackState = autoplay ? "playing" : "paused";
   }
 
   await syncMiniPlayerUI();
@@ -765,6 +819,7 @@ function normalizeState() {
   state.settings = state.settings || {};
   state.songs = Array.isArray(state.songs) ? state.songs : [];
   state.quickLog = Array.isArray(state.quickLog) ? state.quickLog : [];
+  state.releases = Array.isArray(state.releases) ? state.releases : [];
   state.songs.forEach((song) => {
     song.versions = Array.isArray(song.versions) ? song.versions : [];
     song.versions.forEach((v) => {
@@ -784,9 +839,20 @@ function normalizeState() {
       if (typeof v.playerYes !== "boolean") v.playerYes = false;
       if (typeof v.favorite !== "boolean") v.favorite = false;
     });
-    // Ensure exactly one active version if versions exist and none is currently active
-    if (song.versions.length && !song.versions.some(v => v.isActive)) {
-      song.versions[0].isActive = true;
+    // Enforce exactly one active version
+    const activeVs = song.versions.filter(v => v.isActive);
+    if (activeVs.length === 0 && song.versions.length) {
+      // None active — pick most recently updated
+      const newest = song.versions.reduce((a, b) =>
+        new Date(a.updatedAt || a.createdAt || 0) >= new Date(b.updatedAt || b.createdAt || 0) ? a : b
+      );
+      newest.isActive = true;
+    } else if (activeVs.length > 1) {
+      // Multiple active (e.g. corrupted Drive state) — keep most recently updated, clear the rest
+      const newest = activeVs.reduce((a, b) =>
+        new Date(a.updatedAt || a.createdAt || 0) >= new Date(b.updatedAt || b.createdAt || 0) ? a : b
+      );
+      song.versions.forEach(v => { v.isActive = (v.id === newest.id); });
     }
   });
   // Player state (queue)
@@ -1332,7 +1398,7 @@ if ("serviceWorker" in navigator) {
         });
       });
 
-      // 🔥 Force-check on every load (beats the “24-hour SW update check” behavior)
+      // 🔥 Force-check on every load (beats the "24-hour SW update check" behavior)
       try { await reg.update(); } catch {}
 
       // If it’s already waiting (rare but happens), activate it
@@ -1350,6 +1416,7 @@ const TAB_TITLES = {
   home: "RiffBank",
   songs: "Songs",
   player: "Player",
+  collab: "Collab",
   settings: "Settings",
 };
 
@@ -1400,6 +1467,24 @@ function setHeader(t) {
   if (headerTitle) headerTitle.textContent = t;
 }
 
+// Show/hide the back button based on whether we're on a nested screen
+const ROOT_TABS = new Set(["home", "songs", "player", "collab"]);
+function syncBackButton() {
+  if (!headerBackEl) return;
+  const onRoot =
+    ROOT_TABS.has(currentTab) &&
+    !drawerView &&
+    !selectedSongId &&
+    !selectedVersionId &&
+    !projectDetailScreen &&
+    !releaseDetailId &&
+    songsView !== "create";
+  headerBackEl.style.display = onRoot ? "none" : "";
+}
+
+// Wire back button once
+headerBackEl?.addEventListener("click", () => goBack({ animate: true }));
+
 function syncTabs() {
   document.querySelectorAll(".tab").forEach((b) => {
     b.classList.toggle("active", b.dataset.tab === currentTab);
@@ -1408,11 +1493,6 @@ function syncTabs() {
 
 function getSong(id) {
   return state.songs.find((s) => s.id === id);
-}
-
-function bestVersion(song) {
-  if (!song?.versions?.length) return null;
-  return song.versions.find((v) => v.isActive) || song.versions[0];
 }
 
 function getVersion(song, versionId){
@@ -1567,19 +1647,16 @@ document.querySelectorAll(".drawerItem").forEach((btn) => {
   btn.addEventListener("click", () => setDrawerView(btn.dataset.drawer));
 });
 
-// Tabs (Player + Home + Settings)
+// Create button in bottom nav
+document.querySelector(".createNavBtn")?.addEventListener("click", () => openSheet("chooser"));
+
+// Tabs
 document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
     const targetTab = btn.dataset.tab || "home";
     songsBackTarget = null;
 
-    // If you tap Home while already on the true Home root, open Create sheet
-    if (targetTab === "home" && isHomeRoot()) {
-      openSheet("chooser");
-      return;
-    }
-
-    // Otherwise: normal navigation
+    // Normal navigation
     drawerView = null;
     overlayView = null;
     selectedSongId = null;
@@ -1704,6 +1781,18 @@ function goBack({ animate = false } = {}) {
       songsView = "list";
       setHeader("RiffBank");
       syncTabs();
+      render();
+      return;
+    }
+
+    if (drawerView === "releases" && releaseDetailId) {
+      releaseDetailId = null;
+      render();
+      return;
+    }
+
+    if (drawerView === "projects" && projectDetailScreen) {
+      projectDetailScreen = null;
       render();
       return;
     }
@@ -2006,10 +2095,11 @@ miniPlayerEl?.addEventListener("click", (e) => {
 
   prevTabBeforeFullPlayer = currentTab;
   prevSelectedSongIdBeforeFullPlayer = selectedSongId;
-  currentTab = "player";
-  playerScreen = "now";
 
-  // ← REPLACE openNowPlaying() with this:
+  // Clear any drawer/project state so the render router reaches the player
+  drawerView = null;
+  projectDetailScreen = null;
+
   currentTab = "player";
   playerScreen = "now";
   setHeader("Now Playing");
@@ -2020,8 +2110,29 @@ miniPlayerEl?.addEventListener("click", (e) => {
 miniScrubEl?.addEventListener("pointerdown", (e) => e.stopPropagation());
 miniScrubEl?.addEventListener("touchstart", (e) => e.stopPropagation(), { passive: true });
 
-globalAudio?.addEventListener("play", syncMiniPlayerUI);
-globalAudio?.addEventListener("pause", syncMiniPlayerUI);
+// Spacebar toggles play/pause (like Spotify / YouTube)
+document.addEventListener("keydown", (e) => {
+  if (e.code !== "Space") return;
+  // Don't intercept when typing in an input, textarea, or contenteditable
+  const tag = document.activeElement?.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || document.activeElement?.isContentEditable) return;
+  e.preventDefault();
+  if (!globalAudio || !state.player?.nowPlaying) return;
+  if (globalAudio.paused) {
+    globalAudio.play().catch(() => {});
+  } else {
+    globalAudio.pause();
+  }
+});
+
+globalAudio?.addEventListener("play", () => {
+  syncMiniPlayerUI();
+  if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
+});
+globalAudio?.addEventListener("pause", () => {
+  syncMiniPlayerUI();
+  if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
+});
 // Advance to the next track, respecting repeat (queue-level loop) and shuffle.
 // Returns true if something will play, false if queue is truly empty.
 function advanceToNextTrack({ render: doRender = false } = {}) {
@@ -2059,7 +2170,7 @@ globalAudio?.addEventListener("ended", () => {
 const sheet = $("#createSheet");
 const sheetOverlay = $("#sheetOverlay");
 const sheetContent = $("#sheetContent");
-let sheetMode = "chooser"; // chooser | song | lyrics | songMenu | versionMenu | songFilters
+let sheetMode = "chooser"; // chooser | song | lyrics | release | songMenu | versionMenu | songFilters
 let sheetSongMenuId = null;
 
 function openSongMenu(songId){
@@ -2190,6 +2301,71 @@ function renderSheet() {
     });
 
     setTimeout(() => $("#sheetLyrics")?.focus(), 0);
+  }
+
+  if (sheetMode === "release") {
+    const projects = Array.from(new Set(state.songs.map(s => (s.project || "").trim()).filter(Boolean))).sort();
+
+    const songOptions = projects.map(proj => {
+      const projSongs = state.songs.filter(s => (s.project || "").trim() === proj);
+      const items = projSongs.map(s => `
+        <label class="sheetSongPick">
+          <input type="checkbox" name="relSong" value="${s.id}" />
+          <span>${escapeHtml(s.title)}</span>
+        </label>
+      `).join("");
+      return `
+        <div class="sheetPickGroup">
+          <div class="sheetPickLabel">${escapeHtml(proj)}</div>
+          ${items}
+        </div>
+      `;
+    }).join("");
+
+    sheetContent.innerHTML = `
+      <div class="sheetTitle">New Release</div>
+      <div class="sheetForm">
+        <input id="relTitle" type="text" placeholder="Title (e.g. The Life EP)" />
+        <input id="relArtist" type="text" placeholder="Artist" />
+        <input id="relDate" type="date" value="2026-06-01" />
+        <div class="sheetPickScroll">
+          ${songOptions || `<div class="small">No songs yet — create some songs first.</div>`}
+        </div>
+      </div>
+      <div class="sheetActions">
+        <button class="sheetBtn ghost" id="sheetRelCancel">Cancel</button>
+        <button class="sheetBtn primary" id="sheetRelCreate">Create</button>
+      </div>
+    `;
+
+    $("#sheetRelCancel")?.addEventListener("click", closeSheet);
+
+    $("#sheetRelCreate")?.addEventListener("click", () => {
+      const title = ($("#relTitle")?.value || "").trim();
+      const artist = ($("#relArtist")?.value || "").trim();
+      const date = ($("#relDate")?.value || "").trim();
+      if (!title) { toast("Please enter a title"); return; }
+      const checked = [...sheetContent.querySelectorAll("input[name='relSong']:checked")].map(el => el.value);
+      state.releases = state.releases || [];
+      state.releases.push({
+        id: uid(),
+        title,
+        artist,
+        songIds: checked,
+        releaseDate: date,
+        createdAt: nowStamp(),
+        updatedAt: nowStamp(),
+      });
+      saveState();
+      closeSheet();
+      drawerView = "releases";
+      releaseDetailId = null;
+      render();
+      toast(`"${title}" created 🎵`);
+    });
+
+    setTimeout(() => $("#relTitle")?.focus(), 0);
+    return;
   }
 
     if (sheetMode === "songMenu") {
@@ -2498,6 +2674,7 @@ function render() {
   if (!view) return;
 
   syncTabs();
+  syncBackButton();
 
     // ✅ Enforce fullscreen player state every render (no overlap, no reserved padding)
   setFullPlayerOpen(!!fullPlayerOpen);
@@ -2509,10 +2686,12 @@ function render() {
 
   // Drawer screens
   if (drawerView === "projects") { setActiveScreen("drawer"); return projectDetailScreen ? renderProjectSongs(projectDetailScreen) : renderProjects(); }
+  if (drawerView === "releases") { setActiveScreen("drawer"); return releaseDetailId ? renderReleaseDetail(releaseDetailId) : renderReleases(); }
   if (drawerView === "eps") { setActiveScreen("drawer"); return renderEPs(); }
   if (drawerView === "collabs") { setActiveScreen("drawer"); return renderCollaborators(); }
   if (drawerView === "importExport") { setActiveScreen("drawer"); return renderImportExport(); }
   if (drawerView === "about") { setActiveScreen("drawer"); return renderAbout(); }
+  if (drawerView === "globalSearch") { setActiveScreen("drawer"); return renderGlobalSearch(); }
 
   // Normal screens
   if (currentTab === "home") { setActiveScreen("home"); return renderHome(); }
@@ -2528,6 +2707,7 @@ function render() {
     if (playerScreen === "now") return renderNowPlaying();
     return renderPlayer();
   }
+  if (currentTab === "collab") { setActiveScreen("collab"); return renderCollab(); }
   if (currentTab === "settings") { setActiveScreen("settings"); return renderSettings(); }
 }
 
@@ -2563,6 +2743,7 @@ async function init() {
   } else {
     const splash = document.getElementById("splash");
     if (splash) splash.remove();
+    await new Promise(r => requestAnimationFrame(r));
   }
 
   // Auto-seed disabled — use Drive sync or manual import instead
@@ -2605,6 +2786,23 @@ async function init() {
     }
   }
 
+  // Seed example release if none exist yet
+  if (!state.releases.length) {
+    const jmSongs = state.songs.filter(s => /jonathan/i.test(s.project || ""));
+    if (jmSongs.length) {
+      state.releases.push({
+        id: uid(),
+        title: "The Life EP",
+        artist: "Jonathan Marrs",
+        songIds: jmSongs.map(s => s.id),
+        releaseDate: "2026-06-01",
+        createdAt: nowStamp(),
+        updatedAt: nowStamp(),
+      });
+      saveState();
+    }
+  }
+
   setHeader("RiffBank");
   syncTabs();
   render();
@@ -2636,93 +2834,75 @@ function renderProjects() {
     ])
   ).sort((a, b) => a.localeCompare(b));
 
-  const rows = projects.map(p => {
-    const count = state.songs.filter(s => (s.project || "").trim() === p).length;
-    const isDefault = (state.settings.defaultProject || "").trim() === p;
-    const fakeSong = { id: p, title: p, project: p, genre: "" };
-    return `
-      <div class="songRow" data-open-proj="${escapeHtml(p)}">
-        <div class="songThumb" aria-hidden="true">
-          ${coverSvg(fakeSong, { lite: true })}
-        </div>
-        <div class="songMain">
-          <div class="songTop">
-            <div class="songTitleRow">
-              <div class="songTitle">${escapeHtml(p)}</div>
-              <div class="songPills">
-                ${isDefault ? `<span class="pill good">Default</span>` : ""}
-              </div>
-            </div>
-            <button class="songMore" data-proj-more="${escapeHtml(p)}" aria-label="Project menu">⋯</button>
+  let projQuery = "";
+
+  const buildRows = (q) => projects
+    .filter(p => !q || p.toLowerCase().includes(q.toLowerCase()))
+    .map(p => {
+      const count = state.songs.filter(s => (s.project || "").trim() === p).length;
+      const isDefault = (state.settings.defaultProject || "").trim() === p;
+      const fakeSong = { id: p, title: p, project: p, genre: "" };
+      return `
+        <div class="songRow" data-open-proj="${escapeHtml(p)}">
+          <div class="songThumb" aria-hidden="true">
+            ${coverSvg(fakeSong, { lite: true })}
           </div>
-          <div class="songSub">${count} song${count === 1 ? "" : "s"}</div>
+          <div class="songMain">
+            <div class="songTop">
+              <div class="songTitleRow">
+                <div class="songTitle">${escapeHtml(p)}</div>
+                <div class="songPills">
+                  ${isDefault ? `<span class="pill good">Default</span>` : ""}
+                </div>
+              </div>
+              <button class="songMore" data-proj-more="${escapeHtml(p)}" aria-label="Project menu">⋯</button>
+            </div>
+            <div class="songSub">${count} song${count === 1 ? "" : "s"}</div>
+          </div>
         </div>
-      </div>
-    `;
-  }).join("");
+      `;
+    }).join("");
 
   activeScreenEl.innerHTML = `
-    <div class="card">
-      <div class="row" style="justify-content:space-between; align-items:center">
-        <h2>Projects</h2>
-        <button id="closeDrawerView" class="ghost">Close</button>
+    <div class="songsHead">
+      <div class="songsBar">
+        <input id="projSearch" type="text" placeholder="Search projects..." />
       </div>
-
-      <div class="hr"></div>
-
-      <h2>New project</h2>
-      <div class="row">
-        <div class="col">
-          <div class="label">Name</div>
-          <input id="newProjName" type="text" placeholder="e.g. SkeletonDanceParty" />
-        </div>
-        <div class="col" style="display:flex; align-items:flex-end; gap:10px">
-          <button id="createProj" class="btn primary">Create</button>
-        </div>
-      </div>
-
-      <div class="hr"></div>
-
-      <h2>All projects (${projects.length})</h2>
-      <div id="projList">
-        ${rows || `<div class="small">No projects yet. Create one above.</div>`}
-      </div>
+    </div>
+    <div id="projList" class="songsList">
+      ${buildRows("") || `<div class="small">No projects yet.</div>`}
     </div>
   `;
 
-  $("#closeDrawerView").addEventListener("click", () => {
-    drawerView = null;
-    setHeader(TAB_TITLES[currentTab] || "RiffBank");
-    render();
-  });
+  const projListEl = $("#projList");
 
-  $("#createProj").addEventListener("click", () => {
-    const name = ($("#newProjName").value || "").trim();
-    if (!name) return toast("Give it a name 🙂");
-    state.settings.defaultProject = name;
-    saveState();
-    toast("Project added ✅");
-    renderProjects();
-  });
-
-  activeScreenEl.querySelectorAll("[data-open-proj]").forEach(row => {
-    row.addEventListener("click", (e) => {
-      if (e.target.closest("[data-proj-more]")) return;
-      projectDetailScreen = row.getAttribute("data-open-proj");
-      render();
+  const applyProjFilter = () => {
+    projQuery = ($("#projSearch")?.value || "");
+    const html = buildRows(projQuery);
+    projListEl.innerHTML = html || `<div class="small">No matches.</div>`;
+    projListEl.querySelectorAll("[data-open-proj]").forEach(row => {
+      row.addEventListener("click", (e) => {
+        if (e.target.closest("[data-proj-more]")) return;
+        projectDetailScreen = row.getAttribute("data-open-proj");
+        render();
+      });
     });
-  });
-
-  activeScreenEl.querySelectorAll("[data-proj-more]").forEach(btn => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      openProjectMenu(btn.getAttribute("data-proj-more"));
+    projListEl.querySelectorAll("[data-proj-more]").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openProjectMenu(btn.getAttribute("data-proj-more"));
+      });
     });
-  });
+  };
+
+  $("#projSearch")?.addEventListener("input", applyProjFilter);
+  applyProjFilter();
 }
 
 function renderProjectSongs(projectName) {
   setHeader(projectName);
+
+  if (activeScreenEl) activeScreenEl.scrollTop = 0;
 
   const songs = state.songs.filter(s => (s.project || "").trim() === projectName);
 
@@ -2733,62 +2913,59 @@ function renderProjectSongs(projectName) {
       return { songId: s.id, versionId: vv.id };
     });
 
+  const fakeSong = { id: projectName, title: projectName, project: projectName, genre: "" };
+  const heroCover = coverSvg(fakeSong);
+
   const rows = songs.map(s => {
-    const vCount = (s.versions || []).length;
-    const updated = s.updatedAt ? timeAgo(s.updatedAt) : "—";
     return `
       <div class="songRow" data-open-song="${s.id}">
         <div class="songThumb" aria-hidden="true">
           ${coverSvg(s, { lite: true })}
-          <div class="songDur">—:—</div>
         </div>
         <div class="songMain">
           <div class="songTop">
             <div class="songTitleRow">
               <div class="songTitle">${escapeHtml(s.title || "Untitled")}</div>
             </div>
+            <button class="songMore" data-proj-song-more="${s.id}" aria-label="Song menu">⋯</button>
           </div>
-          <div class="songSub">${escapeHtml(s.genre || "—")}</div>
-          <div class="songMetaRow">
-            <span>🎧 ${vCount}</span>
-            <span class="sep">•</span>
-            <span>🕒 ${escapeHtml(updated)}</span>
-          </div>
+          <div class="songSub">${escapeHtml(s.genre || s.project || "—")}</div>
         </div>
       </div>
     `;
   }).join("");
 
   activeScreenEl.innerHTML = `
-    <div class="card">
-      <div class="row" style="justify-content:space-between; align-items:center">
-        <button id="projBack" class="ghost">← Back</button>
-        <button id="closeDrawerView" class="ghost">Close</button>
+    <div class="albumHero">
+      <div class="albumBg" aria-hidden="true">
+        ${heroCover}
       </div>
-      <h2>${escapeHtml(projectName)}</h2>
-      <div class="meta">${songs.length} song${songs.length === 1 ? "" : "s"}</div>
-      <div class="hr"></div>
-      <div class="row" style="gap:8px; margin-bottom:12px">
-        <button id="projPlayAll" class="btn primary" ${!items.length ? "disabled" : ""}>▶ Play All</button>
-        <button id="projShuffle" class="btn" ${!items.length ? "disabled" : ""}>⇄ Shuffle</button>
+
+      <div class="albumTop">
+        <div class="albumArt" aria-hidden="true">
+          ${heroCover}
+        </div>
+        <div class="albumText">
+          <div class="albumTitle">${escapeHtml(projectName)}</div>
+          <div class="albumMeta">${songs.length} song${songs.length === 1 ? "" : "s"}</div>
+        </div>
       </div>
-      <div id="projSongList">
-        ${rows || `<div class="small">No songs in this project yet.</div>`}
+
+      <div class="albumActions">
+        <button class="songHeroPlay" id="projPlayAll" ${!items.length ? "disabled" : ""}>▶ Play All</button>
+        <button class="songHeroQueue" id="projShuffle" ${!items.length ? "disabled" : ""}>⇄ Shuffle</button>
+      </div>
+    </div>
+
+    <div class="versionsWrap">
+      <div class="versionsHeader">
+        <div class="versionsTitle">Songs</div>
+      </div>
+      <div id="projSongList" class="versionsRows songsList">
+        ${rows || `<div class="small" style="padding:12px 2px">No songs in this project yet.</div>`}
       </div>
     </div>
   `;
-
-  $("#projBack").addEventListener("click", () => {
-    projectDetailScreen = null;
-    render();
-  });
-
-  $("#closeDrawerView").addEventListener("click", () => {
-    projectDetailScreen = null;
-    drawerView = null;
-    setHeader(TAB_TITLES[currentTab] || "RiffBank");
-    render();
-  });
 
   $("#projPlayAll")?.addEventListener("click", async () => {
     if (!items.length) return toast("No playable songs 😅");
@@ -2813,13 +2990,173 @@ function renderProjectSongs(projectName) {
   });
 
   activeScreenEl.querySelectorAll("[data-open-song]").forEach(row => {
-    row.addEventListener("click", () => {
+    row.addEventListener("click", (e) => {
+      if (e.target.closest("[data-proj-song-more]")) return;
       const sid = row.getAttribute("data-open-song");
       projectDetailScreen = null;
       drawerView = null;
       currentTab = "songs";
       songsView = "detail";
       selectedSongId = sid;
+      selectedVersionId = null;
+      setHeader("Song");
+      render();
+    });
+  });
+
+  activeScreenEl.querySelectorAll("[data-proj-song-more]").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openSongMenu(btn.getAttribute("data-proj-song-more"));
+    });
+  });
+}
+
+function renderReleases() {
+  setHeader("Releases");
+
+  const releases = state.releases || [];
+
+  const fmtDate = (d) => {
+    if (!d) return "No date set";
+    const [y, m, day] = d.split("-");
+    return new Date(+y, +m - 1, +day).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  };
+
+  const rows = releases.map(r => {
+    const count = (r.songIds || []).length;
+    const fakeSong = { id: r.id, title: r.title, project: r.artist, genre: "" };
+    return `
+      <div class="songRow" data-rel-open="${escapeHtml(r.id)}">
+        <div class="songThumb" aria-hidden="true">${coverSvg(fakeSong, { lite: true })}</div>
+        <div class="songMain">
+          <div class="songTop">
+            <div class="songTitleRow"><div class="songTitle">${escapeHtml(r.title)}</div></div>
+          </div>
+          <div class="songSub">${escapeHtml(r.artist || "—")} · ${escapeHtml(fmtDate(r.releaseDate))} · ${count} song${count === 1 ? "" : "s"}</div>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  activeScreenEl.innerHTML = `
+    <div class="songsHead">
+      <div class="songsBar" style="justify-content:space-between;align-items:center">
+        <span style="font-size:15px;font-weight:600;color:rgba(255,255,255,.6)">${releases.length} release${releases.length === 1 ? "" : "s"}</span>
+        <button class="btn" id="addReleaseBtn" style="padding:6px 14px;font-size:13px">+ Add Release</button>
+      </div>
+    </div>
+    <div class="songsList">
+      ${rows || `<div class="small">No releases yet. Tap "+ Add Release" to plan your first drop.</div>`}
+    </div>
+  `;
+
+  activeScreenEl.querySelectorAll("[data-rel-open]").forEach(row => {
+    row.addEventListener("click", () => {
+      releaseDetailId = row.getAttribute("data-rel-open");
+      render();
+    });
+  });
+
+  $("#addReleaseBtn")?.addEventListener("click", () => openSheet("release"));
+}
+
+function renderReleaseDetail(releaseId) {
+  const release = (state.releases || []).find(r => r.id === releaseId);
+  if (!release) { releaseDetailId = null; return renderReleases(); }
+
+  setHeader(release.title);
+  if (activeScreenEl) activeScreenEl.scrollTop = 0;
+
+  const fmtDate = (d) => {
+    if (!d) return "No date set";
+    const [y, m, day] = d.split("-");
+    return new Date(+y, +m - 1, +day).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+  };
+
+  const songs = (release.songIds || [])
+    .map(id => state.songs.find(s => s.id === id))
+    .filter(Boolean);
+
+  const items = songs
+    .filter(s => (s.versions || []).length)
+    .map(s => {
+      const vv = s.versions.find(v => v.isActive) || s.versions[0];
+      return { songId: s.id, versionId: vv.id };
+    });
+
+  const fakeSong = { id: release.id, title: release.title, project: release.artist, genre: "" };
+  const heroCover = coverSvg(fakeSong);
+
+  const rows = songs.map(s => {
+    return `
+      <div class="songRow" data-open-song="${s.id}">
+        <div class="songThumb" aria-hidden="true">${coverSvg(s, { lite: true })}</div>
+        <div class="songMain">
+          <div class="songTop">
+            <div class="songTitleRow"><div class="songTitle">${escapeHtml(s.title || "Untitled")}</div></div>
+          </div>
+          <div class="songSub">${escapeHtml(s.genre || s.project || "—")}</div>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  activeScreenEl.innerHTML = `
+    <div class="albumHero">
+      <div class="albumBg" aria-hidden="true">${heroCover}</div>
+      <div class="albumTop">
+        <div class="albumArt" aria-hidden="true">${heroCover}</div>
+        <div class="albumText">
+          <div class="albumTitle">${escapeHtml(release.title)}</div>
+          <div class="albumMeta">${escapeHtml(release.artist || "—")} · ${escapeHtml(fmtDate(release.releaseDate))}</div>
+        </div>
+      </div>
+      <div class="albumActions">
+        <button class="songHeroPlay" id="relPlayAll" ${!items.length ? "disabled" : ""}>▶ Play All</button>
+        <button class="songHeroQueue" id="relShuffle" ${!items.length ? "disabled" : ""}>⇄ Shuffle</button>
+      </div>
+    </div>
+
+    <div class="versionsWrap">
+      <div class="versionsHeader">
+        <div class="versionsTitle">Songs (${songs.length})</div>
+      </div>
+      <div class="versionsRows songsList">
+        ${rows || `<div class="small" style="padding:12px 2px">No songs linked to this release yet.</div>`}
+      </div>
+    </div>
+  `;
+
+  $("#relPlayAll")?.addEventListener("click", async () => {
+    if (!items.length) return toast("No playable songs 😅");
+    const all = [...items];
+    state.player.nowPlaying = all[0];
+    state.player.queue = all.slice(1);
+    state.player.repeatQueue = all;
+    saveState();
+    await playNowPlaying({ autoplay: true });
+    toast("Playing ▶️");
+  });
+
+  $("#relShuffle")?.addEventListener("click", async () => {
+    if (!items.length) return toast("No playable songs 😅");
+    const all = shuffleArray([...items]);
+    state.player.nowPlaying = all[0];
+    state.player.queue = all.slice(1);
+    state.player.repeatQueue = all;
+    saveState();
+    await playNowPlaying({ autoplay: true });
+    toast("Shuffled ▶️");
+  });
+
+  activeScreenEl.querySelectorAll("[data-open-song]").forEach(row => {
+    row.addEventListener("click", () => {
+      releaseDetailId = null;
+      drawerView = null;
+      currentTab = "songs";
+      songsView = "detail";
+      selectedSongId = row.getAttribute("data-open-song");
       selectedVersionId = null;
       setHeader("Song");
       render();
@@ -2874,7 +3211,7 @@ function renderCollaborators() {
         <h2>Collaborators</h2>
         <button id="closeDrawerView" class="ghost">Close</button>
       </div>
-      <div class="small">Pulled from song “Collaborators” field (comma-separated).</div>
+      <div class="small">Pulled from song "Collaborators" field (comma-separated).</div>
       <div class="hr"></div>
 
       <div class="list">
@@ -2980,53 +3317,112 @@ function renderHome() {
   overlayView = null;
   currentTab = "home";
   setHeader("RiffBank");
-  
-
-  const songCount = state.songs.length;
 
   activeScreenEl.innerHTML = `
-    <div class="homeReleaf">
-      <div class="homeGridReleaf">
-        <button class="homeCard" data-home="songs" aria-label="Songs">
-          ${iconBookmark()}
-          <div class="cardText">${songCount} song${songCount === 1 ? "" : "s"}</div>
-          <div class="cardSub">library</div>
-        </button>
+    <div class="homeWrap">
+      <div class="homeTopbar">
+        <div class="homeTopbarLeft">
+          <span class="rbLogoClip"><img src="./icon-1024.png" class="rbLogo" alt="RiffBank"></span>
+          <span class="rbBrand">RiffBank</span>
+        </div>
+        <div class="homeTopbarRight">
+          <button class="htbBtn" id="htbNotif" aria-label="Notifications">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/>
+              <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+            </svg>
+          </button>
+          <button class="htbBtn" id="htbSearch" aria-label="Search">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="8"/>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+          </button>
+          <button class="htbBtn" id="htbSettings" aria-label="Settings">
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/>
+              <path d="M10.29 3.86a1 1 0 0 1 3.42 0l.38 1.32a7 7 0 0 1 1.73.99l1.32-.42a1 1 0 0 1 1.14.46l1.71 2.96a1 1 0 0 1-.26 1.31l-1.08.77c.04.25.05.5.05.75s-.01.5-.05.75l1.08.77a1 1 0 0 1 .26 1.31l-1.71 2.96a1 1 0 0 1-1.14.46l-1.32-.42a7 7 0 0 1-1.73.99l-.38 1.32a1 1 0 0 1-3.42 0l-.38-1.32a7 7 0 0 1-1.73-.99l-1.32.42a1 1 0 0 1-1.14-.46l-1.71-2.96a1 1 0 0 1 .26-1.31l1.08-.77A7.1 7.1 0 0 1 5.3 12c0-.25.01-.5.05-.75l-1.08-.77a1 1 0 0 1-.26-1.31l1.71-2.96a1 1 0 0 1 1.14-.46l1.32.42a7 7 0 0 1 1.73-.99l.38-1.32Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </div>
+      </div>
 
-        <button class="homeCard" data-home="projects" aria-label="Projects">
-          ${iconChart()}
-          <div class="cardText">projects</div>
-          <div class="cardSub">organize</div>
-        </button>
+      <div class="homeScene">
+        <h1 class="homeGreet">Build your sound</h1>
 
-        <button class="homeCard" data-home="browse" aria-label="Browse">
-          ${iconBulb()}
-          <div class="cardText">browse</div>
-          <div class="cardSub">search</div>
-        </button>
+        <div class="homeGrid">
 
-        <button class="homeCard" data-home="lyrics" aria-label="Lyrics">
-          ${iconPlus()}
-          <div class="cardText">lyrics</div>
-          <div class="cardSub">scratchpad</div>
-        </button>
+          <!-- Songs — tall left card, spans 2 rows -->
+          <button class="hCard hSongs" data-home="songs" aria-label="Songs">
+            <div class="hArt"><img src="./songs-card.png" style="width:100%;height:100%;object-fit:cover;object-position:35% center;display:block;"></div>
+            <div class="hGrad"></div>
+            <div class="hBody">
+              <div class="hLabel">Songs</div>
+            </div>
+          </button>
 
-        <button class="homeCard homeCardWide" data-home="next" aria-label="Next Actions">
-          ${iconPeople()}
-          <div class="cardText">next actions</div>
-          <div class="cardSub">finish songs</div>
-        </button>
+          <!-- Projects — small, right column top -->
+          <button class="hCard hProjects" data-home="projects" aria-label="Projects">
+            <div class="hArt"><img src="./projects-card.png" style="width:100%;height:100%;object-fit:cover;object-position:center 22%;display:block;"></div>
+            <div class="hGrad"></div>
+            <div class="hBody">
+              <div class="hLabel">Projects</div>
+            </div>
+          </button>
+
+          <!-- Releases — small, right column bottom -->
+          <button class="hCard hPlayer" data-home="releases" aria-label="Releases">
+            <div class="hArt"><img src="./releases-card.png" style="width:100%;height:100%;object-fit:cover;object-position:center 45%;display:block;"></div>
+            <div class="hGrad"></div>
+            <div class="hBody">
+              <div class="hLabel">Releases</div>
+            </div>
+          </button>
+
+          <!-- Lyrics — full width -->
+          <button class="hCard hLyrics hWide" data-home="lyrics" aria-label="Lyrics">
+            <div class="hArt"><img src="./lyrics-card.png" style="width:100%;height:100%;object-fit:cover;display:block;"></div>
+            <div class="hGrad"></div>
+            <div class="hBody">
+              <div class="hLabel">Lyrics</div>
+            </div>
+          </button>
+
+          <!-- Actions — full width -->
+          <button class="hCard hNext hWide" data-home="next" aria-label="Actions">
+            <div class="hArt"><img src="./actions-card.png" style="width:100%;height:100%;object-fit:cover;display:block;"></div>
+            <div class="hGrad"></div>
+            <div class="hBody">
+              <div class="hLabel">Actions</div>
+            </div>
+          </button>
+
+        </div>
       </div>
     </div>
   `;
 
+  // Topbar button actions
+  activeScreenEl.querySelector("#htbNotif")?.addEventListener("click", () => toast("Notifications coming soon"));
+  activeScreenEl.querySelector("#htbSearch")?.addEventListener("click", () => {
+    drawerView = "globalSearch";
+    setActiveScreen("drawer");
+    renderGlobalSearch();
+  });
+  activeScreenEl.querySelector("#htbSettings")?.addEventListener("click", () => {
+    currentTab = "settings";
+    setHeader("Settings");
+    syncTabs();
+    render();
+  });
+
+  // Card navigation
   activeScreenEl.querySelectorAll("[data-home]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const target = btn.getAttribute("data-home");
       if (target === "songs") {
-        resetSongsFilters({ keepSort: true }); // ✅ clear filters when opening Songs fresh
-        songsBackTarget = null;               // optional: prevents weird “back target” reuse
-
+        resetSongsFilters({ keepSort: true });
+        songsBackTarget = null;
         currentTab = "songs";
         songsView = "list";
         selectedSongId = null;
@@ -3036,21 +3432,195 @@ function renderHome() {
         return;
       }
       if (target === "projects") return setDrawerView("projects");
-      if (target === "browse") {
-        resetSongsFilters({ keepSort: true }); // ✅ browse starts clean too
-        songsBackTarget = null;
+      if (target === "releases") return setDrawerView("releases");
+      if (target === "lyrics") return renderLyricsScratch();
+      if (target === "next") return renderNextActions();
+    });
+  });
+}
 
+function renderCollab() {
+  setHeader("Collab");
+  activeScreenEl.innerHTML = `
+    <div style="padding: 40px 24px; text-align: center;">
+      <div style="font-size: 48px; margin-bottom: 16px;">🤝</div>
+      <div style="font-size: 22px; font-weight: 800; color: #fff; margin-bottom: 8px;">Collab</div>
+      <div style="font-size: 14px; color: rgba(255,255,255,.5); line-height: 1.5;">Connect and collaborate with other artists.<br>Coming soon.</div>
+    </div>
+  `;
+}
+
+function renderGlobalSearch() {
+  setHeader("Search");
+  activeScreenEl.innerHTML = `
+    <div class="gsWrap">
+      <div class="gsTopbar">
+        <div class="gsInputWrap">
+          <span class="gsInputIcon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+          </span>
+          <input id="gsInput" class="gsInput" type="text" placeholder="Songs, projects, lyrics..." autocomplete="off" autocorrect="off" spellcheck="false"/>
+        </div>
+        <button class="gsCancel" id="gsCancel">Cancel</button>
+      </div>
+      <div id="gsBody" class="gsBody">
+        <div class="gsEmpty">
+          <div class="gsEmptyTitle">Find what you need</div>
+          <div class="gsEmptySub">Search for songs, projects, releases, lyrics, or collaborators.</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const input = activeScreenEl.querySelector("#gsInput");
+  const body = activeScreenEl.querySelector("#gsBody");
+
+  setTimeout(() => input?.focus(), 80);
+
+  activeScreenEl.querySelector("#gsCancel").addEventListener("click", () => {
+    drawerView = null;
+    setHeader(TAB_TITLES[currentTab] || "RiffBank");
+    render();
+  });
+
+  input.addEventListener("input", () => {
+    const q = input.value.trim().toLowerCase();
+    if (!q) {
+      body.innerHTML = `
+        <div class="gsEmpty">
+          <div class="gsEmptyTitle">Find what you need</div>
+          <div class="gsEmptySub">Search for songs, projects, releases, lyrics, or collaborators.</div>
+        </div>`;
+      return;
+    }
+    renderSearchResults(q, body);
+  });
+}
+
+function renderSearchResults(q, container) {
+  const songs = state.songs || [];
+
+  // Songs (by title or tags)
+  const songMatches = songs.filter(s =>
+    (s.title || "").toLowerCase().includes(q) ||
+    (s.tags || "").toLowerCase().includes(q)
+  );
+
+  // Projects
+  const allProjects = [...new Set(songs.map(s => (s.project || "").trim()).filter(Boolean))];
+  const projMatches = allProjects.filter(p => p.toLowerCase().includes(q));
+
+  // Collaborators
+  const allCollabs = [...new Set(songs.flatMap(s =>
+    (s.collaborators || "").split(",").map(c => c.trim()).filter(Boolean)
+  ))];
+  const collabMatches = allCollabs.filter(c => c.toLowerCase().includes(q));
+
+  // Lyrics (songs where lyrics field matches but title doesn't)
+  const lyricsMatches = songs.filter(s =>
+    (s.lyrics || "").toLowerCase().includes(q) &&
+    !(s.title || "").toLowerCase().includes(q)
+  );
+
+  if (!songMatches.length && !projMatches.length && !collabMatches.length && !lyricsMatches.length) {
+    container.innerHTML = `<div class="gsEmpty"><div class="gsEmptyTitle">No results for "${escapeHtml(q)}"</div><div class="gsEmptySub">Try a different search term.</div></div>`;
+    return;
+  }
+
+  let html = "";
+
+  if (songMatches.length) {
+    html += `<div class="gsSection"><div class="gsSectionTitle">Songs</div>${
+      songMatches.slice(0, 6).map(s => `
+        <button class="gsRow" data-type="song" data-id="${s.id}">
+          <div class="gsRowArt">${coverSvg(s, { lite: true })}</div>
+          <div class="gsRowMeta">
+            <div class="gsRowTitle">${escapeHtml(s.title || "Untitled")}</div>
+            <div class="gsRowSub">${escapeHtml(s.project || "")}</div>
+          </div>
+        </button>`).join("")
+    }</div>`;
+  }
+
+  if (projMatches.length) {
+    html += `<div class="gsSection"><div class="gsSectionTitle">Projects</div>${
+      projMatches.slice(0, 5).map(p => `
+        <button class="gsRow" data-type="project" data-id="${escapeHtml(p)}">
+          <div class="gsRowIcon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+          </div>
+          <div class="gsRowMeta">
+            <div class="gsRowTitle">${escapeHtml(p)}</div>
+            <div class="gsRowSub">${songs.filter(s => (s.project || "").trim() === p).length} songs</div>
+          </div>
+        </button>`).join("")
+    }</div>`;
+  }
+
+  if (collabMatches.length) {
+    html += `<div class="gsSection"><div class="gsSectionTitle">Collaborators</div>${
+      collabMatches.slice(0, 5).map(c => `
+        <button class="gsRow" data-type="collab" data-collab="${escapeHtml(c)}">
+          <div class="gsRowIcon gsRowIconPurple">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          </div>
+          <div class="gsRowMeta">
+            <div class="gsRowTitle">${escapeHtml(c)}</div>
+            <div class="gsRowSub">${songs.filter(s => (s.collaborators || "").toLowerCase().includes(c.toLowerCase())).length} songs together</div>
+          </div>
+        </button>`).join("")
+    }</div>`;
+  }
+
+  if (lyricsMatches.length) {
+    html += `<div class="gsSection"><div class="gsSectionTitle">Lyrics</div>${
+      lyricsMatches.slice(0, 4).map(s => `
+        <button class="gsRow" data-type="song" data-id="${s.id}">
+          <div class="gsRowIcon gsRowIconGreen">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+          </div>
+          <div class="gsRowMeta">
+            <div class="gsRowTitle">${escapeHtml(s.title || "Untitled")}</div>
+            <div class="gsRowSub">Lyrics match</div>
+          </div>
+        </button>`).join("")
+    }</div>`;
+  }
+
+  container.innerHTML = html;
+
+  container.querySelectorAll(".gsRow").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const type = btn.dataset.type;
+      drawerView = null;
+      if (type === "song") {
+        currentTab = "songs";
+        songsView = "list";
+        selectedSongId = btn.dataset.id;
+        selectedVersionId = null;
+        setHeader("Song");
+        syncTabs();
+        render();
+      } else if (type === "project") {
+        drawerView = "projects";
+        projectDetailScreen = btn.dataset.id;
+        setActiveScreen("drawer");
+        renderProjectSongs(projectDetailScreen);
+      } else if (type === "collab") {
+        resetSongsFilters({ keepSort: true });
         currentTab = "songs";
         songsView = "list";
         selectedSongId = null;
         setHeader("Songs");
         syncTabs();
         render();
-        setTimeout(() => $("#q")?.focus(), 0);
-        return;
+        setTimeout(() => {
+          const inp = document.querySelector(".songsBar input");
+          if (inp) { inp.value = btn.dataset.collab; inp.dispatchEvent(new Event("input")); }
+        }, 100);
       }
-      if (target === "lyrics") return renderLyricsScratch();
-      if (target === "next") return renderNextActions();
     });
   });
 }
@@ -3295,38 +3865,6 @@ function coverSvg(song, { lite = false } = {}) {
   return svg;
 }
 
-function parseStamp(stamp){
-  // "YYYY-MM-DD HHMM"
-  if (!stamp) return null;
-  const [d, hm] = String(stamp).split(" ");
-  if (!d || !hm || hm.length < 4) return null;
-  const [yyyy, mm, dd] = d.split("-").map(Number);
-  const hh = Number(hm.slice(0,2));
-  const mi = Number(hm.slice(2,4));
-  if (!yyyy || !mm || !dd) return null;
-  return new Date(yyyy, mm-1, dd, hh, mi, 0, 0);
-}
-
-function timeAgo(stamp){
-  const dt = parseStamp(stamp);
-  if (!dt) return "—";
-  const sec = Math.max(0, Math.floor((Date.now() - dt.getTime()) / 1000));
-  const min = Math.floor(sec/60);
-  const hr = Math.floor(min/60);
-  const day = Math.floor(hr/24);
-  if (day >= 1) return `${day}d`;
-  if (hr >= 1) return `${hr}h`;
-  if (min >= 1) return `${min}m`;
-  return "now";
-}
-
-function shortBestLabel(song){
-  const bv = bestVersion(song);
-  if (!bv?.label) return "—";
-  const m = bv.label.match(/\bv(\d+(\.\d+)?)\b/i);
-  if (m) return `v${m[1]}`;
-  return "Best";
-}
 
 // ---------------------
 // Songs list + create
@@ -3358,7 +3896,7 @@ function renderSongsList() {
     </div>
 
     <div id="songList" class="songsList"></div>
-    <div class="small">Tip: use the center “New record” button to create.</div>
+    <div class="small">Tip: use the center "New record" button to create.</div>
   `;
 
   const listEl = $("#songList");
@@ -3393,53 +3931,19 @@ function renderSongsList() {
 
     listEl.innerHTML = filtered.length
       ? filtered.map((s) => {
-                    const vCount = s.versions?.length || 0;
-          const bestLbl = shortBestLabel(s);
-          const updated = timeAgo(s.updatedAt || s.createdAt);
-
-          const statusPill =
-            (s.status || "").toLowerCase() === "done" || (s.status || "").toLowerCase() === "released"
-              ? `pill good`
-              : (s.status || "").toLowerCase() === "mix" || (s.status || "").toLowerCase() === "master" || (s.status || "").toLowerCase() === "ready"
-              ? `pill warn`
-              : `pill`;
-
-          const stuckPill =
-            s.stuckState === "Stuck" ? `pill bad`
-            : s.stuckState === "Parked" ? `pill warn`
-            : `pill`;
-
-          const sub = `${s.genre || "—"} • ${(s.vibes || "").trim() ? (s.vibes || "").trim() : (s.nextAction || "").trim() ? `Next: ${s.nextAction}` : (s.project || "")}`.trim();
-
           return `
             <div class="songRow" data-id="${s.id}">
               <div class="songThumb" aria-hidden="true">
                 ${coverSvg(s, { lite: true })}
-                <div class="songDur">—:—</div>
               </div>
-
               <div class="songMain">
                 <div class="songTop">
                   <div class="songTitleRow">
                     <div class="songTitle">${escapeHtml(s.title)}</div>
-                    <div class="songPills">
-                      <span class="${statusPill}">${escapeHtml(s.status || "Idea")}</span>
-                      <span class="${stuckPill}">${escapeHtml(s.stuckState || "Active")}</span>
-                    </div>
                   </div>
-
                   <button class="songMore" data-more="${s.id}" aria-label="Song menu">⋯</button>
                 </div>
-
-                <div class="songSub">${escapeHtml(sub)}</div>
-
-                <div class="songMetaRow">
-                  <span>🎧 ${vCount}</span>
-                  <span class="sep">•</span>
-                  <span>⭐ ${escapeHtml(bestLbl)}</span>
-                  <span class="sep">•</span>
-                  <span>🕒 ${escapeHtml(updated)}</span>
-                </div>
+                <div class="songSub">${escapeHtml(s.project || "—")}</div>
               </div>
             </div>
           `;
@@ -3522,8 +4026,6 @@ function renderSongDetail(id) {
 
 activeScreenEl.innerHTML = `
   <div class="albumHero">
-    <button class="songHeroBack" id="songHeroBack" aria-label="Back">←</button>
-
     <div class="albumBg" aria-hidden="true">
       ${heroCover}
     </div>
@@ -3567,11 +4069,27 @@ activeScreenEl.innerHTML = `
   </div>
 `;
 
-  $("#songHeroBack")?.addEventListener("click", () => goBack({ animate: true }));
-
-  $("#songBigPlay")?.addEventListener("click", () => {
+  $("#songBigPlay")?.addEventListener("click", async () => {
     if (!(fv?.link || fv?.fileId || fv?.localAudioId || fv?.driveFileId)) return toast("No playable audio yet 😅");
-    playVersion(song.id, fv.id, { goPlayer: false });
+    // Play all versions: active first, then remaining sorted newest to oldest
+    const allV = (song.versions || []).slice();
+    const activeV = allV.find(v => v.isActive) || allV[0];
+    const others = allV
+      .filter(v => v.id !== activeV?.id)
+      .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+    const items = [activeV, ...others]
+      .filter(v => v && isPlayable(v))
+      .map(v => ({ songId: song.id, versionId: v.id }));
+    if (!items.length) return toast("No playable audio yet 😅");
+    state.player.nowPlaying = items[0];
+    state.player.queue = items.slice(1);
+    state.player.repeatQueue = items;
+    state.player.shuffle = false;
+    state.player.repeat = false;
+    saveState();
+    unlockAudioOnce();
+    await playNowPlaying({ autoplay: true });
+    syncMiniPlayerUI();
   });
 
   $("#songBigQueue")?.addEventListener("click", () => {
@@ -3579,10 +4097,10 @@ activeScreenEl.innerHTML = `
     addToQueue(song.id, fv.id);
   });
 
-  // For now, keep your existing “Details” as the old long form screen:
+  // For now, keep your existing "Details" as the old long form screen:
   // We’ll implement it as: details = version detail of the featured? or a new view later.
   // For today: send you to the existing song form by reusing your old renderSongDetail UI? (we replaced it)
-  // So: we’ll open the featured version detail as “Details” as a first step.
+  // So: we’ll open the featured version detail as "Details" as a first step.
 $("#songDetailsBtn")?.addEventListener("click", () => {
   // If no versions yet, create the first one and open it
   if (!fv) {
@@ -3683,71 +4201,100 @@ function renderVersionDetail(songId, versionId) {
   const hasDrive = !!v.driveFileId;
   const driveConnected = gdriveIsConnected();
 
+  const heroCover = coverSvg(song);
+
   activeScreenEl.innerHTML = `
-    <div class="card">
-      <div class="row" style="justify-content:space-between; align-items:center">
-        <h2>${escapeHtml(song.title)}</h2>
-        <button class="ghost" id="backToSong">Back</button>
+    <div class="albumHero">
+      <div class="albumBg" aria-hidden="true">${heroCover}</div>
+
+      <div class="albumTop">
+        <div class="albumArt" aria-hidden="true">${heroCover}</div>
+        <div class="albumText">
+          <div class="albumTitle">${escapeHtml(v.label || "Version")}</div>
+          <div class="albumMeta">
+            ${escapeHtml(song.title)} • ${escapeHtml(song.project || "—")}
+            ${v.isActive ? ` • <span style="color:rgba(30,215,96,.9)">Active</span>` : ""}
+          </div>
+        </div>
       </div>
-      <div class="small">${escapeHtml(song.project || "—")} • ${escapeHtml(song.genre || "—")}</div>
 
-      <div class="hr"></div>
+      <div class="albumActions">
+        <button class="songHeroPlay" id="playThis" ${hasPlayable ? "" : "disabled"}>▶ Play</button>
+        <button class="songHeroQueue" id="queueThis" ${hasPlayable ? "" : "disabled"}>+ Queue</button>
+        <button class="songHeroDetails" id="saveVersion">Save</button>
+      </div>
+    </div>
 
-      <div class="row" style="gap:10px; align-items:center; flex-wrap:wrap">
-        <div class="badge ${v.isActive ? "good" : ""}">${v.isActive ? "✅ Active" : "Active —"}</div>
+    <div class="versionsWrap">
+      <div class="versionsHeader">
+        <div class="versionsTitle">Version Details</div>
+        <div class="versionsHeaderRight">
+          <button class="btn" id="deleteVersionBtn" style="background:rgba(255,60,60,.15); border-color:rgba(255,60,60,.3); color:rgba(255,120,120,1)">Delete</button>
+        </div>
       </div>
 
-      <div class="hr"></div>
+      <div class="vDetailRows">
 
-      <div class="label">Label</div>
-      <input id="vLabel" type="text" value="${escapeHtml(v.label || "")}" />
+        <div class="vDetailRow">
+          <div class="vDetailLabel">Label</div>
+          <input id="vLabel" type="text" value="${escapeHtml(v.label || "")}" />
+        </div>
 
-      <div class="label" style="margin-top:10px">Notes</div>
-      <input id="vNotesEdit" type="text" value="${escapeHtml(v.notes || "")}" />
+        <div class="vDetailRow">
+          <div class="vDetailLabel">Notes</div>
+          <input id="vNotesEdit" type="text" value="${escapeHtml(v.notes || "")}" />
+        </div>
 
-      <div class="label" style="margin-top:10px">Link (URL)</div>
-      <input id="vLink" type="text" value="${escapeHtml(v.link || "")}" placeholder="Paste direct audio URL" />
+        <div class="vDetailRow">
+          <div class="vDetailLabel">Link (URL)</div>
+          <input id="vLink" type="text" value="${escapeHtml(v.link || "")}" placeholder="Paste direct audio URL" />
+        </div>
 
-      <div class="row" style="margin-top:10px; gap:10px; flex-wrap:wrap">
-        <button class="btn" id="importAudioBtn">Import audio (Files) 📁</button>
-        <button class="btn" id="clearLocalBtn" ${hasLocal ? "" : "disabled"}>Remove local file</button>
-        ${hasLocal && driveConnected && !hasDrive ? `
-          <button class="btn" id="uploadToDriveBtn">Upload to Drive ☁️</button>
+        <div class="vDetailRow">
+          <div class="vDetailLabel">Local file</div>
+          <div class="vDetailValue">
+            ${hasLocal
+              ? `<span style="opacity:.85">${escapeHtml(v.fileName || v.originalFileName || "audio file")}${v.fileSize ? ` • ${(v.fileSize/1024/1024).toFixed(1)} MB` : ""}</span>`
+              : `<span style="opacity:.45">No local file attached.</span>`
+            }
+          </div>
+        </div>
+
+        ${hasDrive ? `
+        <div class="vDetailRow">
+          <div class="vDetailLabel">Drive</div>
+          <div class="vDetailValue" style="color:#4ecdc4">
+            ☁️ ${escapeHtml(v.fileName || v.originalFileName || "audio")}
+            ${v.driveWebViewLink ? `<a href="${escapeHtml(v.driveWebViewLink)}" target="_blank" id="openLinkBtn" style="color:#4ecdc4; text-decoration:underline; margin-left:6px;">View ↗</a>` : ""}
+          </div>
+        </div>
+        ` : driveConnected ? `
+        <div class="vDetailRow">
+          <div class="vDetailLabel">Drive</div>
+          <div class="vDetailValue" style="opacity:.45">☁️ Not yet synced.</div>
+        </div>
         ` : ""}
-      </div>
 
-      ${hasLocal ? `
-        <div class="small" style="margin-top:8px">
-          Local: <b>${escapeHtml(v.fileName || v.originalFileName || "audio file")}</b>
-          ${v.fileSize ? ` • ${(v.fileSize/1024/1024).toFixed(1)} MB` : ""}
+        <div class="vDetailRow">
+          <div class="vDetailLabel">Status</div>
+          <div class="vDetailValue">
+            <button class="songHeroQueue" id="toggleActiveBtn" style="padding:6px 14px; font-size:13px">${v.isActive ? "✅ Active" : "Set Active"}</button>
+          </div>
         </div>
-      ` : `<div class="small" style="margin-top:8px">No local file attached.</div>`}
 
-      ${hasDrive ? `
-        <div class="small" style="margin-top:6px; color: #4ecdc4;">
-          ☁️ On Drive: <b>${escapeHtml(v.fileName || v.originalFileName || "audio")}</b>
-          ${v.driveWebViewLink ? ` <a href="${escapeHtml(v.driveWebViewLink)}" target="_blank" style="color:#4ecdc4; text-decoration:underline; margin-left:4px;">View ↗</a>` : ""}
+        <div class="vDetailRow">
+          <div class="vDetailLabel">Audio</div>
+          <div class="vDetailValue" style="display:flex; gap:8px; flex-wrap:wrap">
+            <button class="songHeroQueue" id="importAudioBtn" style="padding:6px 14px; font-size:13px">Import file 📁</button>
+            ${hasLocal ? `<button class="songHeroQueue" id="clearLocalBtn" style="padding:6px 14px; font-size:13px">Remove local</button>` : ""}
+            ${hasLocal && driveConnected && !hasDrive ? `<button class="songHeroQueue" id="uploadToDriveBtn" style="padding:6px 14px; font-size:13px">Upload ☁️</button>` : ""}
+            ${v.link && !hasDrive ? `<button class="songHeroQueue" id="openLinkBtn" style="padding:6px 14px; font-size:13px">Open link ↗</button>` : ""}
+          </div>
         </div>
-      ` : (driveConnected ? `
-        <div class="small" style="margin-top:6px; opacity:.5">☁️ Not yet synced to Drive.</div>
-      ` : ``)}
 
-      <div class="row" style="margin-top:12px; gap:10px; flex-wrap:wrap">
-        <button class="btn primary" id="saveVersion">Save</button>
-        <button class="btn" id="playThis" ${hasPlayable ? "" : "disabled"}>Play</button>
-        <button class="btn" id="queueThis" ${hasPlayable ? "" : "disabled"}>Queue</button>
-      </div>
-
-      <div class="row" style="margin-top:10px; gap:10px; flex-wrap:wrap">
-        <button class="btn" id="toggleActiveBtn">${v.isActive ? "Active ✅" : "Set Active ✅"}</button>
-        <button class="btn" id="openLinkBtn" ${v.link ? "" : "disabled"}>Open link</button>
-        <button class="btn" id="deleteVersionBtn">Delete</button>
       </div>
     </div>
   `;
-
-  // Back
-  $("#backToSong")?.addEventListener("click", () => goBack({ animate: true }));
 
   // Save
   $("#saveVersion")?.addEventListener("click", () => {
@@ -4107,7 +4654,7 @@ function renderPlayer() {
                 </div>
               `;
             }).join("")
-          : `<div class=”emptyState”>No songs yet. Add songs from the Songs tab.</div>`
+          : `<div class="emptyState">No songs yet. Add songs from the Songs tab.</div>`
       }
     </div>
   `;
