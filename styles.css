@@ -92,6 +92,26 @@ input, textarea { -webkit-user-select: text; user-select: text; }
 
 .top-actions{ display:none; }
 
+/* Back button — absolute-positioned over the left side of the topbar */
+.headerBack{
+  position: absolute;
+  left: 4px;
+  top: calc(50% + 48px);
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: #fff;
+  display: none; /* shown by JS when needed */
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.headerBack:active{ opacity: 0.5; }
+
 .view{
   flex:1;
   min-height:0;
@@ -122,12 +142,120 @@ input, textarea { -webkit-user-select: text; user-select: text; }
 
 .screen::-webkit-scrollbar{ width:0; height:0; }
 
-/* Home should NOT scroll or rubber-band */
+/* Home: no scrolling, no screen padding (homeTopbar handles safe-area itself) */
 body.isHome #screen-home.is-active{
-  overflow-y:hidden;
-  overscroll-behavior:none;
-  touch-action:none;
+  overflow: hidden;
+  padding: 0;
 }
+
+/* Hide standard topbar on home — replaced by homeTopbar */
+body.isHome .topbar{ display: none; }
+
+/* ── Master header gradient ──────────────────────────────────────
+   Applied directly to body so it lives OUTSIDE the 16px .app padding
+   and fills the full viewport edge-to-edge with no black side bars.
+   All child elements (topbar, view, screens) are transparent and let
+   this body gradient show through naturally.
+   ──────────────────────────────────────────────────────────────── */
+body.isHome,
+body.hasHeaderGrad {
+  background-image: linear-gradient(
+    180deg,
+    #c94428  0%,
+    #8b1954 22%,
+    #3d0a4e 50%,
+    rgba(11,11,15,0) 82%
+  );
+  background-size: 100% 420px;
+  background-repeat: no-repeat;
+  background-position: top center;
+}
+
+/* Player: last song never buried under mini-player / bottom nav */
+#screen-player.is-active {
+  padding-bottom: calc(var(--dock-h, 64px) + 16px);
+}
+
+/* Home topbar (YT Music style) */
+.homeWrap{
+  display: grid;
+  grid-template-rows: auto 1fr;
+  height: calc(100dvh - var(--dock-h, var(--bottom-nav-height)) - 12px);
+  box-sizing: border-box;
+  overflow: hidden;
+  transition: height 0.3s cubic-bezier(.4,0,.2,1);
+}
+
+.homeTopbar{
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(env(safe-area-inset-top) + 10px) 16px 0;
+}
+
+.homeTopbarLeft{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rbLogoClip{
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  overflow: hidden;
+  flex-shrink: 0;
+  display: block;
+  background: var(--bg);
+  position: relative;
+}
+
+.rbLogoClip::after{
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 7px;
+  box-shadow: inset 0 0 0 5px var(--bg);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.rbLogo{
+  width: 120%;
+  height: 120%;
+  margin: -10%;
+  display: block;
+  object-fit: cover;
+}
+
+.rbBrand{
+  font-size: 18px;
+  font-weight: 800;
+  color: #fff;
+  letter-spacing: -0.4px;
+}
+
+.homeTopbarRight{
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.htbBtn{
+  width: 38px;
+  height: 38px;
+  border: none;
+  background: transparent;
+  color: rgba(255,255,255,.72);
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.htbBtn:active{ background: rgba(255,255,255,.1); }
+.htbBtn svg{ width: 20px; height: 20px; }
 
 .card{
   background: linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.02));
@@ -202,7 +330,7 @@ textarea{ min-height:100px; resize:vertical; }
 .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
 
 /* =========================
-   Suno-style bottom nav
+   Bottom nav — YT Music style, 4 flat tabs
    ========================= */
 .bottomNav{
   position: fixed;
@@ -210,127 +338,83 @@ textarea{ min-height:100px; resize:vertical; }
   transform: translateX(-50%);
   bottom: 0;
 
-  /* ✅ This is the fix */
   width: min(var(--app-maxw), 100vw);
   max-width: 100vw;
 
-  padding: 10px 14px env(safe-area-inset-bottom);
-  background: rgba(8,8,12,.82);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  padding: 8px 0 env(safe-area-inset-bottom);
+  background: #212121;
   border-top: 1px solid rgba(255,255,255,.08);
 
-  display:flex;
-  align-items:flex-end;
-  justify-content:space-between;
-  gap: 10px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-around;
   z-index: 40;
-
-  border-top-left-radius: 18px;
-  border-top-right-radius: 18px;
 }
-
-.navHomePill{
-  flex: 0 0 auto;
-  width: 124px;
-  height: 46px;
-  border: 0;
-  border-radius: 999px;
-  display: grid;
-  place-items: center;
-  color: rgba(255,255,255,.92);
-  background: radial-gradient(120px 60px at 40% 30%, rgba(255,120,220,.35), rgba(0,0,0,0)),
-              radial-gradient(120px 60px at 70% 70%, rgba(80,180,255,.28), rgba(0,0,0,0)),
-              linear-gradient(180deg, rgba(255,255,255,.14), rgba(255,255,255,.06));
-  border: 1px solid rgba(255,255,255,.14);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  transform: translateY(-8px);
-  box-shadow:
-    0 16px 34px rgba(0,0,0,.55),
-    0 0 26px rgba(255,120,220,.12),
-    0 0 26px rgba(80,180,255,.10);
-}
-
-.navHomePill:active{ transform: translateY(-6px) scale(.985); }
-
-.navHomePill.active{
-  border-color: rgba(255,255,255,.22);
-  background: radial-gradient(120px 60px at 40% 30%, rgba(255,120,220,.45), rgba(0,0,0,0)),
-              radial-gradient(120px 60px at 70% 70%, rgba(80,180,255,.36), rgba(0,0,0,0)),
-              linear-gradient(180deg, rgba(255,255,255,.18), rgba(255,255,255,.07));
-  box-shadow:
-    0 18px 40px rgba(0,0,0,.62),
-    0 0 34px rgba(255,120,220,.16),
-    0 0 34px rgba(80,180,255,.14);
-}
-
-.navHomePill .navIcon{
-  width: 26px;
-  height: 26px;
-  display: grid;
-  place-items: center;
-}
-.navHomePill .navIcon svg{ width: 26px; height: 26px; }
 
 .navBtn{
   flex: 1;
   border: 0;
   background: transparent;
-  color: rgba(255,255,255,.68);
-  display:flex;
-  flex-direction:column;
-  align-items:center;
-  justify-content:center;
-  gap: 6px;
-  padding: 10px 10px;
-  border-radius: 14px;
-  font-weight: 800;
+  color: rgba(255,255,255,.45);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 8px 6px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: color 0.15s;
 }
 
 .navBtn.active{
   color: #fff;
-  background: rgba(255,255,255,.06);
+}
+
+.navBtn:active{
+  opacity: 0.7;
+}
+
+/* Create button — accent color */
+.createNavBtn{
+  color: rgba(255,255,255,.55);
 }
 
 .navIcon{
   width: 24px;
   height: 24px;
-  display:grid;
-  place-items:center;
+  display: grid;
+  place-items: center;
 }
 .navIcon svg{ width: 24px; height: 24px; color: currentColor; }
 
 .navLabel{
-  font-size: 11px;
+  font-size: 10px;
+  font-weight: 600;
   letter-spacing: .2px;
-  opacity: .9;
 }
 
 /* =========================
-   Mini player (clean: art + controls + progress)
+   Mini player (YT Music style: flush against bottom nav)
    ========================= */
 .miniPlayer{
   position: fixed;
   left: 50%;
-  transform: translateX(-50%) translateY(16px);
-  bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + var(--mini-gap));
+  transform: translateX(-50%) translateY(10px);
+  bottom: var(--nav-h, calc(var(--tabbar-h) + env(safe-area-inset-bottom)));
 
-  width: min(var(--app-maxw), calc(100vw - 24px));
+  width: min(var(--app-maxw), 100vw);
   z-index: 50;
 
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 0;
 
-  padding: 10px 12px;
-  border-radius: 14px;
+  padding: 8px 14px 0;
+  border-radius: 0;
 
-  background: rgba(20,20,26,.92);
-  border: 1px solid rgba(255,255,255,.08);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  box-shadow: 0 10px 28px rgba(0,0,0,.35);
+  background: #212121;
+  border-top: 1px solid rgba(255,255,255,.08);
 
   opacity: 0;
   pointer-events: none;
@@ -444,8 +528,36 @@ textarea{ min-height:100px; resize:vertical; }
 }
 
 .miniScrub{
-  width: 100%;
-  margin: 0;
+  -webkit-appearance: none;
+  appearance: none;
+  width: calc(100% + 28px);
+  margin: 8px -14px 0;
+  height: 3px;
+  border-radius: 0;
+  background: rgba(255,255,255,.12);
+  pointer-events: none;
+  cursor: default;
+  display: block;
+  flex-shrink: 0;
+}
+.miniScrub::-webkit-slider-thumb{
+  -webkit-appearance: none;
+  width: 0;
+  height: 0;
+}
+.miniScrub::-moz-range-thumb{
+  width: 0;
+  height: 0;
+  border: none;
+  background: transparent;
+}
+.miniScrub::-webkit-slider-runnable-track{
+  height: 3px;
+  background: transparent;
+}
+.miniScrub::-moz-range-track{
+  height: 3px;
+  background: transparent;
 }
 
 /* =========================
@@ -651,60 +763,383 @@ textarea{ min-height:100px; resize:vertical; }
   color: #fff;
 }
 
-/* =========================
-   Home grid
-   ========================= */
-.homeReleaf{
-  position: relative;
-  padding: 6px 0 30px;
+/* Release sheet — song picker */
+.sheetPickScroll{
+  max-height: 220px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 14px;
+  padding: 4px 0;
 }
 
-.homeGridReleaf{
-  display:grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
-  margin-top: 10px;
+.sheetPickGroup{
+  padding: 6px 12px 2px;
 }
 
-.homeCard{
-  border: 1px solid var(--line);
-  border-radius: var(--rCard);
-  background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.04));
-  padding: 18px 14px;
-  min-height: 112px;
-  display:flex;
-  flex-direction:column;
-  align-items:center;
-  justify-content:center;
-  gap: 8px;
-  box-shadow: 0 14px 40px rgba(0,0,0,.55);
+.sheetPickLabel{
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,.38);
+  padding: 4px 0 2px;
 }
 
-.homeCard svg{
-  width: 24px;
-  height: 24px;
-  color: var(--text);
-  opacity: .92;
-}
-
-.homeCard .cardText{
-  font-weight: 900;
-  font-size: 18px;
-  color: var(--text);
-  text-align:center;
-  line-height: 1.05;
-}
-
-.homeCard .cardSub{
-  font-weight: 800;
+.sheetSongPick{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid rgba(255,255,255,.05);
+  cursor: pointer;
   font-size: 14px;
-  color: var(--muted);
+  color: rgba(255,255,255,.85);
+  -webkit-user-select: none;
+  user-select: none;
 }
 
-.homeCardWide{
+.sheetSongPick:last-child{ border-bottom: none; }
+
+.sheetSongPick input[type="checkbox"]{
+  width: 18px;
+  height: 18px;
+  accent-color: #a855f7;
+  flex-shrink: 0;
+}
+
+/* =========================
+   Home — SoundCloud-style staggered grid
+   ========================= */
+.homeScene{
+  min-height: 0;
+  overflow: hidden;
+  padding: 0px 0 0;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  box-sizing: border-box;
+}
+
+.homeGreet{
+  font-size: 30px;
+  font-weight: 900;
+  letter-spacing: -0.6px;
+  line-height: 1.18;
+  margin-bottom: 20px;
+  color: #fff;
+}
+
+.homeGreetSub{
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(255,255,255,.45);
+  margin-top: 4px;
+  letter-spacing: 0;
+}
+
+.homeGrid{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr 0.5fr 0.5fr;
+  gap: 12px;
+  min-height: 0;
+}
+
+/* Base card */
+.hCard{
+  position: relative;
+  border-radius: 22px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  text-align: left;
+  cursor: pointer;
+  border: none;
+  padding: 0;
+  min-height: 0;
+  transition: transform 0.12s ease, filter 0.12s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.hCard:active{
+  transform: scale(0.955);
+  filter: brightness(0.82);
+}
+
+/* During drag gesture, suppress all active feedback (JS handles the transform) */
+.homeGrid.is-dragging .hCard:active{
+  filter: none;
+}
+.homeGrid.is-dragging .hCard:active .hArt img{
+  transform: none !important;
+}
+
+/* Full-bleed neon art background */
+.hArt{
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.hArt svg{
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Dark gradient so text stays legible */
+.hGrad{
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to bottom, rgba(0,0,0,.62) 0%, rgba(0,0,0,.08) 55%, transparent 100%);
+  z-index: 1;
+}
+
+.hBody{
+  position: relative;
+  z-index: 2;
+  padding: 14px 16px;
+}
+
+.hLabel{
+  font-size: 20px;
+  font-weight: 900;
+  color: #fff;
+  letter-spacing: -0.4px;
+  line-height: 1.1;
+}
+
+.hSub{
+  font-size: 12px;
+  font-weight: 700;
+  color: rgba(255,255,255,.62);
+  margin-top: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Per-card accent gradients */
+.hSongs    { background: linear-gradient(145deg, #6d28d9 0%, #db2777 100%); grid-row: span 2; min-height: 0; }
+.hProjects { background: linear-gradient(145deg, #c2410c 0%, #b45309 100%); }
+.hPlayer   { background: linear-gradient(145deg, #0e7490 0%, #1d4ed8 100%); }
+.hLyrics   { background: linear-gradient(145deg, #1e40af 0%, #5b21b6 100%); }
+.hNext     { background: linear-gradient(145deg, #9d174d 0%, #4c1d95 100%); }
+
+/* Wide = full-width row */
+.hWide{
   grid-column: 1 / -1;
-  width: min(72%, 320px);
-  justify-self:center;
+  min-height: 0;
+}
+
+/* Next actions: no artwork, just the gradient */
+.hNext .hGrad{
+  background: rgba(0,0,0,.25);
+}
+
+/* =========================
+   Micro-motion — home cards
+   ========================= */
+
+/* 1. Slow gradient drift — looping 5-stop gradients, each card its own speed */
+@keyframes gradDrift {
+  0%   { background-position: 0% 50%; }
+  50%  { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+.hSongs    { background: linear-gradient(135deg, #5b21b6, #7c3aed, #db2777, #7c3aed, #5b21b6); background-size: 300% 300%; animation: gradDrift 12s ease infinite; }
+.hProjects { background: linear-gradient(135deg, #9a3412, #c2410c, #b45309, #c2410c, #9a3412); background-size: 300% 300%; animation: gradDrift 10s ease infinite; }
+.hPlayer   { background: linear-gradient(135deg, #155e75, #0e7490, #1d4ed8, #0e7490, #155e75); background-size: 300% 300%; animation: gradDrift 14s ease infinite; }
+.hLyrics   { background: linear-gradient(135deg, #1e3a8a, #1e40af, #5b21b6, #1e40af, #1e3a8a); background-size: 300% 300%; animation: gradDrift 11s ease infinite; }
+.hNext     { background: linear-gradient(135deg, #831843, #9d174d, #4c1d95, #9d174d, #831843); background-size: 300% 300%; animation: gradDrift  9s ease infinite; }
+
+/* 2. Shimmer sweep — once per ~7s, staggered so cards don't fire together */
+@keyframes shimmerSweep {
+  0%, 70%  { transform: translateX(-120%) skewX(-10deg); }
+  100%     { transform: translateX(350%)  skewX(-10deg); }
+}
+
+.hCard::before {
+  content: '';
+  position: absolute;
+  top: 0; bottom: 0; left: 0;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.07), transparent);
+  z-index: 3;
+  pointer-events: none;
+  animation: shimmerSweep 7s ease-in-out infinite;
+}
+
+.hSongs::before    { animation-delay:  0s;    }
+.hProjects::before { animation-delay: -2.1s;  }
+.hPlayer::before   { animation-delay: -4.5s;  }
+.hLyrics::before   { animation-delay: -1.4s;  }
+.hNext::before     { animation-delay: -5.6s;  }
+
+/* 3. Parallax on tap — image lingers behind the card's scale-down */
+.hArt img {
+  transition: transform 0.45s cubic-bezier(.2,.9,.2,1);
+}
+
+.hCard:active .hArt img {
+  transform: scale(1.06) translateY(6px);
+}
+
+/* =========================
+   Global Search overlay
+   ========================= */
+.gsWrap{
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding-top: env(safe-area-inset-top);
+}
+
+.gsTopbar{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px 10px;
+  flex-shrink: 0;
+}
+
+.gsInputWrap{
+  flex: 1;
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.gsInputIcon{
+  position: absolute;
+  left: 10px;
+  width: 16px;
+  height: 16px;
+  color: rgba(255,255,255,.45);
+  pointer-events: none;
+}
+.gsInputIcon svg{ width: 16px; height: 16px; display: block; }
+
+.gsInput{
+  width: 100%;
+  background: rgba(255,255,255,.1);
+  border: none;
+  border-radius: 10px;
+  padding: 11px 14px 11px 34px;
+  font-size: 16px;
+  color: #fff;
+  outline: none;
+  font-family: inherit;
+}
+.gsInput::placeholder{ color: rgba(255,255,255,.38); }
+
+.gsCancel{
+  background: none;
+  border: none;
+  color: rgba(255,255,255,.7);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  padding: 6px 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.gsBody{
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 120px;
+}
+
+.gsEmpty{
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 64px 32px 32px;
+  text-align: center;
+}
+.gsEmptyTitle{
+  font-size: 22px;
+  font-weight: 800;
+  color: #fff;
+  margin-bottom: 10px;
+  letter-spacing: -0.4px;
+}
+.gsEmptySub{
+  font-size: 14px;
+  color: rgba(255,255,255,.45);
+  line-height: 1.6;
+}
+
+.gsSection{ padding: 12px 0 4px; }
+
+.gsSectionTitle{
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
+  color: rgba(255,255,255,.38);
+  padding: 0 16px 6px;
+}
+
+.gsRow{
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: none;
+  border: none;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.gsRow:active{ background: rgba(255,255,255,.06); }
+
+.gsRowArt{
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.gsRowArt svg{ width: 100%; height: 100%; display: block; }
+
+.gsRowIcon{
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  background: rgba(255,255,255,.08);
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+.gsRowIcon svg{ width: 20px; height: 20px; color: rgba(255,255,255,.65); }
+.gsRowIconPurple{ background: rgba(139,92,246,.2); }
+.gsRowIconPurple svg{ color: #a78bfa; }
+.gsRowIconGreen{ background: rgba(16,185,129,.15); }
+.gsRowIconGreen svg{ color: #34d399; }
+.gsRowIconOrange{ background: rgba(249,115,22,.15); }
+.gsRowIconOrange svg{ color: #fb923c; }
+
+.gsRowMeta{ flex: 1; min-width: 0; }
+.gsRowTitle{
+  font-size: 15px;
+  font-weight: 600;
+  color: #fff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gsRowSub{
+  font-size: 12px;
+  color: rgba(255,255,255,.42);
+  margin-top: 2px;
 }
 
 /* =========================
@@ -779,7 +1214,7 @@ textarea{ min-height:100px; resize:vertical; }
 
 .songRow{
   width:100%;
-  padding: 12px 2px;
+  padding: 8px 2px;
   border-bottom: 1px solid rgba(255,255,255,.06);
   cursor:pointer;
   display:flex;
@@ -1298,6 +1733,45 @@ body.splashing .app{
   min-width: 0;
 }
 
+/* Version detail rows (modernized version detail view) */
+.vDetailRows{
+  display: flex;
+  flex-direction: column;
+}
+
+.vDetailRow{
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255,255,255,.06);
+}
+
+.vDetailRow:last-child{
+  border-bottom: none;
+}
+
+.vDetailLabel{
+  font-size: 12px;
+  font-weight: 700;
+  color: rgba(255,255,255,.45);
+  text-transform: uppercase;
+  letter-spacing: .4px;
+  flex-shrink: 0;
+}
+
+.vDetailValue{
+  font-size: 14px;
+  color: rgba(255,255,255,.85);
+  min-width: 0;
+}
+
+.vDetailRow input{
+  width: 100%;
+  box-sizing: border-box;
+}
+
 .vTitle{
   font-weight: 900;
   font-size: 14px;
@@ -1359,14 +1833,13 @@ body.splashing .app{
    ========================= */
 
 .songThumb{
-  width: 52px;
-  height: 52px;
-  border-radius: 14px;
+  width: 48px;
+  height: 48px;
+  border-radius: 6px;
   overflow: hidden;
   flex: 0 0 auto;
-  border: 1px solid rgba(255,255,255,.10);
+  border: 1px solid rgba(255,255,255,.08);
   background: rgba(255,255,255,.04);
-  box-shadow: 0 10px 24px rgba(0,0,0,.35);
 }
 
 .songThumb img,
@@ -1382,12 +1855,12 @@ body.splashing .app{
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 3px;
 }
 
 .songTop{
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 10px;
   min-width: 0;
@@ -1401,19 +1874,19 @@ body.splashing .app{
 }
 
 .songTitle{
-  font-weight: 900;
-  font-size: 18px;
-  letter-spacing: -0.3px;
-  line-height: 1.05;
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: -0.1px;
+  line-height: 1.2;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .songSub{
-  font-weight: 800;
-  font-size: 14px;
-  color: rgba(255,255,255,.78);
+  font-weight: 400;
+  font-size: 13px;
+  color: rgba(255,255,255,.48);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1421,18 +1894,20 @@ body.splashing .app{
 
 .songMore{
   flex: 0 0 auto;
-  width: 44px;
-  height: 34px;
-  border-radius: 12px;
-  border: 1px solid rgba(255,255,255,.10);
-  background: rgba(255,255,255,.06);
-  color: rgba(255,255,255,.92);
+  width: 32px;
+  height: 32px;
+  border-radius: 0;
+  border: none;
+  background: none;
+  color: rgba(255,255,255,.45);
   display: grid;
   place-items: center;
   cursor: pointer;
+  font-size: 18px;
+  letter-spacing: 1px;
 }
 
-.songMore:active{ transform: scale(.98); }
+.songMore:active{ opacity: 0.6; }
 
 .songPills{
   display: flex;
@@ -1485,13 +1960,6 @@ body.splashing .app{
   opacity: .6;
 }
 
-/* Make the row itself feel more deliberate */
-.songRow{
-  align-items: flex-start; /* important: so title/meta stack cleanly */
-  padding: 14px 4px;
-}
-
-/* Optional: nicer hover / press */
 .songRow:active{
   background: rgba(255,255,255,.04);
 }
@@ -1526,13 +1994,16 @@ body.splashing .app{
 
 .playerActions{
   display:flex;
-  align-items:center;
-  gap: 10px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 18px;
+  padding: 12px 20px 6px;
 }
 
+/* Spotify-style play — big green circle, right-aligned */
 .playerPlayBtn{
-  width: 52px;
-  height: 52px;
+  width: 64px;
+  height: 64px;
   border-radius: 999px;
   border: 0;
   cursor: pointer;
@@ -1541,23 +2012,26 @@ body.splashing .app{
   display:flex;
   align-items:center;
   justify-content:center;
-  font-weight: 900;
-  box-shadow: 0 10px 24px rgba(0,0,0,.35);
+  box-shadow: 0 8px 24px rgba(0,0,0,.4);
+  flex-shrink: 0;
 }
-.playerPlayBtn:active{ transform: translateY(1px); }
+.playerPlayBtn:active{ transform: scale(0.94); }
 
+/* Spotify-style shuffle — bare icon, no circle/border */
 .playerShuffleBtn{
   width: 40px;
   height: 40px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  background: rgba(255,255,255,.06);
-  color: var(--text);
+  border: none;
+  background: transparent;
+  color: rgba(255,255,255,.55);
   display:flex;
   align-items:center;
   justify-content:center;
   cursor:pointer;
+  flex-shrink: 0;
 }
+.playerShuffleBtn.is-active{ color: #1ed760; }
+.playerShuffleBtn:active{ opacity: 0.6; }
 
 .chipsRow{
   display:flex;
@@ -1945,10 +2419,9 @@ body.fullplayer-open #miniPlayer{
 }
 
 .fpCtrl.is-active {
-  background: rgba(255,255,255,.28);
-  border-color: rgba(255,255,255,.55);
+  background: transparent;
+  border: none;
   color: #fff;
-  box-shadow: 0 0 12px rgba(255,255,255,.15);
 }
 
 .fpHeader{
@@ -2080,31 +2553,44 @@ body.fullplayer-open #miniPlayer{
   display:flex;
   justify-content:center;
   align-items:center;
-  gap: 12px;
+  gap: 4px;
   margin-top: 6px;
 }
 
 .fpCtrl{
-  width: 52px;
-  height: 52px;
-  border-radius: 999px;
-  border: 1px solid rgba(255,255,255,.12);
-  background: rgba(255,255,255,.07);
-  color: rgba(255,255,255,.92);
-  font-size: 16px;
+  width: 48px;
+  height: 48px;
+  border-radius: 0;
+  border: none;
+  background: transparent;
+  color: rgba(255,255,255,.75);
+  font-size: 18px;
   display:grid;
   place-items:center;
   padding:0;
+  position: relative;
+}
+/* Repeat-1 badge */
+.r1b {
+  position: absolute;
+  top: 0; right: 0;
+  font-size: 9px; font-weight: 800;
+  color: #fff; background: #c94428;
+  border-radius: 50%;
+  width: 15px; height: 15px;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;
 }
 
 .fpPlay{
-  width: 68px;
-  height: 68px;
-  background: rgba(255,255,255,.92);
-  color: #0b0b0f;
-  border-color: rgba(255,255,255,.22);
-  font-size: 18px;
+  width: 72px;
+  height: 72px;
+  background: transparent;
+  color: #fff;
+  border: none;
+  font-size: 28px;
 }
+.fpPlay svg{ width: 36px; height: 36px; }
 
 .fpBottomTabs{
   width: 100%;
@@ -2148,7 +2634,7 @@ body {
   bottom: 0;
 
   /* paint the whole “URL bar area” so there’s no dead gutter */
-  background: linear-gradient(to top, rgba(0,0,0,.85), rgba(0,0,0,.35));
+  background: #212121;
 
   /* respect iPhone home indicator */
   padding-bottom: env(safe-area-inset-bottom);
@@ -2217,14 +2703,14 @@ body {
   position: fixed;
   top: 0;
   bottom: 0;
-  height: 100%;        /* ← ADD THIS */
+  height: 100%;
   left: 50%;
   width: min(var(--app-maxw), 100vw);
-  transform: translateX(-50%) translateY(16px);
+  transform: translateX(-50%) translateY(100%);
   z-index: 9999;
-  opacity: 0;
+  opacity: 1;
   pointer-events: none;
-  transition: opacity 180ms ease, transform 180ms ease;
+  transition: transform 420ms cubic-bezier(.32,0,.2,1);
   overflow: hidden;
 }
 
