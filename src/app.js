@@ -125,6 +125,27 @@ function setActiveScreen(name) {
   });
 }
 
+// Slide the active screen AND topbar in from the right (call after render() for forward navigation)
+function triggerForwardSlide() {
+  const el = activeScreenEl;
+  const topbar = document.querySelector(".topbar");
+  if (!el) return;
+  const targets = [el, topbar].filter(Boolean);
+  targets.forEach(t => { t.style.transform = "translateX(100%)"; t.style.transition = "none"; });
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      targets.forEach(t => {
+        t.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
+        t.style.transform = "";
+        t.addEventListener("transitionend", () => {
+          t.style.transition = "";
+          t.style.transform = "";
+        }, { once: true });
+      });
+    });
+  });
+}
+
 const headerTitle = $("#headerTitle");
 const headerBackEl = document.getElementById("headerBack");
 const toastEl = $("#toast");
@@ -290,7 +311,7 @@ const np = state.player?.nowPlaying;
   const pct = dur > 0 ? (cur / dur) * 100 : 0;
 
   const shuffleOn = !!state.player.shuffle;
-  const repeatOn = !!state.player.repeat;
+  const repeatState = state.player.repeat; // false | true | "one"
 
   return `
     <div class="fp" id="fpRoot">
@@ -345,8 +366,9 @@ const np = state.player?.nowPlaying;
         <button class="fpCtrl" id="fpNext" aria-label="Next">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2z"/><path d="M4 6v12l10-6z"/></svg>
         </button>
-        <button class="fpCtrl ${repeatOn ? "is-active" : ""}" id="fpRepeat" aria-label="Repeat">
+        <button class="fpCtrl ${repeatState ? "is-active" : ""}" id="fpRepeat" aria-label="Repeat" style="position:relative">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+          ${repeatState === "one" ? `<span class="r1b">1</span>` : ""}
         </button>
       </div>
 
@@ -435,9 +457,20 @@ function wireNowPlayingEvents(overlay) {
   });
 
   overlay.querySelector("#fpRepeat")?.addEventListener("click", () => {
-    state.player.repeat = !state.player.repeat;
+    const r = state.player.repeat;
+    state.player.repeat = r === false ? true : r === true ? "one" : false;
     saveState();
-    overlay.querySelector("#fpRepeat")?.classList.toggle("is-active", state.player.repeat);
+    const btn = overlay.querySelector("#fpRepeat");
+    if (btn) {
+      btn.classList.toggle("is-active", !!state.player.repeat);
+      btn.querySelector(".r1b")?.remove();
+      if (state.player.repeat === "one") {
+        const badge = document.createElement("span");
+        badge.className = "r1b";
+        badge.textContent = "1";
+        btn.appendChild(badge);
+      }
+    }
   });
 }
 
@@ -854,6 +887,7 @@ function normalizeState() {
       );
       song.versions.forEach(v => { v.isActive = (v.id === newest.id); });
     }
+    if (song.coverImageUrl === undefined) song.coverImageUrl = null;
   });
   // Player state (queue)
   state.player = state.player || {};
@@ -863,7 +897,7 @@ function normalizeState() {
 
   // Playback toggles (persisted)
   if (typeof state.player.shuffle !== "boolean") state.player.shuffle = false;
-  if (typeof state.player.repeat !== "boolean") state.player.repeat = false;
+  if (state.player.repeat !== true && state.player.repeat !== "one") state.player.repeat = false;
 }
 
 normalizeState();
@@ -1468,9 +1502,11 @@ function setHeader(t) {
 }
 
 // Show/hide the back button based on whether we're on a nested screen
-const ROOT_TABS = new Set(["home", "songs", "player", "collab"]);
+const ROOT_TABS = new Set(["home", "player", "collab"]);
 function syncBackButton() {
   if (!headerBackEl) return;
+  // Collab is always a root — never show back button there
+  if (currentTab === "collab") { headerBackEl.style.display = "none"; return; }
   const onRoot =
     ROOT_TABS.has(currentTab) &&
     !drawerView &&
@@ -1479,7 +1515,7 @@ function syncBackButton() {
     !projectDetailScreen &&
     !releaseDetailId &&
     songsView !== "create";
-  headerBackEl.style.display = onRoot ? "none" : "";
+  headerBackEl.style.display = onRoot ? "none" : "flex";
 }
 
 // Wire back button once
@@ -1885,9 +1921,10 @@ document.addEventListener("touchstart", (e) => {
 
 // Left-edge gesture
 if (!drawerOpen && t.clientX <= 24) {
-  // ← ADD THIS: disable swipe when fullscreen player is open
-  if (playerScreen === "now" && currentTab === "player") return;
-  
+  // Player and Collab have nothing to go back to; bare home screen (no drawer) has nothing to go back to
+  if (currentTab === "player" || currentTab === "collab") return;
+  if (currentTab === "home" && !drawerView && !overlayView) return;
+
   touchTracking = true;
   const onHomeRoot = (currentTab === "home" && !drawerView && !overlayView);
   touchMode = onHomeRoot ? "open" : "back";
@@ -1921,10 +1958,13 @@ document.addEventListener("touchmove", (e) => {
     touchMode = null;
   }
 
-  if (touchMode === "back" && dx >= 60) {
-    goBack({ animate: true });
-    touchTracking = false;
-    touchMode = null;
+  if (touchMode === "back") {
+    // Screen + topbar follow the finger in real-time; decision made on touchend
+    const clamp = Math.max(0, dx);
+    const tb = document.querySelector(".topbar");
+    if (activeScreenEl) activeScreenEl.style.transform = `translateX(${clamp}px)`;
+    if (tb) tb.style.transform = `translateX(${clamp}px)`;
+    return;
   }
 
   if (touchMode === "close" && dx <= -60) {
@@ -1934,7 +1974,47 @@ document.addEventListener("touchmove", (e) => {
   }
 }, { passive: true });
 
-document.addEventListener("touchend", () => {
+document.addEventListener("touchend", (e) => {
+  if (!touchTracking) return;
+  const t = e.changedTouches?.[0];
+
+  if (touchMode === "back") {
+    const dx = t ? t.clientX - touchStartX : 0;
+    const el = activeScreenEl;
+    const tb = document.querySelector(".topbar");
+    const threshold = window.innerWidth * 0.38;
+
+    if (dx >= threshold) {
+      // Commit: slide entire card (screen + topbar) off to the right then navigate
+      [el, tb].filter(Boolean).forEach(elem => {
+        elem.style.transition = "transform 0.25s ease-out";
+        elem.style.transform = `translateX(${window.innerWidth}px)`;
+      });
+      setTimeout(() => {
+        [el, tb].filter(Boolean).forEach(elem => {
+          elem.style.transition = "";
+          elem.style.transform = "";
+        });
+        goBack({ animate: false });
+      }, 250);
+    } else {
+      // Cancel: snap entire card back
+      [el, tb].filter(Boolean).forEach(elem => {
+        elem.style.transition = "transform 0.22s ease-out";
+        elem.style.transform = "translateX(0)";
+      });
+      setTimeout(() => {
+        [el, tb].filter(Boolean).forEach(elem => {
+          elem.style.transition = "";
+          elem.style.transform = "";
+        });
+      }, 220);
+    }
+    touchTracking = false;
+    touchMode = null;
+    return;
+  }
+
   touchTracking = false;
   touchMode = null;
 }, { passive: true });
@@ -2136,6 +2216,13 @@ globalAudio?.addEventListener("pause", () => {
 // Advance to the next track, respecting repeat (queue-level loop) and shuffle.
 // Returns true if something will play, false if queue is truly empty.
 function advanceToNextTrack({ render: doRender = false } = {}) {
+  // Repeat one: loop the current song without touching the queue
+  if (state.player?.repeat === "one" && globalAudio) {
+    globalAudio.currentTime = 0;
+    globalAudio.play().catch(() => {});
+    return true;
+  }
+
   const q = state.player?.queue || [];
   if (q.length) {
     state.player.nowPlaying = q.shift();
@@ -2144,8 +2231,8 @@ function advanceToNextTrack({ render: doRender = false } = {}) {
     if (doRender) render();
     return true;
   }
-  // Queue exhausted — rebuild from repeatQueue if repeat is on
-  if (state.player?.repeat) {
+  // Queue exhausted — rebuild from repeatQueue if repeat-all is on
+  if (state.player?.repeat === true) {
     const rq = state.player?.repeatQueue || [];
     if (rq.length) {
       const fresh = state.player.shuffle ? shuffleArray([...rq]) : [...rq];
@@ -2219,12 +2306,22 @@ function renderSheet() {
   }
 
   if (sheetMode === "song") {
+    const existingProjects = [...new Set(
+      state.songs.map(s => (s.project || "").trim()).filter(Boolean)
+    )].sort();
+    const defaultProj = state.settings.defaultProject || "";
+
     sheetContent.innerHTML = `
       <div class="sheetTitle">New song</div>
 
       <div class="sheetForm">
         <input id="sheetSongTitle" type="text" placeholder="Title (e.g. Internal)" />
-        <input id="sheetSongProject" type="text" placeholder="Project" value="${escapeHtml(state.settings.defaultProject || "")}" />
+        <select id="sheetSongProject">
+          ${existingProjects.map(p => `<option value="${escapeHtml(p)}"${p === defaultProj ? " selected" : ""}>${escapeHtml(p)}</option>`).join("")}
+          <option value="__new__"${!existingProjects.length ? " selected" : ""}>+ New project…</option>
+        </select>
+        <input id="sheetNewProject" type="text" placeholder="Project name"
+          style="display:${!existingProjects.length ? "block" : "none"}; margin-top:-4px" />
         <input id="sheetSongGenre" type="text" placeholder="Genre" value="${escapeHtml(state.settings.defaultGenre || "")}" />
         <input id="sheetSongSprint" type="text" placeholder="Sprint" value="${escapeHtml(state.settings.defaultSprint || "")}" />
       </div>
@@ -2235,16 +2332,28 @@ function renderSheet() {
       </div>
     `;
 
+    $("#sheetSongProject")?.addEventListener("change", (e) => {
+      const isNew = e.target.value === "__new__";
+      const inp = $("#sheetNewProject");
+      if (inp) { inp.style.display = isNew ? "block" : "none"; }
+      if (isNew) setTimeout(() => $("#sheetNewProject")?.focus(), 0);
+    });
+
     $("#sheetBack")?.addEventListener("click", () => openSheet("chooser"));
 
     $("#sheetCreateSong")?.addEventListener("click", () => {
       const title = ($("#sheetSongTitle")?.value || "").trim();
       if (!title) return toast("Give it a title 🙂");
 
+      const projSel = $("#sheetSongProject")?.value || "";
+      const projectRaw = projSel === "__new__"
+        ? ($("#sheetNewProject")?.value || "").trim()
+        : projSel;
+
       const song = {
         id: uid(),
         title,
-        project: ($("#sheetSongProject")?.value || "").trim() || "Project",
+        project: projectRaw || "Project",
         genre: ($("#sheetSongGenre")?.value || "").trim() || "",
         sprint: ($("#sheetSongSprint")?.value || "").trim() || "Unsorted",
         instrumentation: "",
@@ -2683,6 +2792,16 @@ function render() {
     "isHome",
     currentTab === "home" && !drawerView && !overlayView && !selectedSongId && !selectedVersionId
   );
+  document.body.classList.toggle(
+    "hasHeaderGrad",
+    currentTab === "songs" ||
+    currentTab === "player" ||
+    currentTab === "collab" ||
+    drawerView === "projects" ||
+    drawerView === "releases" ||
+    drawerView === "eps" ||
+    drawerView === "collabs"
+  );
 
   // Drawer screens
   if (drawerView === "projects") { setActiveScreen("drawer"); return projectDetailScreen ? renderProjectSongs(projectDetailScreen) : renderProjects(); }
@@ -2885,6 +3004,7 @@ function renderProjects() {
         if (e.target.closest("[data-proj-more]")) return;
         projectDetailScreen = row.getAttribute("data-open-proj");
         render();
+        triggerForwardSlide();
       });
     });
     projListEl.querySelectorAll("[data-proj-more]").forEach(btn => {
@@ -3001,6 +3121,7 @@ function renderProjectSongs(projectName) {
       selectedVersionId = null;
       setHeader("Song");
       render();
+      triggerForwardSlide();
     });
   });
 
@@ -3055,6 +3176,7 @@ function renderReleases() {
     row.addEventListener("click", () => {
       releaseDetailId = row.getAttribute("data-rel-open");
       render();
+      triggerForwardSlide();
     });
   });
 
@@ -3160,6 +3282,7 @@ function renderReleaseDetail(releaseId) {
       selectedVersionId = null;
       setHeader("Song");
       render();
+      triggerForwardSlide();
     });
   });
 }
@@ -3429,6 +3552,7 @@ function renderHome() {
         setHeader("Songs");
         syncTabs();
         render();
+        triggerForwardSlide();
         return;
       }
       if (target === "projects") return setDrawerView("projects");
@@ -3437,6 +3561,62 @@ function renderHome() {
       if (target === "next") return renderNextActions();
     });
   });
+
+  // Card elastic stretch effect — cards stretch subtly in the swipe direction
+  const homeGrid = activeScreenEl.querySelector(".homeGrid");
+  if (homeGrid) {
+    const cards = [...homeGrid.querySelectorAll(".hCard")];
+    let hgStartX = 0, hgStartY = 0, hgDragged = false;
+
+    homeGrid.addEventListener("touchstart", (e) => {
+      if (e.touches.length !== 1) return;
+      hgStartX = e.touches[0].clientX;
+      hgStartY = e.touches[0].clientY;
+      hgDragged = false;
+      cards.forEach(c => { c.style.transition = "none"; });
+    }, { passive: true });
+
+    homeGrid.addEventListener("touchmove", (e) => {
+      if (e.touches.length !== 1) return;
+      const dx = e.touches[0].clientX - hgStartX;
+      const dy = e.touches[0].clientY - hgStartY;
+      // Mark as a drag once movement exceeds tap threshold
+      if (!hgDragged && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
+        hgDragged = true;
+        homeGrid.classList.add("is-dragging");
+      }
+      const MAX = 0.038;
+      const fy = Math.tanh(Math.abs(dy) / 110) * MAX;
+      const fx = Math.tanh(Math.abs(dx) / 160) * MAX * 0.55;
+      const originY = dy >= 0 ? "top" : "bottom";
+      const originX = dx >= 0 ? "left" : "right";
+      cards.forEach(c => {
+        c.style.transformOrigin = `${originX} ${originY}`;
+        c.style.transform = `scaleX(${1 + fx}) scaleY(${1 + fy})`;
+      });
+    }, { passive: true });
+
+    const snapBack = () => {
+      homeGrid.classList.remove("is-dragging");
+      // If a drag occurred, intercept the upcoming synthetic click so cards don't navigate
+      if (hgDragged) {
+        homeGrid.addEventListener("click", e => { e.stopPropagation(); e.preventDefault(); }, { once: true, capture: true });
+      }
+      cards.forEach(c => {
+        c.style.transition = "transform 0.5s cubic-bezier(.34,1.56,.64,1)";
+        c.style.transform = "";
+        c.addEventListener("transitionend", () => {
+          c.style.transition = "";
+          c.style.transformOrigin = "";
+        }, { once: true });
+      });
+    };
+    homeGrid.addEventListener("touchend", snapBack, { passive: true });
+    homeGrid.addEventListener("touchcancel", () => {
+      homeGrid.classList.remove("is-dragging");
+      cards.forEach(c => { c.style.transition = ""; c.style.transform = ""; c.style.transformOrigin = ""; });
+    }, { passive: true });
+  }
 }
 
 function renderCollab() {
@@ -3725,6 +3905,7 @@ function renderNextActions() {
       selectedSongId = el.getAttribute("data-open-song");
       setHeader("Song");
       render();
+      triggerForwardSlide();
     })
   );
 }
@@ -3763,9 +3944,15 @@ function isIOSDevice(){
 
 function coverSvg(song, { lite = false } = {}) {
   const forceLite = lite || isIOSDevice();
-  const key = `${song.id}|${song.title}|${song.project}|${song.genre}|${forceLite ? "lite" : "full"}`;
+  const key = `${song.id}|${song.title}|${song.project}|${song.genre}|${song.coverImageUrl || ""}|${forceLite ? "lite" : "full"}`;
 
   if (coverCache.has(key)) return coverCache.get(key);
+
+  if (song.coverImageUrl) {
+    const img = `<img src="${escapeHtml(song.coverImageUrl)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;display:block" loading="lazy" alt="">`;
+    coverCache.set(key, img);
+    return img;
+  }
 
   const seed = hashStr(`${song.id}|${song.title}|${song.project}|${song.genre}`);
   const r = makeRng(seed);
@@ -3955,6 +4142,7 @@ function renderSongsList() {
         selectedSongId = el.getAttribute("data-id");
         setHeader("Song");
         render();
+        triggerForwardSlide();
       });
     });
 
@@ -4054,6 +4242,9 @@ activeScreenEl.innerHTML = `
       <button class="songHeroDetails" id="songDetailsBtn">
         Details
       </button>
+      <button class="songHeroQueue" id="genArtBtn" title="Generate AI cover art">
+        ${song.coverImageUrl ? "🔄 Regen Art" : "✨ Gen Art"}
+      </button>
     </div>
   </div>
 
@@ -4115,6 +4306,29 @@ $("#songDetailsBtn")?.addEventListener("click", () => {
   render();
 });
 
+$("#genArtBtn")?.addEventListener("click", () => {
+  const btn = $("#genArtBtn");
+  if (btn) { btn.disabled = true; btn.textContent = "✨ Generating…"; }
+
+  const prompt = [
+    "album cover art",
+    song.genre ? `${song.genre} style` : null,
+    `for a song called "${song.title}"`,
+    song.project ? `by ${song.project}` : null,
+    "cinematic, dark moody aesthetic, no text, no words, square format"
+  ].filter(Boolean).join(", ");
+
+  const seed = Math.floor(Math.random() * 1_000_000);
+  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=512&height=512&nologo=true&model=flux&seed=${seed}`;
+
+  song.coverImageUrl = url;
+  song.updatedAt = nowStamp();
+  saveState();
+  toast("Generating art ✨ — takes ~20s to appear");
+  if (btn) { btn.disabled = false; }
+  render();
+});
+
 $("#addVersionJump")?.addEventListener("click", () => {
   // Always create a brand new version (even if versions already exist)
   const newV = createVersion(song);
@@ -4155,6 +4369,7 @@ $("#addVersionJump")?.addEventListener("click", () => {
     row.addEventListener("click", () => {
       selectedVersionId = row.getAttribute("data-vrow");
       render();
+      triggerForwardSlide();
     });
   });
 
@@ -4590,21 +4805,18 @@ function renderPlayer() {
     document.body.appendChild(sheet);
   }
 
-  // Header + chips + list
+  // Actions (above chips, Spotify-style) + chips + list
   activeScreenEl.innerHTML = `
-    <div class="playerHeader">
-      <div class="playerTitleRow">
-        <div>
-          <div class="small">Playlist</div>
-          <h2 class="playerTitle">Active Versions</h2>
-          <div class="playerCount">${items.length} song${items.length === 1 ? "" : "s"}</div>
-        </div>
-
-        <div class="playerActions">
-          <button class="playerShuffleBtn" id="playerShuffle" aria-label="Shuffle">⤮</button>
-          <button class="playerPlayBtn" id="playerPlayAll" aria-label="Play">▶</button>
-        </div>
-      </div>
+    <div class="playerActions">
+      <button class="playerShuffleBtn ${state.player?.shuffle ? "is-active" : ""}" id="playerShuffle" aria-label="Shuffle">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/>
+          <polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/>
+        </svg>
+      </button>
+      <button class="playerPlayBtn" id="playerPlayAll" aria-label="Play">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+      </button>
     </div>
 
     <div class="chipsRow" aria-label="Player filters">
@@ -4622,11 +4834,10 @@ function renderPlayer() {
         items.length
           ? items.map((it) => {
               const s = getSong(it.songId);
-              const v = s ? getVersion(s, it.versionId) : null;
 
               // Fallback if missing
               const title = it.songName || s?.title || "Untitled";
-              const meta = it.label || v?.label || "Version";
+              const meta = s?.project || "—";
               const fav = !!it.favorite;
 
               const cover = s ? coverSvg(s, { lite: true }) : "";
@@ -4654,6 +4865,7 @@ function renderPlayer() {
                 </div>
               `;
             }).join("")
+          + (items.length ? `<div style="text-align:center;padding:20px 0 8px;color:rgba(255,255,255,0.35);font-size:13px;">${items.length} song${items.length === 1 ? "" : "s"}</div>` : "")
           : `<div class="emptyState">No songs yet. Add songs from the Songs tab.</div>`
       }
     </div>
@@ -4673,26 +4885,28 @@ function renderPlayer() {
     });
   });
 
-  // Play all (in current filter/sort order)
+  // Play all — resets shuffle so songs play in order
   $("#playerPlayAll")?.addEventListener("click", async () => {
     if (!items.length) return toast("Playlist empty 😅");
     const all = items.map(x => ({ songId: x.songId, versionId: x.versionId }));
     state.player.nowPlaying = all[0];
     state.player.queue = all.slice(1);
-    state.player.repeatQueue = all; // stored so repeat can rebuild
+    state.player.repeatQueue = all;
+    state.player.shuffle = false;
     saveState();
     await playNowPlaying({ autoplay: true });
     toast("Playing ▶️");
     renderPlayer();
   });
 
-  // Shuffle
+  // Shuffle — also turns on shuffle mode in the full player
   $("#playerShuffle")?.addEventListener("click", async () => {
     if (!items.length) return toast("Playlist empty 😅");
     const all = shuffleArray(items).map(x => ({ songId: x.songId, versionId: x.versionId }));
     state.player.nowPlaying = all[0];
     state.player.queue = all.slice(1);
     state.player.repeatQueue = all;
+    state.player.shuffle = true;
     saveState();
     await playNowPlaying({ autoplay: true });
     toast("Shuffled ▶️");
@@ -4716,8 +4930,9 @@ function renderPlayer() {
         return;
       }
 
-      // Tap row = play immediately (Spotify-ish)
+      // Tap row = play immediately; reset shuffle since user picked a specific track
       state.player.nowPlaying = { songId, versionId };
+      state.player.shuffle = false;
       saveState();
       await playNowPlaying({ autoplay: true });
       toast("Playing ▶️");
@@ -4789,7 +5004,7 @@ function renderNowPlaying() {
         <button class="fpCtrl" id="npPrev" type="button" aria-label="Previous">⏮</button>
         <button class="fpCtrl fpPlay" id="npToggle" type="button" aria-label="Play / Pause">${globalAudio?.paused ? "▶" : "⏸"}</button>
         <button class="fpCtrl" id="npNext" type="button" aria-label="Next">⏭</button>
-        <button class="fpCtrl ${state.player?.repeat ? 'is-active' : ''}" type="button" aria-label="Repeat" id="npRepeat">🔁</button>
+        <button class="fpCtrl ${state.player?.repeat ? 'is-active' : ''}" type="button" aria-label="Repeat" id="npRepeat" style="position:relative">🔁${state.player?.repeat === "one" ? `<span class="r1b">1</span>` : ""}</button>
       </div>
 
       <nav class="fpBottomTabs" aria-label="Now playing tabs">
@@ -4940,9 +5155,20 @@ function renderNowPlaying() {
 });
 
 $("#npRepeat")?.addEventListener("click", () => {
-  state.player.repeat = !state.player.repeat;
+  const r = state.player.repeat;
+  state.player.repeat = r === false ? true : r === true ? "one" : false;
   saveState();
-  $("#npRepeat")?.classList.toggle("is-active", !!state.player.repeat);
+  const btn = $("#npRepeat");
+  if (btn) {
+    btn.classList.toggle("is-active", !!state.player.repeat);
+    btn.querySelector(".r1b")?.remove();
+    if (state.player.repeat === "one") {
+      const badge = document.createElement("span");
+      badge.className = "r1b";
+      badge.textContent = "1";
+      btn.appendChild(badge);
+    }
+  }
 });
 
   $("#npGoSong")?.addEventListener("click", () => {
