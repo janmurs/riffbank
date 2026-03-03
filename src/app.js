@@ -10,7 +10,7 @@
 window.onerror = (m, src, line, col) => alert(`JS ERROR:\n${m}\n${line}:${col}`);
 
 // Dev toggle: skip splash animation
- const DISABLE_SPLASH = false;
+ const DISABLE_SPLASH = true;
 
 // console.log("RIFFBANK APP.JS LOADED ✅", new Date().toISOString());
 // alert("RIFFBANK APP.JS LOADED ✅ " + new Date().toISOString());
@@ -108,6 +108,15 @@ const screens = {
   drawer: document.getElementById("screen-drawer"),
 };
 
+const backPeekEl = document.getElementById("back-peek");
+let backPeekHTML = "";
+
+// Navigation history stack — each entry is the HTML of a screen we navigated away from.
+// Used so swipe-back and forward-slide both show the correct "ace under the queen".
+let navHistoryStack = [];
+let swipeAceEl = null;   // fixed-position ace overlay (home snapshot) — z-index: 499
+let swipeQueenEl = null; // fixed-position queen overlay (songs snapshot) — z-index: 500
+
 let activeScreenName = "home";
 let activeScreenEl = screens.home || view;
 
@@ -125,25 +134,64 @@ function setActiveScreen(name) {
   });
 }
 
-// Slide the active screen AND topbar in from the right (call after render() for forward navigation)
+// Show the "ace" (previous screen) behind the view during a forward slide.
+function _showPeekBackdrop(html) {
+  if (!backPeekEl || !html) return;
+  backPeekEl.innerHTML = html;
+  backPeekEl.style.display = "block";
+}
+function _hidePeekBackdrop() {
+  if (!backPeekEl) return;
+  backPeekEl.style.display = "none";
+  backPeekEl.innerHTML = "";
+}
+
+// Slide the new screen in from the right (call after render() for forward navigation).
+// Uses an opaque overlay snapshot of the new screen so the ace (previous screen) shows
+// cleanly on the left without any see-through bleed from transparent .screen elements.
 function triggerForwardSlide() {
   const el = activeScreenEl;
   const topbar = document.querySelector(".topbar");
   if (!el) return;
-  const targets = [el, topbar].filter(Boolean);
-  targets.forEach(t => { t.style.transform = "translateX(100%)"; t.style.transition = "none"; });
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      targets.forEach(t => {
-        t.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
-        t.style.transform = "";
-        t.addEventListener("transitionend", () => {
-          t.style.transition = "";
-          t.style.transform = "";
-        }, { once: true });
-      });
-    });
-  });
+
+  // Push the "previous screen" HTML onto the nav stack for correct swipe-back content.
+  // Don't show it as back-peek during forward nav — keeps the slide clean (no home cards bleeding through).
+  if (backPeekHTML) navHistoryStack.push(backPeekHTML);
+
+  // Build an opaque snapshot overlay of the new screen and slide IT in.
+  // Capture outerHTML before hiding el so the snapshot is at full opacity.
+  const r = el.getBoundingClientRect();
+  const overlay = document.createElement("div");
+  overlay.className = "viewSlideOverlay";
+  overlay.style.top = `${r.top}px`;
+  overlay.style.left = `${r.left}px`;
+  overlay.style.width = `${r.width}px`;
+  overlay.style.height = `${r.height}px`;
+  overlay.innerHTML = el.outerHTML;
+  overlay.style.transform = "translateX(100%)";
+  overlay.style.transition = "none";
+  document.body.appendChild(overlay);
+
+  // Hide the actual screen so it doesn't flash through before the overlay animation starts.
+  el.style.opacity = "0";
+  if (topbar) { topbar.style.transform = "translateX(100%)"; topbar.style.transition = "none"; }
+
+  // Force a synchronous reflow to commit the initial translateX(100%) state.
+  // This avoids the 2-rAF delay that would show a flash of the body background.
+  // eslint-disable-next-line no-unused-expressions
+  overlay.offsetWidth;
+
+  overlay.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
+  overlay.style.transform = "";
+  if (topbar) {
+    topbar.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
+    topbar.style.transform = "";
+  }
+  overlay.addEventListener("transitionend", () => {
+    overlay.remove();
+    el.style.opacity = "";
+    if (topbar) { topbar.style.transition = ""; topbar.style.transform = ""; }
+  }, { once: true });
 }
 
 const headerTitle = $("#headerTitle");
@@ -1691,6 +1739,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
     const targetTab = btn.dataset.tab || "home";
     songsBackTarget = null;
+    navHistoryStack = [];
 
     // Normal navigation
     drawerView = null;
@@ -1781,33 +1830,78 @@ audioPickerEl?.addEventListener("change", async (e) => {
 });
 
 // ---------------------
-// iOS slide-back animation
+// iOS slide-back animation (back button)
 // ---------------------
 function slideBackTransition(renderUnderneath) {
-  const viewEl = $("#view");
-  if (!viewEl) return renderUnderneath();
+  if (!activeScreenEl) return renderUnderneath();
 
-  const r = viewEl.getBoundingClientRect();
-  const overlay = document.createElement("div");
-  overlay.className = "viewSlideOverlay";
-  overlay.style.top = `${r.top}px`;
-  overlay.style.left = `${r.left}px`;
-  overlay.style.width = `${r.width}px`;
-  overlay.style.height = `${r.height}px`;
+  // Pop nav stack — animated back button pops here (swipe pops in touchend).
+  if (navHistoryStack.length > 0) navHistoryStack.pop();
 
-  overlay.innerHTML = viewEl.innerHTML;
-  overlay.scrollTop = viewEl.scrollTop;
+  const el = activeScreenEl;
+  const tb = document.querySelector(".topbar");
 
-  document.body.appendChild(overlay);
+  // Capture exact pixel rects BEFORE renderUnderneath() mutates the layout
+  // (renderUnderneath() may toggle body.isHome which hides the topbar and resizes #view).
+  const tbRect = tb ? tb.getBoundingClientRect() : null;
+  const viewRect = el.getBoundingClientRect();
+
+  // Build a fixed, full-viewport queen overlay that exactly replicates what is
+  // currently on screen (topbar + active screen at their actual pixel positions).
+  // Using position:fixed means the queen is immune to any layout shifts caused by
+  // renderUnderneath() — it always covers the full viewport at z-index 500.
+  const queenEl = document.createElement("div");
+  queenEl.style.cssText = "position:fixed;inset:0;z-index:500;overflow:hidden;pointer-events:none;background:var(--bg);";
+
+  if (tbRect && tb) {
+    const tbClone = tb.cloneNode(true);
+    // Force display:flex so body.isHome .topbar { display:none } cannot hide the clone
+    // mid-transition (which would make the songs queen appear to shift up).
+    tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${tbRect.left}px;width:${tbRect.width}px;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
+    queenEl.appendChild(tbClone);
+  }
+
+  const screenWrap = document.createElement("div");
+  screenWrap.style.cssText = `position:absolute;top:${viewRect.top}px;left:${viewRect.left}px;width:${viewRect.width}px;height:${viewRect.height}px;overflow:hidden;`;
+  screenWrap.innerHTML = el.outerHTML;
+  const snap = screenWrap.querySelector(".screen");
+  if (snap && el) snap.scrollTop = el.scrollTop;
+  queenEl.appendChild(screenWrap);
+
+  document.body.appendChild(queenEl);
+
+  // Render destination NOW, beneath the opaque queen.
+  // If going to home this sets body.isHome, hides the topbar, and expands #view —
+  // all invisible under the queen so the ace is never seen to shift.
   renderUnderneath();
 
-  requestAnimationFrame(() => overlay.classList.add("out"));
-  overlay.addEventListener("transitionend", () => overlay.remove(), { once: true });
+  // Kill any homeWrap height transition for one rAF so the home screen is fully
+  // settled at its correct size before the queen animation starts. Without this,
+  // the homeWrap can briefly animate to its final height while the queen slides off,
+  // causing a visible "stretched → snap" glitch on the home screen.
+  const homeWrapEl = document.querySelector(".homeWrap");
+  if (homeWrapEl) homeWrapEl.style.transition = "none";
+
+  requestAnimationFrame(() => {
+    if (homeWrapEl) homeWrapEl.style.transition = "";
+    requestAnimationFrame(() => {
+      queenEl.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
+      queenEl.style.transform = "translateX(100%)";
+      queenEl.addEventListener("transitionend", () => queenEl.remove(), { once: true });
+    });
+  });
 }
 
 function goBack({ animate = false } = {}) {
   const doRender = () => {
     if (drawerOpen) { closeDrawer(); return; }
+
+    // For non-animated backs (swipe commit), pop was already handled in touchend.
+    // For animated backs (back button), slideBackTransition already popped.
+    // So here we just pop if this is a plain goBack({ animate: false }) call
+    // that did NOT come from a swipe (i.e., called directly without going through
+    // slideBackTransition). Guard: only pop if the stack still has entries.
+    if (!animate && navHistoryStack.length > 0) navHistoryStack.pop();
 
     if (overlayView) {
       overlayView = null;
@@ -1815,6 +1909,7 @@ function goBack({ animate = false } = {}) {
       drawerView = null;
       selectedSongId = null;
       songsView = "list";
+      navHistoryStack = [];
       setHeader("RiffBank");
       syncTabs();
       render();
@@ -1835,6 +1930,7 @@ function goBack({ animate = false } = {}) {
 
     if (drawerView) {
       drawerView = null;
+      navHistoryStack = [];
       setHeader(TAB_TITLES[currentTab] || "RiffBank");
       syncTabs();
       render();
@@ -1853,11 +1949,12 @@ function goBack({ animate = false } = {}) {
 
     if (selectedSongId) {
       selectedSongId = null;
-      selectedVersionId = null;  // ← ADD: always clear this too
+      selectedVersionId = null;
       currentTab = "songs";
       songsView = "list";
-      drawerView = null;          // ← ADD: clear any drawer bleed
-      overlayView = null;         // ← ADD: clear any overlay bleed
+      drawerView = null;
+      overlayView = null;
+      resetSongsFilters({ keepSort: true });
       setHeader("Songs");
       syncTabs();
       render();
@@ -1884,8 +1981,8 @@ function goBack({ animate = false } = {}) {
       songsBackTarget = null;
 
       overlayView = null;
-      drawerView = target;     // ✅ back to Projects screen
-      currentTab = "home";     // keep bottom nav unselected
+      drawerView = target;
+      currentTab = "home";
       setHeader(TAB_TITLES[currentTab] || "RiffBank");
       syncTabs();
       render();
@@ -1896,6 +1993,7 @@ function goBack({ animate = false } = {}) {
       currentTab = "home";
       songsView = "list";
       selectedSongId = null;
+      navHistoryStack = [];
       setHeader("RiffBank");
       syncTabs();
       render();
@@ -1930,6 +2028,59 @@ if (!drawerOpen && t.clientX <= 24) {
   touchMode = onHomeRoot ? "open" : "back";
   touchStartX = t.clientX;
   touchStartY = t.clientY;
+
+  // Pre-populate the peek layer so the previous screen is visible behind the swipe.
+  // Use navHistoryStack for accurate depth; fall back to backPeekHTML.
+  if (touchMode === "back") {
+    const peekContent = navHistoryStack.length > 0
+      ? navHistoryStack[navHistoryStack.length - 1]
+      : backPeekHTML;
+
+    // Compute the bottom boundary: stop at nav bar top so bottomNav stays visible.
+    const bnEl = document.getElementById("bottomNav");
+    const bnRect = bnEl?.getBoundingClientRect();
+    const navBottomOffset = bnRect ? `${window.innerHeight - bnRect.top}px` : "0px";
+
+    // Constrain ace to .app width so home cards don't stretch to full viewport width.
+    const appEl = document.querySelector(".app");
+    const appRect = appEl?.getBoundingClientRect();
+    const aceLeft = appRect ? appRect.left : 0;
+    const aceWidth = appRect ? appRect.width : window.innerWidth;
+
+    // ACE (z:499): home snapshot, constrained to app width, stops at nav top.
+    swipeAceEl = document.createElement("div");
+    swipeAceEl.style.cssText = `position:fixed;top:0;left:${aceLeft}px;width:${aceWidth}px;bottom:${navBottomOffset};z-index:499;overflow:hidden;pointer-events:none;background:var(--bg);`;
+    swipeAceEl.innerHTML = peekContent || "";
+    document.body.appendChild(swipeAceEl);
+
+    // QUEEN (z:500): pixel-perfect snapshot of the current songs screen.
+    // Solid dark background (gradient removed). Stops at nav bar top.
+    swipeQueenEl = document.createElement("div");
+    swipeQueenEl.style.cssText = `position:fixed;top:0;left:0;right:0;bottom:${navBottomOffset};z-index:500;overflow:hidden;pointer-events:none;background:var(--bg);`;
+
+    const swipeTb = document.querySelector(".topbar");
+    if (swipeTb) {
+      const tbRect = swipeTb.getBoundingClientRect();
+      const tbClone = swipeTb.cloneNode(true);
+      // Force display:flex so body.isHome .topbar { display:none } can't hide the clone.
+      tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${tbRect.left}px;width:${tbRect.width}px;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
+      swipeQueenEl.appendChild(tbClone);
+    }
+
+    if (activeScreenEl) {
+      const screenRect = activeScreenEl.getBoundingClientRect();
+      const screenWrap = document.createElement("div");
+      screenWrap.style.cssText = `position:absolute;top:${screenRect.top}px;left:${screenRect.left}px;width:${screenRect.width}px;height:${screenRect.height}px;overflow:hidden;`;
+      // Use outerHTML so the .screen wrapper (with its padding:10px) is included —
+      // otherwise the content appears 10px too high inside the swipe queen.
+      screenWrap.innerHTML = activeScreenEl.outerHTML;
+      const clonedScreen = screenWrap.firstElementChild;
+      if (clonedScreen) clonedScreen.scrollTop = activeScreenEl.scrollTop;
+      swipeQueenEl.appendChild(screenWrap);
+    }
+
+    document.body.appendChild(swipeQueenEl);
+  }
   return;
 }
 
@@ -1959,11 +2110,9 @@ document.addEventListener("touchmove", (e) => {
   }
 
   if (touchMode === "back") {
-    // Screen + topbar follow the finger in real-time; decision made on touchend
+    // Translate the queen overlay; the actual screen is never touched.
     const clamp = Math.max(0, dx);
-    const tb = document.querySelector(".topbar");
-    if (activeScreenEl) activeScreenEl.style.transform = `translateX(${clamp}px)`;
-    if (tb) tb.style.transform = `translateX(${clamp}px)`;
+    if (swipeQueenEl) swipeQueenEl.style.transform = `translateX(${clamp}px)`;
     return;
   }
 
@@ -1980,35 +2129,37 @@ document.addEventListener("touchend", (e) => {
 
   if (touchMode === "back") {
     const dx = t ? t.clientX - touchStartX : 0;
-    const el = activeScreenEl;
-    const tb = document.querySelector(".topbar");
     const threshold = window.innerWidth * 0.38;
 
+    const cleanupSwipe = () => {
+      if (swipeQueenEl) { swipeQueenEl.remove(); swipeQueenEl = null; }
+      if (swipeAceEl) { swipeAceEl.remove(); swipeAceEl = null; }
+    };
+
     if (dx >= threshold) {
-      // Commit: slide entire card (screen + topbar) off to the right then navigate
-      [el, tb].filter(Boolean).forEach(elem => {
-        elem.style.transition = "transform 0.25s ease-out";
-        elem.style.transform = `translateX(${window.innerWidth}px)`;
-      });
+      // Commit: slide queen off to the right, then navigate back.
+      if (swipeQueenEl) {
+        swipeQueenEl.style.transition = "transform 0.25s ease-out";
+        swipeQueenEl.style.transform = `translateX(${window.innerWidth}px)`;
+      }
       setTimeout(() => {
-        [el, tb].filter(Boolean).forEach(elem => {
-          elem.style.transition = "";
-          elem.style.transform = "";
-        });
+        // Render home while queen is off-screen (translateX = 100vw, invisible).
         goBack({ animate: false });
+        // Wait 2 rAFs for body.isHome class + layout to fully settle before
+        // removing the ace, so there's no flash of an intermediate home state.
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            cleanupSwipe();
+          });
+        });
       }, 250);
     } else {
-      // Cancel: snap entire card back
-      [el, tb].filter(Boolean).forEach(elem => {
-        elem.style.transition = "transform 0.22s ease-out";
-        elem.style.transform = "translateX(0)";
-      });
-      setTimeout(() => {
-        [el, tb].filter(Boolean).forEach(elem => {
-          elem.style.transition = "";
-          elem.style.transform = "";
-        });
-      }, 220);
+      // Cancel: snap queen back to its original position.
+      if (swipeQueenEl) {
+        swipeQueenEl.style.transition = "transform 0.22s ease-out";
+        swipeQueenEl.style.transform = "translateX(0)";
+      }
+      setTimeout(cleanupSwipe, 220);
     }
     touchTracking = false;
     touchMode = null;
@@ -2133,33 +2284,19 @@ miniPlayerEl?.addEventListener(
     delete miniPlayerEl.dataset.dragDy;
     delete miniPlayerEl.dataset.didDrag;
 
-    const CLOSE_PX = 90;
-
-    // snap back always
-    miniPlayerEl.style.transition = "transform 160ms ease";
-    miniPlayerEl.style.transform = "translateX(-50%) translateY(0px)";
+    // Dismiss when the bottom of the mini player reaches the top of the nav icons
+    // (~8px into the nav bar) — effectively any intentional downward drag triggers this.
+    const CLOSE_PX = 12;
 
     if (didDrag && dy > CLOSE_PX) {
-      // ✅ HARD STOP audio (iOS needs src cleared sometimes)
-    if (dy > 80) {
-      stopAndResetPlayback();     // ✅ the full reset you already wrote
-      // syncMiniPlayerUI handles visibility
+      // Dismiss: stop audio and hide, no snap-back animation needed.
+      stopAndResetPlayback();
       return;
     }
 
-      // ✅ Reset state to "fresh launch"
-      state.player.nowPlaying = null;
-      state.player.queue = [];
-      hasPlayedThisSession = false;
-
-      // ✅ Close fullscreen if it was open (now safe)
-      try { closeNowPlaying(); } catch {}
-
-      saveState();
-      syncMiniPlayerUI();
-      scheduleDockSpaceSync?.();
-      render();
-    }
+    // Snap back to resting position (drag was too short to dismiss).
+    miniPlayerEl.style.transition = "transform 160ms ease";
+    miniPlayerEl.style.transform = "translateX(-50%) translateY(0px)";
   },
   { passive: true }
 );
@@ -2780,6 +2917,9 @@ $("#importFile")?.addEventListener("change", async (e) => {
 // Render router
 // ---------------------
 function render() {
+  // Snapshot current screen content so back-swipe peek can show it behind the next screen
+  if (activeScreenEl?.innerHTML) backPeekHTML = activeScreenEl.innerHTML;
+
   if (!view) return;
 
   syncTabs();
@@ -3436,6 +3576,7 @@ function resetSongsFilters({ keepSort = true } = {}) {
 // ---------------------
 // Home
 // ---------------------
+
 function renderHome() {
   overlayView = null;
   currentTab = "home";
@@ -3504,7 +3645,7 @@ function renderHome() {
 
           <!-- Lyrics — full width -->
           <button class="hCard hLyrics hWide" data-home="lyrics" aria-label="Lyrics">
-            <div class="hArt"><img src="./lyrics-card.png" style="width:100%;height:100%;object-fit:cover;display:block;"></div>
+            <div class="hArt"><img src="./lyrics-card.png" style="width:100%;height:100%;object-fit:cover;transform:scale(1.1);display:block;"></div>
             <div class="hGrad"></div>
             <div class="hBody">
               <div class="hLabel">Lyrics</div>
@@ -3513,7 +3654,7 @@ function renderHome() {
 
           <!-- Actions — full width -->
           <button class="hCard hNext hWide" data-home="next" aria-label="Actions">
-            <div class="hArt"><img src="./actions-card.png" style="width:100%;height:100%;object-fit:cover;display:block;"></div>
+            <div class="hArt"><img src="./actions-card.png" style="width:100%;height:100%;object-fit:cover;transform:scale(1.1);display:block;"></div>
             <div class="hGrad"></div>
             <div class="hBody">
               <div class="hLabel">Actions</div>
@@ -3555,8 +3696,8 @@ function renderHome() {
         triggerForwardSlide();
         return;
       }
-      if (target === "projects") return setDrawerView("projects");
-      if (target === "releases") return setDrawerView("releases");
+      if (target === "projects") { setDrawerView("projects"); triggerForwardSlide(); return; }
+      if (target === "releases") { setDrawerView("releases"); triggerForwardSlide(); return; }
       if (target === "lyrics") return renderLyricsScratch();
       if (target === "next") return renderNextActions();
     });

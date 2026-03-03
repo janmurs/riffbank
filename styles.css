@@ -157,19 +157,7 @@ body.isHome .topbar{ display: none; }
    All child elements (topbar, view, screens) are transparent and let
    this body gradient show through naturally.
    ──────────────────────────────────────────────────────────────── */
-body.isHome,
-body.hasHeaderGrad {
-  background-image: linear-gradient(
-    180deg,
-    #c94428  0%,
-    #8b1954 22%,
-    #3d0a4e 50%,
-    rgba(11,11,15,0) 82%
-  );
-  background-size: 100% 420px;
-  background-repeat: no-repeat;
-  background-position: top center;
-}
+/* Gradient removed — body stays solid var(--bg) on all screens */
 
 /* Player: last song never buried under mini-player / bottom nav */
 #screen-player.is-active {
@@ -348,7 +336,7 @@ textarea{ min-height:100px; resize:vertical; }
   display: flex;
   align-items: flex-start;
   justify-content: space-around;
-  z-index: 40;
+  z-index: 550; /* above transition overlays (z:500) so nav is always visible */
 }
 
 .navBtn{
@@ -404,7 +392,7 @@ textarea{ min-height:100px; resize:vertical; }
   bottom: var(--nav-h, calc(var(--tabbar-h) + env(safe-area-inset-bottom)));
 
   width: min(var(--app-maxw), 100vw);
-  z-index: 50;
+  z-index: 560;
 
   display: flex;
   flex-direction: column;
@@ -572,7 +560,7 @@ textarea{ min-height:100px; resize:vertical; }
   opacity: 0;
   pointer-events: none;
   transition: opacity .2s ease;
-  z-index: 50;
+  z-index: 570;
 }
 
 .drawer{
@@ -587,7 +575,7 @@ textarea{ min-height:100px; resize:vertical; }
   border-right: 1px solid rgba(255,255,255,.10);
   transform: translateX(-105%);
   transition: transform .22s ease;
-  z-index: 51;
+  z-index: 571;
   padding: env(safe-area-inset-top) 14px 14px;
   display:flex;
   flex-direction:column;
@@ -650,7 +638,7 @@ textarea{ min-height:100px; resize:vertical; }
   opacity: 0;
   pointer-events: none;
   transition: opacity .18s ease;
-  z-index: 80;
+  z-index: 580;
 }
 
 .sheet{
@@ -658,7 +646,7 @@ textarea{ min-height:100px; resize:vertical; }
   left: 50%;
   transform: translateX(-50%) translateY(110%);
   bottom: 0;
-  z-index: 81;
+  z-index: 581;
 
   width: min(var(--app-maxw), 100vw);
   background: #121212;
@@ -859,22 +847,9 @@ textarea{ min-height:100px; resize:vertical; }
   border: none;
   padding: 0;
   min-height: 0;
-  transition: transform 0.12s ease, filter 0.12s ease;
   -webkit-tap-highlight-color: transparent;
 }
 
-.hCard:active{
-  transform: scale(0.955);
-  filter: brightness(0.82);
-}
-
-/* During drag gesture, suppress all active feedback (JS handles the transform) */
-.homeGrid.is-dragging .hCard:active{
-  filter: none;
-}
-.homeGrid.is-dragging .hCard:active .hArt img{
-  transform: none !important;
-}
 
 /* Full-bleed neon art background */
 .hArt{
@@ -962,31 +937,46 @@ textarea{ min-height:100px; resize:vertical; }
   100%     { transform: translateX(350%)  skewX(-10deg); }
 }
 
-.hCard::before {
-  content: '';
-  position: absolute;
-  top: 0; bottom: 0; left: 0;
-  width: 40%;
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,.07), transparent);
+/* Soft shimmer (no sonar beam) */
+.hGrad::before{
+  content:'';
+  position:absolute;
+  inset:0;
   z-index: 3;
+  pointer-events:none;
+
+  /* subtle highlight near the top only */
+  background: radial-gradient(220px 120px at 20% 20%,
+    rgba(255,255,255,.10),
+    rgba(255,255,255,0) 70%);
+  opacity: .35;
+  animation: softPulse 5.5s ease-in-out infinite;
+}
+
+@keyframes softPulse{
+  0%,100% { transform: translateX(0); opacity:.18; }
+  50%     { transform: translateX(10%); opacity:.35; }
+}
+
+/* Keep your stagger timing, but target the card -> hGrad */
+.hSongs .hGrad::before    { animation-delay:  0s;    }
+.hProjects .hGrad::before { animation-delay: -2.1s;  }
+.hPlayer .hGrad::before   { animation-delay: -4.5s;  }
+.hLyrics .hGrad::before   { animation-delay: -1.4s;  }
+.hNext .hGrad::before     { animation-delay: -5.6s;  }
+
+/* =========================
+   Back-peek layer (swipe-back preview)
+   ========================= */
+#back-peek {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
   pointer-events: none;
-  animation: shimmerSweep 7s ease-in-out infinite;
+  display: none;
+  padding: 0;
 }
 
-.hSongs::before    { animation-delay:  0s;    }
-.hProjects::before { animation-delay: -2.1s;  }
-.hPlayer::before   { animation-delay: -4.5s;  }
-.hLyrics::before   { animation-delay: -1.4s;  }
-.hNext::before     { animation-delay: -5.6s;  }
-
-/* 3. Parallax on tap — image lingers behind the card's scale-down */
-.hArt img {
-  transition: transform 0.45s cubic-bezier(.2,.9,.2,1);
-}
-
-.hCard:active .hArt img {
-  transform: scale(1.06) translateY(6px);
-}
 
 /* =========================
    Global Search overlay
@@ -1474,6 +1464,56 @@ body.splashing #toast {
 .splashSubText{
   position: relative;
   display: inline-block;
+}
+
+/* =========================================================
+   🐹 Neon Border Runner (ACTUALLY iOS-safe)
+   - ::after = rainbow ring ONLY (center cut out with mask)
+   - ::before = bright “hamster” that runs the perimeter (no offset-path)
+   ========================================================= */
+
+.hCard{
+  position: relative;
+  border-radius: 22px;
+  overflow: hidden;        /* keeps glow clean */
+  isolation: isolate;
+}
+
+/* ✅ Rainbow ring (does NOT flood-fill the card) */
+.hCard::after{
+  content:"";
+  position:absolute;
+  inset: 0;
+  border-radius: 22px;
+  pointer-events:none;
+  z-index: 4;
+
+  padding: 2px; /* ring thickness */
+  background: conic-gradient(
+    from 0deg,
+    #ff2bd6,
+    #7c4dff,
+    #2b7bff,
+    #00e5ff,
+    #00ff8a,
+    #ffe600,
+    #ff7a00,
+    #ff2bd6
+  );
+
+  /* CUT OUT the center so it becomes a border ring */
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+
+  opacity: .75;
+  filter:
+    drop-shadow(0 0 8px rgba(255,255,255,.10))
+    drop-shadow(0 0 18px rgba(120,90,255,.22))
+    drop-shadow(0 0 22px rgba(0,229,255,.16));
+  mix-blend-mode: screen;
 }
 
 .splashSubText.pulse{
@@ -2209,9 +2249,8 @@ body::before{
     var(--bg);
 }
 
-/* If you have a "screen" / "page" container that was using its own background,
-   make sure it stays transparent so the global background shows through. */
-.screen, .page, .panel, .content {
+/* Keep inner content containers transparent so the screen background shows through. */
+.page, .panel, .content {
   background: transparent;
 }
 
