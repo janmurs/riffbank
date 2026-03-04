@@ -10,7 +10,7 @@
 window.onerror = (m, src, line, col) => alert(`JS ERROR:\n${m}\n${line}:${col}`);
 
 // Dev toggle: skip splash animation
- const DISABLE_SPLASH = false;
+ const DISABLE_SPLASH = true;
 
 // console.log("RIFFBANK APP.JS LOADED ✅", new Date().toISOString());
 // alert("RIFFBANK APP.JS LOADED ✅ " + new Date().toISOString());
@@ -114,6 +114,12 @@ let backPeekHTML = "";
 // Navigation history stack — each entry is the HTML of a screen we navigated away from.
 // Used so swipe-back and forward-slide both show the correct "ace under the queen".
 let navHistoryStack = [];
+let navHistoryTopbarStack = []; // topbar HTML for each navHistoryStack entry (for ace topbar in swipe-back)
+let navScrollStack = [];  // scrollTop of each screen pushed to navHistoryStack
+let prevAceViewTop = 0;   // top of the previous screen when backPeekHTML was captured
+let prevAceScrollTop = 0; // scrollTop of the previous screen when backPeekHTML was captured
+let prevTopbarHTML = "";  // outerHTML of topbar at render() snapshot time (before setHeader changes it)
+let prevTopbarRect = null; // bounding rect of topbar at snapshot time
 let swipeAceEl = null;   // fixed-position ace overlay (home snapshot) — z-index: 499
 let swipeQueenEl = null; // fixed-position queen overlay (songs snapshot) — z-index: 500
 
@@ -154,8 +160,11 @@ function triggerForwardSlide() {
   const topbar = document.querySelector(".topbar");
   if (!el) return;
 
-  // Push the "previous screen" HTML onto the nav stack for correct swipe-back content.
+  // Push the "previous screen" HTML (and its topbar snapshot) onto the nav stacks
+  // so swipe-back can restore both the correct content and topbar title.
   if (backPeekHTML) navHistoryStack.push(backPeekHTML);
+  navHistoryTopbarStack.push(prevTopbarHTML);
+  navScrollStack.push(prevAceScrollTop);
 
   // Shared measurements.
   const bnEl = document.getElementById("bottomNav");
@@ -163,9 +172,9 @@ function triggerForwardSlide() {
   const navBottomOffset = bnRect ? `${window.innerHeight - bnRect.top}px` : "0px";
   const r = el.getBoundingClientRect();
 
-  // Build ace overlay (previous screen) — sits behind the queen so it's visible
-  // on the left while the queen slides in. top:0 so home content (rendered with
-  // topbar hidden, view at y=0) stays locked at its natural position.
+  // Build ace overlay (previous screen) — spans top:0 so it covers the full area
+  // including the topbar region. Contains a frozen topbar clone (prevTopbarHTML) showing
+  // the previous title, plus the screen content below it (prevAceViewTop).
   let aceOverlay = null;
   if (backPeekHTML) {
     const viewEl = document.getElementById("view");
@@ -174,7 +183,29 @@ function triggerForwardSlide() {
     const aceWidth = viewRect ? viewRect.width : r.width;
     aceOverlay = document.createElement("div");
     aceOverlay.style.cssText = `position:fixed;top:0;left:${aceLeft}px;width:${aceWidth}px;bottom:${navBottomOffset};z-index:499;overflow:hidden;pointer-events:none;background:var(--bg);`;
-    aceOverlay.innerHTML = backPeekHTML;
+    // Topbar clone — frozen at previous-screen state (correct title, back-button visibility)
+    if (prevTopbarHTML && prevTopbarRect) {
+      const tbWrap = document.createElement("div");
+      tbWrap.innerHTML = prevTopbarHTML;
+      const tbEl = tbWrap.firstElementChild;
+      if (tbEl) {
+        tbEl.style.cssText = `display:flex;position:absolute;top:${prevTopbarRect.top}px;left:0;width:100%;height:${prevTopbarRect.height}px;overflow:hidden;pointer-events:none;box-sizing:border-box;`;
+        aceOverlay.appendChild(tbEl);
+      }
+    }
+    // Screen content below the topbar.
+    // prevTopbarHTML is empty for home (no visible topbar), so use it to detect home.
+    // Non-home .screen elements have CSS padding:10px 0 12px that backPeekHTML (innerHTML)
+    // doesn't include — replicate it here so content position matches the original exactly.
+    const aceHasTopbar = !!(prevTopbarHTML && prevTopbarRect);
+    const aceContent = document.createElement("div");
+    aceContent.style.cssText = `position:absolute;top:${prevAceViewTop}px;left:0;width:100%;bottom:0;overflow:hidden;${aceHasTopbar ? "padding:10px 0 12px;box-sizing:border-box;" : ""}`;
+    if (prevAceScrollTop > 0) {
+      aceContent.innerHTML = `<div style="margin-top:-${prevAceScrollTop}px">${backPeekHTML}</div>`;
+    } else {
+      aceContent.innerHTML = backPeekHTML;
+    }
+    aceOverlay.appendChild(aceContent);
     document.body.appendChild(aceOverlay);
   }
 
@@ -1535,6 +1566,7 @@ const TAB_TITLES = {
 let currentTab = "home";
 let selectedSongId = null;
 let songsView = "list";
+let songsListScrollTop = 0; // scroll position saved when navigating into a song
 let pendingScrollToUpload = false;
 let selectedVersionId = null; // ✅ new: when you tap a specific version row
 let playerScreen = "list"; // "list" | "now"
@@ -1806,12 +1838,15 @@ document.querySelectorAll(".tab").forEach((btn) => {
     const targetTab = btn.dataset.tab || "home";
     songsBackTarget = null;
     navHistoryStack = [];
+    navHistoryTopbarStack = [];
+    navScrollStack = [];
 
     // Normal navigation
     drawerView = null;
     overlayView = null;
     selectedSongId = null;
     songsView = "list";
+    songsListScrollTop = 0;
 
     currentTab = targetTab;
     if (targetTab === "player") {
@@ -1903,6 +1938,8 @@ function slideBackTransition(renderUnderneath) {
 
   // Pop nav stack — animated back button pops here (swipe pops in touchend).
   if (navHistoryStack.length > 0) navHistoryStack.pop();
+  if (navHistoryTopbarStack.length > 0) navHistoryTopbarStack.pop();
+  if (navScrollStack.length > 0) navScrollStack.pop();
 
   const el = activeScreenEl;
   const tb = document.querySelector(".topbar");
@@ -1968,6 +2005,8 @@ function goBack({ animate = false } = {}) {
     // that did NOT come from a swipe (i.e., called directly without going through
     // slideBackTransition). Guard: only pop if the stack still has entries.
     if (!animate && navHistoryStack.length > 0) navHistoryStack.pop();
+    if (!animate && navHistoryTopbarStack.length > 0) navHistoryTopbarStack.pop();
+    if (!animate && navScrollStack.length > 0) navScrollStack.pop();
 
     if (overlayView) {
       overlayView = null;
@@ -1976,6 +2015,8 @@ function goBack({ animate = false } = {}) {
       selectedSongId = null;
       songsView = "list";
       navHistoryStack = [];
+      navHistoryTopbarStack = [];
+      navScrollStack = [];
       setHeader("RiffBank");
       syncTabs();
       render();
@@ -1997,6 +2038,8 @@ function goBack({ animate = false } = {}) {
     if (drawerView) {
       drawerView = null;
       navHistoryStack = [];
+      navHistoryTopbarStack = [];
+      navScrollStack = [];
       setHeader(TAB_TITLES[currentTab] || "RiffBank");
       syncTabs();
       render();
@@ -2060,6 +2103,8 @@ function goBack({ animate = false } = {}) {
       songsView = "list";
       selectedSongId = null;
       navHistoryStack = [];
+      navHistoryTopbarStack = [];
+      navScrollStack = [];
       setHeader("RiffBank");
       syncTabs();
       render();
@@ -2114,10 +2159,38 @@ if (!drawerOpen && t.clientX <= 24) {
     const aceLeft = viewRect ? viewRect.left : 0;
     const aceWidth = viewRect ? viewRect.width : window.innerWidth;
 
-    // ACE (z:499): home snapshot, constrained to app width, stops at nav top.
+    // ACE (z:499): previous screen snapshot, spans top:0 so it covers the topbar region too.
+    // Contains a frozen topbar clone (from navHistoryTopbarStack) + screen content below it.
+    const peekTopbarHTML = navHistoryTopbarStack.length > 0
+      ? navHistoryTopbarStack[navHistoryTopbarStack.length - 1]
+      : prevTopbarHTML;
+    const isHomeAce = peekContent && peekContent.includes("homeWrap");
+    const swipeAceContentTop = isHomeAce ? 0 : (viewRect ? viewRect.top : 0);
     swipeAceEl = document.createElement("div");
     swipeAceEl.style.cssText = `position:fixed;top:0;left:${aceLeft}px;width:${aceWidth}px;bottom:${navBottomOffset};z-index:499;overflow:hidden;pointer-events:none;background:var(--bg);`;
-    swipeAceEl.innerHTML = peekContent || "";
+    // Topbar clone for the ace (frozen previous-screen state)
+    if (peekTopbarHTML) {
+      const swipeTbCur = document.querySelector(".topbar");
+      const swipeTbRect = swipeTbCur?.getBoundingClientRect();
+      if (swipeTbRect && swipeTbRect.height > 0) {
+        const tbWrap = document.createElement("div");
+        tbWrap.innerHTML = peekTopbarHTML;
+        const tbEl = tbWrap.firstElementChild;
+        if (tbEl) {
+          tbEl.style.cssText = `display:flex;position:absolute;top:${swipeTbRect.top}px;left:0;width:100%;height:${swipeTbRect.height}px;overflow:hidden;pointer-events:none;box-sizing:border-box;`;
+          swipeAceEl.appendChild(tbEl);
+        }
+      }
+    }
+    // Screen content below topbar.
+    // Non-home .screen elements have CSS padding:10px 0 12px that innerHTML doesn't include.
+    const swipeAceContent = document.createElement("div");
+    swipeAceContent.style.cssText = `position:absolute;top:${swipeAceContentTop}px;left:0;width:100%;bottom:0;overflow:hidden;${isHomeAce ? "" : "padding:10px 0 12px;box-sizing:border-box;"}`;
+    const swipeAceScrollTop = navScrollStack.length > 0 ? navScrollStack[navScrollStack.length - 1] : prevAceScrollTop;
+    swipeAceContent.innerHTML = swipeAceScrollTop > 0
+      ? `<div style="margin-top:-${swipeAceScrollTop}px">${peekContent || ""}</div>`
+      : (peekContent || "");
+    swipeAceEl.appendChild(swipeAceContent);
     document.body.appendChild(swipeAceEl);
 
     // QUEEN (z:500): pixel-perfect snapshot of the current songs screen.
@@ -2134,6 +2207,8 @@ if (!drawerOpen && t.clientX <= 24) {
       swipeQueenEl.appendChild(tbClone);
     }
 
+    let clonedScreen = null;
+    const savedScrollTop = activeScreenEl ? activeScreenEl.scrollTop : 0;
     if (activeScreenEl) {
       const screenRect = activeScreenEl.getBoundingClientRect();
       const screenWrap = document.createElement("div");
@@ -2142,12 +2217,12 @@ if (!drawerOpen && t.clientX <= 24) {
       // otherwise the content appears 10px too high inside the swipe queen.
       screenWrap.innerHTML = activeScreenEl.outerHTML;
       swipeQueenEl.appendChild(screenWrap);
-      // Set scrollTop AFTER DOM attachment so the browser honours the value
-      const clonedScreen = screenWrap.firstElementChild;
-      if (clonedScreen) clonedScreen.scrollTop = activeScreenEl.scrollTop;
+      clonedScreen = screenWrap.firstElementChild;
     }
 
     document.body.appendChild(swipeQueenEl);
+    // Set scrollTop AFTER DOM attachment — browsers ignore scrollTop on detached elements.
+    if (clonedScreen) clonedScreen.scrollTop = savedScrollTop;
   }
   return;
 }
@@ -3059,7 +3134,18 @@ $("#importFile")?.addEventListener("change", async (e) => {
 // ---------------------
 function render() {
   // Snapshot current screen content so back-swipe peek can show it behind the next screen
-  if (activeScreenEl?.innerHTML) backPeekHTML = activeScreenEl.innerHTML;
+  if (activeScreenEl?.innerHTML) {
+    backPeekHTML = activeScreenEl.innerHTML;
+    prevAceViewTop = activeScreenEl.getBoundingClientRect().top || 0;
+    prevAceScrollTop = activeScreenEl.scrollTop || 0;
+    // Capture topbar state BEFORE setHeader/syncBackButton change it, so the ace overlay
+    // can show the correct previous-screen title and back-button state during the slide.
+    const _tb = document.querySelector(".topbar");
+    const _tbRect = _tb?.getBoundingClientRect();
+    const _tbVisible = _tbRect && _tbRect.height > 0;
+    prevTopbarHTML = _tbVisible ? (_tb?.outerHTML || "") : "";
+    prevTopbarRect = _tbVisible ? { top: _tbRect.top, height: _tbRect.height } : null;
+  }
 
   if (!view) return;
 
@@ -3400,7 +3486,6 @@ function renderProjectSongs(projectName) {
       songsView = "detail";
       selectedSongId = sid;
       selectedVersionId = null;
-      setHeader("Song");
       render();
       triggerForwardSlide();
     });
@@ -3561,7 +3646,6 @@ function renderReleaseDetail(releaseId) {
       songsView = "detail";
       selectedSongId = row.getAttribute("data-open-song");
       selectedVersionId = null;
-      setHeader("Song");
       render();
       triggerForwardSlide();
     });
@@ -3727,8 +3811,7 @@ function renderHome() {
     <div class="homeWrap">
       <div class="homeTopbar">
         <div class="homeTopbarLeft">
-          <span class="rbLogoClip"><img src="./icon-1024.png" class="rbLogo" alt="RiffBank"></span>
-          <span class="rbBrand">RiffBank</span>
+          <span class="homeTopTitle">Build your sound</span>
         </div>
         <div class="homeTopbarRight">
           <button class="htbBtn" id="htbNotif" aria-label="Notifications">
@@ -3753,8 +3836,6 @@ function renderHome() {
       </div>
 
       <div class="homeScene">
-        <h1 class="homeGreet">Build your sound</h1>
-
         <div class="homeGrid">
 
           <!-- Songs — tall left card, spans 2 rows -->
@@ -3786,7 +3867,7 @@ function renderHome() {
 
           <!-- Lyrics — full width -->
           <button class="hCard hLyrics hWide" data-home="lyrics" aria-label="Lyrics">
-            <div class="hArt"><img src="./lyrics-card.png" style="width:100%;height:100%;object-fit:cover;transform:scale(1.1);display:block;"></div>
+            <div class="hArt"><img src="./lyrics-card.png" style="width:100%;height:150%;object-fit:cover;transform:scale(1.1);display:block;"></div>
             <div class="hGrad"></div>
             <div class="hBody">
               <div class="hLabel">Lyrics</div>
@@ -4421,8 +4502,8 @@ function renderSongsList() {
 
     listEl.querySelectorAll("[data-id]").forEach((el) => {
       el.addEventListener("click", () => {
+        songsListScrollTop = activeScreenEl.scrollTop;
         selectedSongId = el.getAttribute("data-id");
-        setHeader("Song");
         render();
         triggerForwardSlide();
       });
@@ -4442,6 +4523,10 @@ function renderSongsList() {
   $("#openSongFilters")?.addEventListener("click", openSongFilters);
 
   applyFilter();
+  // Restore scroll position when returning from a song detail view
+  if (songsListScrollTop > 0) {
+    activeScreenEl.scrollTop = songsListScrollTop;
+  }
 }
 
 function renderSongCreate() {

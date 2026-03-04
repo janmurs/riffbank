@@ -179,13 +179,22 @@ body.isHome .topbar{ display: none; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: calc(env(safe-area-inset-top) + 10px) 16px 0;
+  padding: calc(env(safe-area-inset-top) + 10px) 16px 16px;
 }
 
 .homeTopbarLeft{
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: 1;
+}
+
+.homeTopTitle{
+  font-size: 22px;
+  font-weight: 800;
+  color: rgba(255,255,255,0.94);
+  letter-spacing: -0.4px;
+  line-height: 1.1;
 }
 
 .rbLogoClip{
@@ -840,9 +849,9 @@ textarea{ min-height:100px; resize:vertical; }
 .homeScene{
   min-height: 0;
   overflow: hidden;
-  padding: 0px 0 0;
+  padding: 0;
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: 1fr;
   box-sizing: border-box;
 }
 
@@ -881,7 +890,7 @@ textarea{ min-height:100px; resize:vertical; }
   justify-content: flex-start;
   text-align: left;
   cursor: pointer;
-  border: 1.5px solid rgba(255,255,255,0.07);
+  border: 0.7px solid transparent;
   padding: 0;
   min-height: 0;
   -webkit-tap-highlight-color: transparent;
@@ -968,11 +977,11 @@ textarea{ min-height:100px; resize:vertical; }
   100% { background-position: 0% 50%; }
 }
 
-.hSongs    { background: linear-gradient(135deg, #3b1475, #5b21b6, #9d1a5c, #5b21b6, #3b1475); background-size: 300% 300%; animation: gradDrift 22s ease infinite; }
-.hProjects { background: linear-gradient(135deg, #6b2209, #9a3412, #7d3a08, #9a3412, #6b2209); background-size: 300% 300%; animation: gradDrift 26s ease infinite; }
-.hPlayer   { background: linear-gradient(135deg, #0d3d4f, #0e5e70, #152f6e, #0e5e70, #0d3d4f); background-size: 300% 300%; animation: gradDrift 28s ease infinite; }
-.hLyrics   { background: linear-gradient(135deg, #12256b, #1e3a8a, #3b1475, #1e3a8a, #12256b); background-size: 300% 300%; animation: gradDrift 24s ease infinite; }
-.hNext     { background: linear-gradient(135deg, #560f30, #7b1038, #31115e, #7b1038, #560f30); background-size: 300% 300%; animation: gradDrift 20s ease infinite; }
+.hSongs    { background: linear-gradient(135deg, #3b1475, #5b21b6, #9d1a5c, #5b21b6, #3b1475); background-size: 300% 300%; animation: gradDrift 22s ease infinite; border-color: #ec4899; }
+.hProjects { background: linear-gradient(135deg, #6b2209, #9a3412, #7d3a08, #9a3412, #6b2209); background-size: 300% 300%; animation: gradDrift 26s ease infinite; border-color: #a855f7; }
+.hPlayer   { background: linear-gradient(135deg, #0d3d4f, #0e5e70, #152f6e, #0e5e70, #0d3d4f); background-size: 300% 300%; animation: gradDrift 28s ease infinite; border-color: #22d3ee; }
+.hLyrics   { background: linear-gradient(135deg, #12256b, #1e3a8a, #3b1475, #1e3a8a, #12256b); background-size: 300% 300%; animation: gradDrift 24s ease infinite; border-color: #eab308; }
+.hNext     { background: linear-gradient(135deg, #560f30, #7b1038, #31115e, #7b1038, #560f30); background-size: 300% 300%; animation: gradDrift 20s ease infinite; border-color: #f97316; }
 
 /* 2. Shimmer sweep — once per ~7s, staggered so cards don't fire together */
 @keyframes shimmerSweep {
@@ -1507,42 +1516,7 @@ body.splashing #toast {
   isolation: isolate;
 }
 
-/* ✅ Rainbow ring (does NOT flood-fill the card) */
-.hCard::after{
-  content:"";
-  position:absolute;
-  inset: 0;
-  border-radius: 22px;
-  pointer-events:none;
-  z-index: 4;
-
-  padding: 2px; /* ring thickness */
-  background: conic-gradient(
-    from 0deg,
-    #ff2bd6,
-    #7c4dff,
-    #2b7bff,
-    #00e5ff,
-    #00ff8a,
-    #ffe600,
-    #ff7a00,
-    #ff2bd6
-  );
-
-  /* CUT OUT the center so it becomes a border ring */
-  -webkit-mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-
-  opacity: .75;
-  filter:
-    drop-shadow(0 0 8px rgba(255,255,255,.10))
-    drop-shadow(0 0 18px rgba(120,90,255,.22))
-    drop-shadow(0 0 22px rgba(0,229,255,.16));
-  mix-blend-mode: screen;
-}
+/* Rainbow ring removed — each card now has its own solid accent border */
 
 .splashSubText.pulse{
   color: rgba(255,255,255,.82);
@@ -2399,7 +2373,7 @@ body.fullplayer-open #bottomDock{
 
 /* Fullscreen Now Playing (YouTube Music-ish) */
 .fp {
-  position: absolute;  /* NOT fixed */
+  position: fixed;
   inset: 0;
   z-index: 9999;
 
