@@ -10,7 +10,7 @@
 window.onerror = (m, src, line, col) => alert(`JS ERROR:\n${m}\n${line}:${col}`);
 
 // Dev toggle: skip splash animation
- const DISABLE_SPLASH = false;
+ const DISABLE_SPLASH = true;
 
 // console.log("RIFFBANK APP.JS LOADED ✅", new Date().toISOString());
 // alert("RIFFBANK APP.JS LOADED ✅ " + new Date().toISOString());
@@ -551,6 +551,11 @@ function wireNowPlayingEvents(overlay) {
   overlay.querySelector("#fpNext")?.addEventListener("click", (e) => {
     e.stopPropagation();
     if (!state.player?.queue?.length) return;
+    _miniCarouselDir = 1; // forward
+    if (state.player.nowPlaying) {
+      if (!state.player.playHistory) state.player.playHistory = [];
+      state.player.playHistory.push(state.player.nowPlaying);
+    }
     const next = state.player.queue.shift();
     state.player.nowPlaying = next;
     saveState();
@@ -693,6 +698,11 @@ const miniScrubEl  = document.getElementById("miniScrub");
 const miniTitleEl  = document.getElementById("miniTitle");
 const miniSubEl    = document.getElementById("miniSub");
 
+// Track currently displayed song so we can detect real changes
+let _miniDisplayedKey = "";
+// Direction hint for carousel: 1 = forward (slide left), -1 = backward (slide right)
+let _miniCarouselDir = 0;
+
 function isPlayable(v){
   return !!(v?.link || v?.fileId || v?.localAudioId || v?.driveFileId);
 }
@@ -752,35 +762,71 @@ if (typeof isNowPlayingFullscreen !== "undefined" && isNowPlayingFullscreen) {
     return;
   }
 
-  // show
+  // Determine if mini player is already on screen
+  const wasAlreadyVisible = miniPlayerEl.classList.contains("visible") && !miniPlayerEl.classList.contains("hidden");
+  const newKey = now.songId + "/" + now.versionId;
+  const songChanged = newKey !== _miniDisplayedKey;
+
+  // Show mini player — suppress slide-up transition if already visible
+  miniPlayerEl.style.transition = wasAlreadyVisible ? "none" : "";
   miniPlayerEl.classList.remove("hidden");
-  miniPlayerEl.setAttribute("aria-hidden", "false");
-  document.body.classList.add("hasMiniPlayer");
-  requestAnimationFrame(() => {
   miniPlayerEl.classList.add("visible");
   miniPlayerEl.setAttribute("aria-hidden", "false");
-  syncMiniPlayerReserveSpace(); // <-- IMPORTANT: updates --dock-h so content isn't covered
-  });
-
-  // album art
-  if (miniArtEl) {
-    // Use your existing neon cover generator (lite for speed)
-    miniArtEl.innerHTML = coverSvg(song, { lite: true });
+  document.body.classList.add("hasMiniPlayer");
+  syncMiniPlayerReserveSpace();
+  if (wasAlreadyVisible) {
+    requestAnimationFrame(() => { miniPlayerEl.style.transition = ""; });
   }
 
-// title / subtitle (set first so text always shows even if art generation fails)
-if (miniTitleEl) miniTitleEl.textContent = song.title || "Untitled";
-if (miniSubEl) miniSubEl.textContent = song.project || "";
+  // ── Carousel song content swap ──
+  const inner = miniPlayerEl.querySelector(".miniSwipeInner");
+  const dir = _miniCarouselDir;
+  _miniCarouselDir = 0; // consume direction
 
-// album art
-if (miniArtEl) {
-  try {
-    miniArtEl.innerHTML = coverSvg(song, { lite: true });
-  } catch (e) {
-    console.warn("mini coverSvg failed:", e);
-    miniArtEl.innerHTML = "";
+  if (wasAlreadyVisible && songChanged && inner && dir !== 0) {
+    // Build incoming content off-screen
+    const comeFrom = dir > 0 ? "110%" : "-110%";
+    const flyTo    = dir > 0 ? "-110%" : "110%";
+
+    let peekArt = "";
+    try { peekArt = coverSvg(song, { lite: true }); } catch {}
+
+    const ghost = document.createElement("div");
+    ghost.className = "miniSwipeInner";
+    ghost.style.cssText = `position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;transform:translateX(${comeFrom});transition:none;`;
+    ghost.innerHTML = `<div class="miniArt" aria-hidden="true">${peekArt}</div><div class="miniMeta"><div class="miniTitle">${escapeHtml(song.title || "Untitled")}</div><div class="miniSub">${escapeHtml(song.project || "")}</div></div>`;
+
+    const swipeZone = miniPlayerEl.querySelector(".miniSwipeZone");
+    if (swipeZone) swipeZone.appendChild(ghost);
+
+    // Slide current out + ghost in
+    inner.style.transition = "transform 220ms ease";
+    inner.style.transform = `translateX(${flyTo})`;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      ghost.style.transition = "transform 220ms ease";
+      ghost.style.transform = "translateX(0)";
+    }));
+
+    // After animation: update real inner, remove ghost
+    setTimeout(() => {
+      ghost.remove();
+      inner.style.transition = "none";
+      inner.style.transform = "translateX(0)";
+      // Update the real inner content to match the new song
+      if (miniArtEl) try { miniArtEl.innerHTML = coverSvg(song, { lite: true }); } catch { miniArtEl.innerHTML = ""; }
+      if (miniTitleEl) miniTitleEl.textContent = song.title || "Untitled";
+      if (miniSubEl) miniSubEl.textContent = song.project || "";
+    }, 240);
+  } else {
+    // No carousel — just update content in place
+    if (miniTitleEl) miniTitleEl.textContent = song.title || "Untitled";
+    if (miniSubEl) miniSubEl.textContent = song.project || "";
+    if (miniArtEl) {
+      try { miniArtEl.innerHTML = coverSvg(song, { lite: true }); } catch { miniArtEl.innerHTML = ""; }
+    }
   }
-}
+
+  _miniDisplayedKey = newKey;
 
   // play/pause icon
   if (miniToggleEl) miniToggleEl.innerHTML = globalAudio?.paused
@@ -2553,6 +2599,7 @@ function advanceToNextTrack({ render: doRender = false } = {}) {
       if (!state.player.playHistory) state.player.playHistory = [];
       state.player.playHistory.push(state.player.nowPlaying);
     }
+    _miniCarouselDir = 1; // forward → slide left
     state.player.nowPlaying = q.shift();
     saveState();
     playNowPlaying({ autoplay: true });
@@ -2567,6 +2614,7 @@ function advanceToNextTrack({ render: doRender = false } = {}) {
         if (!state.player.playHistory) state.player.playHistory = [];
         state.player.playHistory.push(state.player.nowPlaying);
       }
+      _miniCarouselDir = 1; // forward → slide left
       const fresh = state.player.shuffle ? shuffleArray([...rq]) : [...rq];
       state.player.nowPlaying = fresh.shift();
       state.player.queue = fresh;
@@ -2589,6 +2637,7 @@ function advanceToPrevTrack({ render: doRender = false } = {}) {
   if (!history.length) return false; // dead — no history to go back to
 
   const prev = history.pop();
+  _miniCarouselDir = -1; // backward → slide right
   if (state.player?.nowPlaying) {
     state.player.queue = [state.player.nowPlaying, ...(state.player.queue || [])];
   }
