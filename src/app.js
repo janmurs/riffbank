@@ -10,7 +10,7 @@
 window.onerror = (m, src, line, col) => alert(`JS ERROR:\n${m}\n${line}:${col}`);
 
 // Dev toggle: skip splash animation
- const DISABLE_SPLASH = true;
+ const DISABLE_SPLASH = false;
 
 // console.log("RIFFBANK APP.JS LOADED ✅", new Date().toISOString());
 // alert("RIFFBANK APP.JS LOADED ✅ " + new Date().toISOString());
@@ -155,42 +155,74 @@ function triggerForwardSlide() {
   if (!el) return;
 
   // Push the "previous screen" HTML onto the nav stack for correct swipe-back content.
-  // Don't show it as back-peek during forward nav — keeps the slide clean (no home cards bleeding through).
   if (backPeekHTML) navHistoryStack.push(backPeekHTML);
 
-  // Build an opaque snapshot overlay of the new screen and slide IT in.
-  // Capture outerHTML before hiding el so the snapshot is at full opacity.
+  // Shared measurements.
+  const bnEl = document.getElementById("bottomNav");
+  const bnRect = bnEl?.getBoundingClientRect();
+  const navBottomOffset = bnRect ? `${window.innerHeight - bnRect.top}px` : "0px";
   const r = el.getBoundingClientRect();
+
+  // Build ace overlay (previous screen) — sits behind the queen so it's visible
+  // on the left while the queen slides in. top:0 so home content (rendered with
+  // topbar hidden, view at y=0) stays locked at its natural position.
+  let aceOverlay = null;
+  if (backPeekHTML) {
+    const viewEl = document.getElementById("view");
+    const viewRect = viewEl?.getBoundingClientRect();
+    const aceLeft = viewRect ? viewRect.left : r.left;
+    const aceWidth = viewRect ? viewRect.width : r.width;
+    aceOverlay = document.createElement("div");
+    aceOverlay.style.cssText = `position:fixed;top:0;left:${aceLeft}px;width:${aceWidth}px;bottom:${navBottomOffset};z-index:499;overflow:hidden;pointer-events:none;background:var(--bg);`;
+    aceOverlay.innerHTML = backPeekHTML;
+    document.body.appendChild(aceOverlay);
+  }
+
+  // Build queen overlay (new screen) — covers full height from top:0 so the topbar
+  // is included and slides in as one unit. This prevents the ace from showing through
+  // above the screen area while the topbar animates in separately.
   const overlay = document.createElement("div");
   overlay.className = "viewSlideOverlay";
-  overlay.style.top = `${r.top}px`;
+  overlay.style.top = "0";
   overlay.style.left = `${r.left}px`;
   overlay.style.width = `${r.width}px`;
-  overlay.style.height = `${r.height}px`;
-  overlay.innerHTML = el.outerHTML;
+  overlay.style.bottom = navBottomOffset;
+  overlay.style.height = "";  // use bottom instead of explicit height
   overlay.style.transform = "translateX(100%)";
   overlay.style.transition = "none";
+
+  // Topbar clone — included in the queen so it slides in with the screen content.
+  if (topbar) {
+    const tbRect = topbar.getBoundingClientRect();
+    const tbClone = topbar.cloneNode(true);
+    tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:0;width:100%;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
+    overlay.appendChild(tbClone);
+  }
+
+  // Screen content clone — positioned below the topbar.
+  const screenWrap = document.createElement("div");
+  screenWrap.style.cssText = `position:absolute;top:${r.top}px;left:0;width:100%;height:${r.height}px;overflow:hidden;`;
+  screenWrap.innerHTML = el.outerHTML;
+  overlay.appendChild(screenWrap);
+
   document.body.appendChild(overlay);
 
-  // Hide the actual screen so it doesn't flash through before the overlay animation starts.
+  // Hide the actual screen + topbar so they don't flash before the overlay animation.
   el.style.opacity = "0";
-  if (topbar) { topbar.style.transform = "translateX(100%)"; topbar.style.transition = "none"; }
+  if (topbar) { topbar.style.opacity = "0"; }
 
-  // Force a synchronous reflow to commit the initial translateX(100%) state.
-  // This avoids the 2-rAF delay that would show a flash of the body background.
+  // Force a synchronous reflow to commit translateX(100%) before animating.
   // eslint-disable-next-line no-unused-expressions
   overlay.offsetWidth;
 
   overlay.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
   overlay.style.transform = "";
-  if (topbar) {
-    topbar.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
-    topbar.style.transform = "";
-  }
+
   overlay.addEventListener("transitionend", () => {
     overlay.remove();
+    if (aceOverlay) { aceOverlay.remove(); aceOverlay = null; }
     el.style.opacity = "";
-    if (topbar) { topbar.style.transition = ""; topbar.style.transform = ""; }
+    if (topbar) { topbar.style.opacity = ""; }
   }, { once: true });
 }
 
@@ -375,9 +407,7 @@ const np = state.player?.nowPlaying;
       </div>
 
       <div class="fpCoverWrap">
-        <div class="fpCoverWrap">
         ${song ? coverSvg(song) : ""}
-      </div>
       </div>
 
       <div class="fpMeta">
@@ -400,7 +430,7 @@ const np = state.player?.nowPlaying;
 
       <div class="fpControls">
         <button class="fpCtrl ${shuffleOn ? "is-active" : ""}" id="fpShuffle" aria-label="Shuffle">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M4 20l8-8"/><path d="M21 3l-7 7"/><path d="M16 21h5v-5"/><path d="M4 4l5 5"/><path d="M15 15l6 6"/></svg>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="4" y1="4" x2="21" y2="21"/></svg>
         </button>
         <button class="fpCtrl" id="fpPrev" aria-label="Previous">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6z"/><path d="M20 6v12l-10-6z"/></svg>
@@ -628,8 +658,6 @@ if (window.visualViewport) {
 
 const miniArtEl    = document.getElementById("miniArt");
 const miniToggleEl = document.getElementById("miniToggle");
-const miniNextEl   = document.getElementById("miniNext");
-const miniPrevEl   = document.getElementById("miniPrev");
 const miniScrubEl  = document.getElementById("miniScrub");
 const miniTitleEl  = document.getElementById("miniTitle");
 const miniSubEl    = document.getElementById("miniSub");
@@ -724,7 +752,9 @@ if (miniArtEl) {
 }
 
   // play/pause icon
-  if (miniToggleEl) miniToggleEl.textContent = globalAudio?.paused ? "▶" : "⏸";
+  if (miniToggleEl) miniToggleEl.innerHTML = globalAudio?.paused
+    ? `<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>`
+    : `<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>`;
 
   // keep scrub in sync
   syncMiniScrub();
@@ -1734,6 +1764,42 @@ document.querySelectorAll(".drawerItem").forEach((btn) => {
 // Create button in bottom nav
 document.querySelector(".createNavBtn")?.addEventListener("click", () => openSheet("chooser"));
 
+// Sal mascot button — opens help sheet
+document.querySelector(".salNavBtn")?.addEventListener("click", () => openSalSheet());
+
+function openSalSheet() {
+  // Remove any existing Sal sheet
+  document.getElementById("salSheetBackdrop")?.remove();
+  document.getElementById("salSheet")?.remove();
+
+  const backdrop = document.createElement("div");
+  backdrop.id = "salSheetBackdrop";
+  backdrop.className = "actionSheetBackdrop";
+
+  const sheet = document.createElement("div");
+  sheet.id = "salSheet";
+  sheet.className = "actionSheet";
+  sheet.style.cssText = "padding: 0; overflow: hidden; border-radius: 22px;";
+  sheet.innerHTML = `
+    <div style="display:flex;flex-direction:column;align-items:center;padding:28px 24px 12px;gap:12px;">
+      <img src="./sal.png" alt="Sal" style="width:80px;height:80px;object-fit:contain;filter:drop-shadow(0 4px 16px rgba(0,0,0,0.6));">
+      <div style="font-size:22px;font-weight:900;color:#fff;letter-spacing:-0.4px;">Hey, I'm Sal!</div>
+      <div style="font-size:14px;color:rgba(255,255,255,.55);text-align:center;line-height:1.6;max-width:280px;">
+        Your RiffBank guide. I'll help you manage songs, projects, versions, and everything in between.
+      </div>
+    </div>
+    <div style="height:1px;background:rgba(255,255,255,.08);margin:0 16px;"></div>
+    <button class="actionSheetBtn" id="salClose">Got it</button>
+  `;
+
+  function close() { backdrop.remove(); sheet.remove(); }
+  backdrop.addEventListener("click", close);
+  sheet.querySelector("#salClose")?.addEventListener("click", close);
+
+  document.body.appendChild(backdrop);
+  document.body.appendChild(sheet);
+}
+
 // Tabs
 document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -2041,11 +2107,12 @@ if (!drawerOpen && t.clientX <= 24) {
     const bnRect = bnEl?.getBoundingClientRect();
     const navBottomOffset = bnRect ? `${window.innerHeight - bnRect.top}px` : "0px";
 
-    // Constrain ace to .app width so home cards don't stretch to full viewport width.
-    const appEl = document.querySelector(".app");
-    const appRect = appEl?.getBoundingClientRect();
-    const aceLeft = appRect ? appRect.left : 0;
-    const aceWidth = appRect ? appRect.width : window.innerWidth;
+    // Constrain ace to #view bounds — this matches exactly where .screen elements render.
+    // Using .app would include its 16px horizontal padding, shifting home content to the left edge.
+    const viewEl = document.getElementById("view");
+    const viewRect = viewEl?.getBoundingClientRect();
+    const aceLeft = viewRect ? viewRect.left : 0;
+    const aceWidth = viewRect ? viewRect.width : window.innerWidth;
 
     // ACE (z:499): home snapshot, constrained to app width, stops at nav top.
     swipeAceEl = document.createElement("div");
@@ -2074,9 +2141,10 @@ if (!drawerOpen && t.clientX <= 24) {
       // Use outerHTML so the .screen wrapper (with its padding:10px) is included —
       // otherwise the content appears 10px too high inside the swipe queen.
       screenWrap.innerHTML = activeScreenEl.outerHTML;
+      swipeQueenEl.appendChild(screenWrap);
+      // Set scrollTop AFTER DOM attachment so the browser honours the value
       const clonedScreen = screenWrap.firstElementChild;
       if (clonedScreen) clonedScreen.scrollTop = activeScreenEl.scrollTop;
-      swipeQueenEl.appendChild(screenWrap);
     }
 
     document.body.appendChild(swipeQueenEl);
@@ -2188,18 +2256,6 @@ miniToggleEl?.addEventListener("click", async (e) => {
   }
 });
 
-miniNextEl?.addEventListener("click", (e) => {
-  e.stopPropagation();
-  if (!advanceToNextTrack()) toast("Queue empty 😅");
-});
-
-miniPrevEl?.addEventListener("click", (e) => {
-  e.stopPropagation();
-  // simple behavior: restart track
-  if (!globalAudio) return;
-  globalAudio.currentTime = 0;
-});
-
 // Hard stop + reset to "fresh launch" state (no mini player, no overlay, no audio playing)
 function stopAndResetPlayback() {
   // Stop audio immediately
@@ -2230,79 +2286,135 @@ function stopAndResetPlayback() {
   scheduleDockSpaceSync();
 }
 
-// Swipe down on mini player = stop + reset + hide (tap-safe + center-safe)
-miniPlayerEl?.addEventListener(
-  "touchstart",
-  (e) => {
-    if (!miniPlayerEl) return;
-    if (e.touches.length !== 1) return;
+// Mini player: swipe-down to dismiss, swipe L/R to skip tracks
+{
+  let mpDir = null; // null | 'x' | 'y'
+  let mpStartX = 0;
+  let mpStartY = 0;
 
-    const isControl = e.target.closest("#miniPrev, #miniToggle, #miniNext, #miniScrub");
-    if (isControl) return;
-
-    miniPlayerEl.dataset.dragStartY = String(e.touches[0].clientY);
+  miniPlayerEl?.addEventListener("touchstart", (e) => {
+    if (!miniPlayerEl || e.touches.length !== 1) return;
+    if (e.target.closest("#miniToggle, #miniScrub")) return;
+    mpDir = null;
+    mpStartX = e.touches[0].clientX;
+    mpStartY = e.touches[0].clientY;
     miniPlayerEl.dataset.dragDy = "0";
     miniPlayerEl.dataset.didDrag = "0";
-  },
-  { passive: true }
-);
+    miniPlayerEl.dataset.swipeDx = "0";
+  }, { passive: true });
 
-miniPlayerEl?.addEventListener(
-  "touchmove",
-  (e) => {
-    if (!miniPlayerEl) return;
+  miniPlayerEl?.addEventListener("touchmove", (e) => {
+    if (!miniPlayerEl || e.touches.length !== 1 || mpStartX === 0) return;
+    const t = e.touches[0];
+    const dx = t.clientX - mpStartX;
+    const dy = t.clientY - mpStartY;
 
-    const startY = parseFloat(miniPlayerEl.dataset.dragStartY || "NaN");
-    if (!Number.isFinite(startY)) return;
-    if (e.touches.length !== 1) return;
-
-    let dy = e.touches[0].clientY - startY;
-    if (dy < 0) dy = 0;
-
-    const ACTIVATE_PX = 14;
-    if (dy < ACTIVATE_PX) return;
-
-    miniPlayerEl.dataset.didDrag = "1";
-    miniPlayerEl.dataset.dragDy = String(dy);
-
-    miniPlayerEl.style.transition = "none";
-    // ✅ preserve centering
-    miniPlayerEl.style.transform = `translateX(-50%) translateY(${Math.min(dy, 240)}px)`;
-  },
-  { passive: true }
-);
-
-miniPlayerEl?.addEventListener(
-  "touchend",
-  () => {
-    if (!miniPlayerEl) return;
-
-    const didDrag = miniPlayerEl.dataset.didDrag === "1";
-    const dy = parseFloat(miniPlayerEl.dataset.dragDy || "0");
-
-    delete miniPlayerEl.dataset.dragStartY;
-    delete miniPlayerEl.dataset.dragDy;
-    delete miniPlayerEl.dataset.didDrag;
-
-    // Dismiss when the bottom of the mini player reaches the top of the nav icons
-    // (~8px into the nav bar) — effectively any intentional downward drag triggers this.
-    const CLOSE_PX = 12;
-
-    if (didDrag && dy > CLOSE_PX) {
-      // Dismiss: stop audio and hide, no snap-back animation needed.
-      stopAndResetPlayback();
-      return;
+    if (!mpDir && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
+      mpDir = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
     }
 
-    // Snap back to resting position (drag was too short to dismiss).
-    miniPlayerEl.style.transition = "transform 160ms ease";
-    miniPlayerEl.style.transform = "translateX(-50%) translateY(0px)";
-  },
-  { passive: true }
-);
+    if (mpDir === 'x') {
+      const inner = miniPlayerEl.querySelector('.miniSwipeInner');
+      // Rubber band: apply 18% resistance when swiping in a "dead" direction
+      const goingNext = dx < 0;
+      const canGo = goingNext
+        ? ((state.player?.queue || []).length > 0 || !!state.player?.repeat)
+        : ((state.player?.playHistory || []).length > 0 || (globalAudio && globalAudio.currentTime > 3));
+      const effectiveDx = canGo ? dx : dx * 0.18;
+      if (inner) { inner.style.transition = 'none'; inner.style.transform = `translateX(${effectiveDx}px)`; }
+      miniPlayerEl.dataset.didDrag = "1";
+      miniPlayerEl.dataset.swipeDx = String(dx); // store raw dx for threshold
+    } else if (mpDir === 'y') {
+      const dyDown = Math.max(0, dy);
+      if (dyDown < 14) return;
+      miniPlayerEl.dataset.didDrag = "1";
+      miniPlayerEl.dataset.dragDy = String(dyDown);
+      miniPlayerEl.style.transition = "none";
+      miniPlayerEl.style.transform = `translateX(-50%) translateY(${Math.min(dyDown, 240)}px)`;
+    }
+  }, { passive: true });
+
+  miniPlayerEl?.addEventListener("touchend", () => {
+    if (!miniPlayerEl) return;
+    const didDrag = miniPlayerEl.dataset.didDrag === "1";
+    const dy = parseFloat(miniPlayerEl.dataset.dragDy || "0");
+    const dx = parseFloat(miniPlayerEl.dataset.swipeDx || "0");
+    const dir = mpDir;
+    delete miniPlayerEl.dataset.dragDy;
+    delete miniPlayerEl.dataset.didDrag;
+    delete miniPlayerEl.dataset.swipeDx;
+    mpDir = null; mpStartX = 0; mpStartY = 0;
+
+    if (dir === 'x') {
+      const inner = miniPlayerEl.querySelector('.miniSwipeInner');
+      if (didDrag && Math.abs(dx) > 55) {
+        const goNext = dx < 0;
+        // Dead swipe check
+        const canGoForward = (state.player?.queue || []).length > 0 || !!state.player?.repeat;
+        const canGoBack = ((state.player?.playHistory || []).length > 0) || (globalAudio && globalAudio.currentTime > 3);
+        const isDead = goNext ? !canGoForward : !canGoBack;
+        if (isDead) {
+          // Rubber band spring back
+          if (inner) { inner.style.transition = 'transform 360ms cubic-bezier(.36,.07,.19,.97)'; inner.style.transform = 'translateX(0)'; }
+          return;
+        }
+        const flyTo   = goNext ? '-110%' : '110%';
+        const comeFrom = goNext ? '110%' : '-110%';
+
+        // Pre-render the next/prev song for a seamless carousel slide
+        let peekSong = null;
+        if (goNext) {
+          const nextRef = (state.player?.queue || [])[0];
+          if (nextRef) peekSong = getSong(nextRef.songId);
+        } else {
+          if (globalAudio && globalAudio.currentTime > 3) {
+            peekSong = getSong(state.player?.nowPlaying?.songId); // restart — same song
+          } else {
+            const prevRef = (state.player?.playHistory || []).at?.(-1);
+            if (prevRef) peekSong = getSong(prevRef.songId);
+          }
+        }
+
+        // Build ghost card starting off-screen on the incoming side
+        const ghost = document.createElement('div');
+        ghost.className = 'miniSwipeInner';
+        ghost.style.cssText = `position:absolute;top:0;left:0;right:0;bottom:0;transform:translateX(${comeFrom});transition:none;`;
+        if (peekSong) {
+          let peekArt = '';
+          try { peekArt = coverSvg(peekSong, { lite: true }); } catch {}
+          ghost.innerHTML = `<div class="miniArt" aria-hidden="true">${peekArt}</div><div class="miniMeta"><div class="miniTitle">${escapeHtml(peekSong.title || 'Untitled')}</div><div class="miniSub">${escapeHtml(peekSong.project || '')}</div></div>`;
+        }
+        const swipeZone = miniPlayerEl.querySelector('.miniSwipeZone');
+        if (swipeZone) swipeZone.appendChild(ghost);
+
+        // Slide current out and ghost in simultaneously (true carousel)
+        if (inner) { inner.style.transition = 'transform 220ms ease'; inner.style.transform = `translateX(${flyTo})`; }
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          ghost.style.transition = 'transform 220ms ease';
+          ghost.style.transform = 'translateX(0)';
+        }));
+
+        miniPlayerEl.dataset.suppressClick = "1";
+        setTimeout(() => {
+          if (goNext) advanceToNextTrack({ render: false });
+          else        advanceToPrevTrack({ render: false });
+          ghost.remove();
+          if (inner) { inner.style.transition = 'none'; inner.style.transform = 'translateX(0)'; }
+          syncMiniPlayerUI();
+        }, 240);
+      } else {
+        if (inner) { inner.style.transition = 'transform 180ms ease'; inner.style.transform = 'translateX(0)'; }
+      }
+    } else {
+      if (didDrag && dy > 12) { stopAndResetPlayback(); return; }
+      miniPlayerEl.style.transition = "transform 160ms ease";
+      miniPlayerEl.style.transform = "translateX(-50%) translateY(0px)";
+    }
+  }, { passive: true });
+}
 
 miniPlayerEl?.addEventListener("click", (e) => {
-  const isControl = e.target.closest("#miniPrev, #miniToggle, #miniNext, #miniScrub");
+  const isControl = e.target.closest("#miniToggle, #miniScrub");
   if (miniPlayerEl?.dataset?.suppressClick === "1") {
     delete miniPlayerEl.dataset.suppressClick;
     return;
@@ -2362,6 +2474,10 @@ function advanceToNextTrack({ render: doRender = false } = {}) {
 
   const q = state.player?.queue || [];
   if (q.length) {
+    if (state.player.nowPlaying) {
+      if (!state.player.playHistory) state.player.playHistory = [];
+      state.player.playHistory.push(state.player.nowPlaying);
+    }
     state.player.nowPlaying = q.shift();
     saveState();
     playNowPlaying({ autoplay: true });
@@ -2372,6 +2488,10 @@ function advanceToNextTrack({ render: doRender = false } = {}) {
   if (state.player?.repeat === true) {
     const rq = state.player?.repeatQueue || [];
     if (rq.length) {
+      if (state.player.nowPlaying) {
+        if (!state.player.playHistory) state.player.playHistory = [];
+        state.player.playHistory.push(state.player.nowPlaying);
+      }
       const fresh = state.player.shuffle ? shuffleArray([...rq]) : [...rq];
       state.player.nowPlaying = fresh.shift();
       state.player.queue = fresh;
@@ -2382,6 +2502,27 @@ function advanceToNextTrack({ render: doRender = false } = {}) {
     }
   }
   return false;
+}
+
+function advanceToPrevTrack({ render: doRender = false } = {}) {
+  // If more than 3s in, just restart current song (not a dead swipe)
+  if (globalAudio && globalAudio.currentTime > 3) {
+    globalAudio.currentTime = 0;
+    return true;
+  }
+  const history = state.player?.playHistory || [];
+  if (!history.length) return false; // dead — no history to go back to
+
+  const prev = history.pop();
+  if (state.player?.nowPlaying) {
+    state.player.queue = [state.player.nowPlaying, ...(state.player.queue || [])];
+  }
+  state.player.nowPlaying = prev;
+  state.player.playHistory = history;
+  saveState();
+  playNowPlaying({ autoplay: true });
+  if (doRender) render();
+  return true;
 }
 
 globalAudio?.addEventListener("ended", () => {
@@ -4952,7 +5093,7 @@ function renderPlayer() {
       <button class="playerShuffleBtn ${state.player?.shuffle ? "is-active" : ""}" id="playerShuffle" aria-label="Shuffle">
         <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/>
-          <polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/>
+          <polyline points="21 16 21 21 16 21"/><line x1="4" y1="4" x2="21" y2="21"/>
         </svg>
       </button>
       <button class="playerPlayBtn" id="playerPlayAll" aria-label="Play">
@@ -5100,23 +5241,28 @@ function renderNowPlaying() {
   }
 
   setHeader("Now Playing");
+  const isFirstOpen = !fullPlayerOpen;
   setFullPlayerOpen(true);
 
   const title = song.title || "Untitled";
   const subtitle = v.label || "Version";
   const art = coverSvg(song);
 
+  const _shuffleSvg = `<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="4" y1="4" x2="21" y2="21"/></svg>`;
+  const _prevSvg    = `<svg viewBox="0 0 24 24" width="35" height="35" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>`;
+  const _nextSvg    = `<svg viewBox="0 0 24 24" width="35" height="35" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>`;
+  const _repeatSvg  = `<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>`;
+  const _playSvg    = `<svg viewBox="0 0 24 24" width="55" height="55" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>`;
+  const _pauseSvg   = `<svg viewBox="0 0 24 24" width="55" height="55" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>`;
+
   activeScreenEl.innerHTML = `
     <section class="fp" id="fullPlayer" aria-label="Now playing">
       <div class="fpBg" aria-hidden="true">${art}</div>
 
       <header class="fpHeader">
-        <button class="fpIcon" id="npBackBtn" aria-label="Close">⌄</button>
-
-        <div class="fpHeaderRight">
-          <button class="fpIcon" type="button" aria-label="Cast" disabled>⎚</button>
-          <button class="fpIcon" type="button" aria-label="More" disabled>⋮</button>
-        </div>
+        <button class="fpNavBtn" id="npBackBtn" aria-label="Close"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>
+        <div class="fpHeaderTitle">Now Playing</div>
+        <button class="fpNavBtn" type="button" aria-label="More" disabled>⋮</button>
       </header>
 
       <div class="fpArtCard" aria-hidden="true">
@@ -5141,11 +5287,11 @@ function renderNowPlaying() {
       </div>
 
       <div class="fpControls" role="group" aria-label="Playback controls">
-        <button class="fpCtrl ${state.player?.shuffle ? 'is-active' : ''}" type="button" aria-label="Shuffle" id="npShuffle">🔀</button>
-        <button class="fpCtrl" id="npPrev" type="button" aria-label="Previous">⏮</button>
-        <button class="fpCtrl fpPlay" id="npToggle" type="button" aria-label="Play / Pause">${globalAudio?.paused ? "▶" : "⏸"}</button>
-        <button class="fpCtrl" id="npNext" type="button" aria-label="Next">⏭</button>
-        <button class="fpCtrl ${state.player?.repeat ? 'is-active' : ''}" type="button" aria-label="Repeat" id="npRepeat" style="position:relative">🔁${state.player?.repeat === "one" ? `<span class="r1b">1</span>` : ""}</button>
+        <button class="fpCtrl ${state.player?.shuffle ? 'is-active' : ''}" type="button" aria-label="Shuffle" id="npShuffle">${_shuffleSvg}</button>
+        <button class="fpCtrl" id="npPrev" type="button" aria-label="Previous">${_prevSvg}</button>
+        <button class="fpCtrl fpPlay" id="npToggle" type="button" aria-label="Play / Pause">${globalAudio?.paused ? _playSvg : _pauseSvg}</button>
+        <button class="fpCtrl" id="npNext" type="button" aria-label="Next">${_nextSvg}</button>
+        <button class="fpCtrl ${state.player?.repeat ? 'is-active' : ''}" type="button" aria-label="Repeat" id="npRepeat">${_repeatSvg}${state.player?.repeat === "one" ? `<span class="r1b">1</span>` : ""}</button>
       </div>
 
       <nav class="fpBottomTabs" aria-label="Now playing tabs">
@@ -5155,6 +5301,23 @@ function renderNowPlaying() {
       </nav>
     </section>
   `;
+
+  // Slide-up entrance animation — only when first opening, not on track change
+  if (isFirstOpen) {
+    const _fp = $("#fullPlayer");
+    if (_fp) {
+      _fp.style.transform = "translateY(100%)";
+      _fp.style.transition = "none";
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        _fp.style.transition = "transform 0.44s cubic-bezier(.22,.9,.24,1)";
+        _fp.style.transform = "translateY(0)";
+        _fp.addEventListener("transitionend", () => {
+          _fp.style.transition = "";
+          _fp.style.transform = "";
+        }, { once: true });
+      }));
+    }
+  }
 
   const npScrub = $("#npScrub");
 
@@ -5171,7 +5334,7 @@ function renderNowPlaying() {
     const toggleEl = $("#npToggle");
     const curEl    = $("#npTimeCur");
     const durEl    = $("#npTimeDur");
-    if (toggleEl) toggleEl.textContent = globalAudio.paused ? "▶" : "⏸";
+    if (toggleEl) toggleEl.innerHTML = globalAudio.paused ? _playSvg : _pauseSvg;
     if (curEl)    curEl.textContent    = fmtTime(globalAudio.currentTime || 0);
     if (durEl)    durEl.textContent    = fmtTime(globalAudio.duration    || 0);
   }
@@ -5239,10 +5402,9 @@ function renderNowPlaying() {
     e.preventDefault();
 
     lastDy = dy;
-    const clamped = Math.min(dy, 160);
-    fp.style.transform = `translateY(${clamped}px)`;
+    fp.style.transform = `translateY(${dy}px)`;
     fp.style.transition = "none";
-    fp.style.opacity = String(1 - (clamped / 240));
+    fp.style.opacity = String(Math.max(0, 1 - (dy / window.innerHeight)));
   }, { passive: false });
 
   fp?.addEventListener("touchend", () => {
@@ -5285,8 +5447,7 @@ function renderNowPlaying() {
   });
 
   $("#npPrev")?.addEventListener("click", () => {
-    if (!globalAudio) return;
-    globalAudio.currentTime = 0;
+    advanceToPrevTrack({ render: true });
   });
 
   $("#npShuffle")?.addEventListener("click", () => {

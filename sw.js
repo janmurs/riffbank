@@ -6,7 +6,9 @@
 // - cache-first for static assets
 // - versioned caches + cleanup
 
-const CACHE_VERSION = "2026-03-02_42"; // <-- bump this when you deploy
+// Type ./start.sh to start local server
+
+const CACHE_VERSION = "2026-03-03_67"; // <-- bump this when you deploy
 const STATIC_CACHE = `riffbank-static-${CACHE_VERSION}`;
 const RUNTIME_CACHE = `riffbank-runtime-${CACHE_VERSION}`;
 
