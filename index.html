@@ -29,17 +29,18 @@
 
 <div id="miniPlayer" class="miniPlayer hidden" aria-hidden="true">
   <div class="miniTop">
-    <div id="miniArt" class="miniArt" aria-hidden="true"></div>
-
-    <div class="miniMeta">
-      <div id="miniTitle" class="miniTitle"></div>
-      <div id="miniSub" class="miniSub"></div>
+    <div class="miniSwipeZone">
+      <div class="miniSwipeInner">
+        <div id="miniArt" class="miniArt" aria-hidden="true"></div>
+        <div class="miniMeta">
+          <div id="miniTitle" class="miniTitle"></div>
+          <div id="miniSub" class="miniSub"></div>
+        </div>
+      </div>
     </div>
 
     <div class="miniControls" role="group" aria-label="Mini player controls">
-      <button id="miniPrev" class="miniBtn" aria-label="Previous">⏮</button>
       <button id="miniToggle" class="miniBtn miniPlay" aria-label="Play/Pause">▶</button>
-      <button id="miniNext" class="miniBtn" aria-label="Next">⏭</button>
     </div>
   </div>
 
@@ -102,6 +103,7 @@
     </aside>
 
     <main id="view" class="view">
+      <div id="back-peek"></div>
       <div id="screen-home" class="screen screen--home is-active"></div>
       <div id="screen-songs" class="screen screen--songs"></div>
       <div id="screen-player" class="screen screen--player"></div>
@@ -158,6 +160,13 @@
           </svg>
         </span>
         <span class="navLabel">Create</span>
+      </button>
+
+      <button class="navBtn salNavBtn" aria-label="Sal">
+        <span class="navIcon" aria-hidden="true">
+          <img src="./sal.png" alt="Sal" class="salNavImg">
+        </span>
+        <span class="navLabel">Sal</span>
       </button>
     </nav>
   </div>
