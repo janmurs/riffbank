@@ -1457,9 +1457,8 @@ async function getPlayableUrlForVersion(songId, versionId) {
     }
   }
 
-  // Priority 3b: Live fetch from Drive (only if a valid token is already in memory —
-  // never triggers a sign-in popup mid-playback)
-  if (v.driveFileId && gdriveIsConnected() && gdriveHasValidToken()) {
+  // Priority 3b: Live fetch from Drive (gdriveFetchBlob handles silent token refresh)
+  if (v.driveFileId && gdriveIsConnected()) {
     const blob = await gdriveFetchBlob(v.driveFileId);
     if (blob) {
       const url = URL.createObjectURL(blob);
@@ -1468,9 +1467,6 @@ async function getPlayableUrlForVersion(songId, versionId) {
       return url;
     }
     if (!v.link) return "drive-auth-required";
-  } else if (v.driveFileId && gdriveIsConnected() && !v.link) {
-    // Drive file exists but no token — tell user to reconnect rather than silently failing
-    return "drive-auth-required";
   }
 
   // Priority 4: Direct URL link
@@ -2398,6 +2394,13 @@ function stopAndResetPlayback() {
   // Fresh-launch behavior: mini player stays hidden until a new play action this session
   hasPlayedThisSession = false;
 
+  // Clear any lingering inline transform/transition from swipe gestures
+  // so the CSS classes can properly position the mini player when it reappears
+  if (miniPlayerEl) {
+    miniPlayerEl.style.transform = "";
+    miniPlayerEl.style.transition = "";
+  }
+
   // Ensure fullscreen overlay is fully closed + removed from hit testing
   try { closeNowPlaying(); } catch {}
   setFullPlayerOpen(false);
@@ -3254,20 +3257,21 @@ async function preFetchDriveAudio() {
   // Only run when a token is already in memory — never triggers a sign-in popup
   if (!gdriveIsConnected() || !gdriveHasValidToken()) return;
   for (const song of (state.songs || [])) {
-    const av = (song.versions || []).find(v => v.isActive) || song.versions?.[0];
-    if (!av?.driveFileId || av.fileId) continue; // no Drive file, or local copy already exists
-    const dbKey = `gdrive:${av.driveFileId}`;
-    const existing = await audioGet(dbKey);
-    if (existing?.blob) continue; // already cached
-    const blob = await gdriveFetchBlob(av.driveFileId);
-    if (blob) {
-      await putAudioBlob({
-        id: dbKey,
-        blob,
-        name: av.fileName || av.label || "audio",
-        type: av.fileType || blob.type || "audio/*",
-        size: blob.size,
-      });
+    for (const v of (song.versions || [])) {
+      if (!v.driveFileId || v.fileId) continue; // no Drive file, or local copy already exists
+      const dbKey = `gdrive:${v.driveFileId}`;
+      const existing = await audioGet(dbKey);
+      if (existing?.blob) continue; // already cached
+      const blob = await gdriveFetchBlob(v.driveFileId);
+      if (blob) {
+        await putAudioBlob({
+          id: dbKey,
+          blob,
+          name: v.fileName || v.label || "audio",
+          type: v.fileType || blob.type || "audio/*",
+          size: blob.size,
+        });
+      }
     }
   }
 }
@@ -5591,12 +5595,15 @@ function renderNowPlaying() {
 
   $("#npBackBtn")?.addEventListener("click", closeFullPlayer);
 
-  // ✅ Swipe down to close
+  // ✅ Swipe down to close — reveals previous screen underneath
   const fp = $("#fullPlayer");
   let swipeOn = false;
   let startY = 0;
   let startX = 0;
   let lastDy = 0;
+  let _peekReady = false;
+  let _savedPrevTab = null;
+  let _savedPrevSongId = null;
 
   fp?.addEventListener("touchstart", (e) => {
     const t = e.touches?.[0];
@@ -5607,6 +5614,7 @@ function renderNowPlaying() {
     startY = t.clientY;
     startX = t.clientX;
     lastDy = 0;
+    _peekReady = false;
   }, { passive: true });
 
   fp?.addEventListener("touchmove", (e) => {
@@ -5620,23 +5628,68 @@ function renderNowPlaying() {
     if (Math.abs(dx) > Math.abs(dy)) return;
 
     e.preventDefault();
-
     lastDy = dy;
+
+    // First significant drag: lift player to body, render previous screen underneath
+    if (!_peekReady && dy > 8) {
+      _peekReady = true;
+      _savedPrevTab = prevTabBeforeFullPlayer;
+      _savedPrevSongId = prevSelectedSongIdBeforeFullPlayer;
+
+      // Move fp to body so it floats above everything
+      document.body.appendChild(fp);
+
+      // Restore previous screen underneath
+      fullPlayerOpen = false;
+      setFullPlayerOpen(false);
+      playerScreen = "list";
+      if (_savedPrevTab) {
+        currentTab = _savedPrevTab;
+        selectedSongId = _savedPrevSongId;
+        prevTabBeforeFullPlayer = null;
+        prevSelectedSongIdBeforeFullPlayer = null;
+        setHeader(currentTab === "songs" && selectedSongId ? "Song" : TAB_TITLES[currentTab] || "RiffBank");
+      } else {
+        setHeader("Player");
+      }
+      syncTabs();
+      render();
+    }
+
     fp.style.transform = `translateY(${dy}px)`;
     fp.style.transition = "none";
-    fp.style.opacity = String(Math.max(0, 1 - (dy / window.innerHeight)));
   }, { passive: false });
 
   fp?.addEventListener("touchend", () => {
     if (!swipeOn) return;
     swipeOn = false;
 
-    const shouldClose = lastDy > 80;
-    fp.style.transition = "transform 180ms ease, opacity 180ms ease";
-    fp.style.transform = "translateY(0px)";
-    fp.style.opacity = "1";
-
-    if (shouldClose) closeFullPlayer();
+    if (_peekReady) {
+      if (lastDy > 80) {
+        // Commit close: slide player off-screen, then remove
+        cleanup();
+        fp.style.transition = "transform 280ms cubic-bezier(.32,0,.6,1), opacity 200ms ease";
+        fp.style.transform = "translateY(100%)";
+        fp.style.opacity = "0";
+        fp.addEventListener("transitionend", () => fp.remove(), { once: true });
+      } else {
+        // Cancel: re-open full player
+        fp.remove();
+        fullPlayerOpen = true;
+        setFullPlayerOpen(true);
+        prevTabBeforeFullPlayer = _savedPrevTab;
+        prevSelectedSongIdBeforeFullPlayer = _savedPrevSongId;
+        currentTab = "player";
+        playerScreen = "now-playing";
+        syncTabs();
+        render();
+      }
+      _peekReady = false;
+    } else {
+      fp.style.transition = "transform 180ms ease, opacity 180ms ease";
+      fp.style.transform = "translateY(0px)";
+      fp.style.opacity = "1";
+    }
   }, { passive: true });
 
   npScrub?.addEventListener("input", (e) => {
