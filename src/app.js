@@ -4372,6 +4372,7 @@ function coverSvg(song, { lite = false } = {}) {
 
   const seed = hashStr(`${song.id}|${song.title}|${song.project}|${song.genre}`);
   const r = makeRng(seed);
+  const u = (seed >>> 0).toString(36); // unique prefix for SVG IDs
 
   const h1 = Math.floor(r()*360);
   const h2 = (h1 + 90 + Math.floor(r()*90)) % 360;
@@ -4397,38 +4398,38 @@ function coverSvg(song, { lite = false } = {}) {
   const svg = forceLite ? `
   <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
     <defs>
-      <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <linearGradient id="g${u}" x1="0" y1="0" x2="1" y2="1">
         <stop offset="0" stop-color="${c1}" stop-opacity=".95"/>
         <stop offset=".55" stop-color="${c2}" stop-opacity=".85"/>
         <stop offset="1" stop-color="${c3}" stop-opacity=".9"/>
       </linearGradient>
-      <radialGradient id="vig" cx="50%" cy="45%" r="70%">
+      <radialGradient id="v${u}" cx="50%" cy="45%" r="70%">
         <stop offset="55%" stop-color="rgba(0,0,0,0)"/>
         <stop offset="100%" stop-color="rgba(0,0,0,.28)"/>
       </radialGradient>
     </defs>
 
-    <rect width="120" height="120" fill="url(#g)"/>
+    <rect width="120" height="120" fill="url(#g${u})"/>
     ${b.map(x => `<circle cx="${x.x}" cy="${x.y}" r="${x.rad}" fill="${x.col}" opacity=".22"/>`).join("")}
 
     <path d="M ${sx1} ${sy1} C ${sx1+35} ${sy1-30}, ${sx2-35} ${sy2+30}, ${sx2} ${sy2}"
       stroke="rgba(255,255,255,.55)" stroke-width="5" stroke-linecap="round" opacity=".18"/>
 
-    <rect width="120" height="120" fill="url(#vig)"/>
+    <rect width="120" height="120" fill="url(#v${u})"/>
   </svg>` : `
   <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
     <defs>
-      <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <linearGradient id="g${u}" x1="0" y1="0" x2="1" y2="1">
         <stop offset="0" stop-color="${c1}" stop-opacity=".95"/>
         <stop offset=".55" stop-color="${c2}" stop-opacity=".85"/>
         <stop offset="1" stop-color="${c3}" stop-opacity=".9"/>
       </linearGradient>
 
-      <filter id="blur">
+      <filter id="b${u}">
         <feGaussianBlur stdDeviation="12" />
       </filter>
 
-      <filter id="grain">
+      <filter id="n${u}">
         <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch" />
         <feColorMatrix type="matrix" values="
           1 0 0 0 0
@@ -4437,7 +4438,7 @@ function coverSvg(song, { lite = false } = {}) {
           0 0 0 .12 0"/>
       </filter>
 
-      <filter id="glow">
+      <filter id="w${u}">
         <feGaussianBlur stdDeviation="3" result="b"/>
         <feMerge>
           <feMergeNode in="b"/>
@@ -4445,23 +4446,23 @@ function coverSvg(song, { lite = false } = {}) {
         </feMerge>
       </filter>
 
-      <radialGradient id="vig" cx="50%" cy="45%" r="70%">
+      <radialGradient id="v${u}" cx="50%" cy="45%" r="70%">
         <stop offset="55%" stop-color="rgba(0,0,0,0)"/>
         <stop offset="100%" stop-color="rgba(0,0,0,.35)"/>
       </radialGradient>
     </defs>
 
-    <rect width="120" height="120" fill="url(#g)"/>
+    <rect width="120" height="120" fill="url(#g${u})"/>
 
-    <g filter="url(#blur)" opacity=".9">
+    <g filter="url(#b${u})" opacity=".9">
       ${b.map(x => `<circle cx="${x.x}" cy="${x.y}" r="${x.rad}" fill="${x.col}" opacity=".55"/>`).join("")}
     </g>
 
     <path d="M ${sx1} ${sy1} C ${sx1+35} ${sy1-30}, ${sx2-35} ${sy2+30}, ${sx2} ${sy2}"
-      stroke="rgba(255,255,255,.65)" stroke-width="6" stroke-linecap="round" opacity=".22" filter="url(#glow)"/>
+      stroke="rgba(255,255,255,.65)" stroke-width="6" stroke-linecap="round" opacity=".22" filter="url(#w${u})"/>
 
-    <rect width="120" height="120" fill="url(#vig)"/>
-    <rect width="120" height="120" filter="url(#grain)" opacity=".55"/>
+    <rect width="120" height="120" fill="url(#v${u})"/>
+    <rect width="120" height="120" filter="url(#n${u})" opacity=".55"/>
   </svg>`;
 
   coverCache.set(key, svg);
@@ -4498,8 +4499,7 @@ function renderSongsList() {
       </div>
     </div>
 
-    <div id="songList" class="songsList"></div>
-    <div class="small">Tip: use the center "New record" button to create.</div>
+    <div id="songList"></div>
   `;
 
   const listEl = $("#songList");
@@ -4532,28 +4532,47 @@ function renderSongsList() {
         return (b.updatedAt || "").localeCompare(a.updatedAt || "");
       });
 
-    listEl.innerHTML = filtered.length
-      ? filtered.map((s) => {
-          return `
-            <div class="songRow" data-id="${s.id}">
-              <div class="songThumb" aria-hidden="true">
-                ${coverSvg(s, { lite: true })}
-              </div>
-              <div class="songMain">
-                <div class="songTop">
-                  <div class="songTitleRow">
-                    <div class="songTitle">${escapeHtml(s.title)}</div>
-                  </div>
-                  <button class="songMore" data-more="${s.id}" aria-label="Song menu">⋯</button>
-                </div>
-                <div class="songSub">${escapeHtml(s.project || "—")}</div>
+    if (!filtered.length) {
+      listEl.innerHTML = `<div class="small">No matches.</div>`;
+    } else {
+      // Group by artist (project field), sorted A-Z
+      const groups = {};
+      for (const s of filtered) {
+        const artist = (s.project || "").trim() || "Unknown";
+        (groups[artist] ||= []).push(s);
+      }
+      const sortedArtists = Object.keys(groups).sort((a, b) => a.localeCompare(b));
+
+      const cardHtml = (s) => {
+        const vCount = s.versions?.length || 0;
+        return `
+          <div class="songCard" data-id="${s.id}">
+            <div class="songCardStack">
+              <div class="songCardLayer songCardLayer2"></div>
+              <div class="songCardLayer songCardLayer1"></div>
+              <div class="songCardFront">
+                <div class="songCardArt">${coverSvg(s, { lite: true })}</div>
               </div>
             </div>
-          `;
-        }).join("")
-      : `<div class="small">No matches.</div>`;
+            <div class="songCardInfo">
+              <div class="songCardTitle">${escapeHtml(s.title)}</div>
+              <div class="songCardSub">${vCount} ver${vCount !== 1 ? "s" : ""}</div>
+            </div>
+            <button class="songCardMore" data-more="${s.id}" aria-label="Song menu">⋯</button>
+          </div>
+        `;
+      };
 
-    listEl.querySelectorAll("[data-id]").forEach((el) => {
+      listEl.innerHTML = sortedArtists.map(artist => `
+        <div class="songsGroup">
+          <div class="songsGroupHead">${escapeHtml(artist)}</div>
+          <div class="songsGroupLine"></div>
+          <div class="songsList">${groups[artist].map(cardHtml).join("")}</div>
+        </div>
+      `).join("");
+    }
+
+    listEl.querySelectorAll(".songCard[data-id]").forEach((el) => {
       el.addEventListener("click", () => {
         songsListScrollTop = activeScreenEl.scrollTop;
         selectedSongId = el.getAttribute("data-id");
@@ -4562,7 +4581,7 @@ function renderSongsList() {
       });
     });
 
-        listEl.querySelectorAll("[data-more]").forEach((btn) => {
+    listEl.querySelectorAll(".songCardMore[data-more]").forEach((btn) => {
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
         const id = btn.getAttribute("data-more");
@@ -4726,9 +4745,16 @@ $("#songDetailsBtn")?.addEventListener("click", () => {
   render();
 });
 
-$("#genArtBtn")?.addEventListener("click", () => {
+$("#genArtBtn")?.addEventListener("click", async () => {
   const btn = $("#genArtBtn");
   if (btn) { btn.disabled = true; btn.textContent = "✨ Generating…"; }
+
+  const apiKey = state.settings.replicateKey || "";
+  if (!apiKey) {
+    toast("Add your Replicate API key in Settings first");
+    if (btn) { btn.disabled = false; btn.textContent = song.coverImageUrl ? "🔄 Regen Art" : "✨ Gen Art"; }
+    return;
+  }
 
   const prompt = [
     "album cover art",
@@ -4738,15 +4764,31 @@ $("#genArtBtn")?.addEventListener("click", () => {
     "cinematic, dark moody aesthetic, no text, no words, square format"
   ].filter(Boolean).join(", ");
 
-  const seed = Math.floor(Math.random() * 1_000_000);
-  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=512&height=512&nologo=true&model=flux&seed=${seed}`;
+  const resetBtn = () => {
+    if (btn) { btn.disabled = false; btn.textContent = song.coverImageUrl ? "🔄 Regen Art" : "✨ Gen Art"; }
+  };
 
-  song.coverImageUrl = url;
-  song.updatedAt = nowStamp();
-  saveState();
-  toast("Generating art ✨ — takes ~20s to appear");
-  if (btn) { btn.disabled = false; }
-  render();
+  try {
+    const res = await fetch("https://riffbank-art.riffbank.workers.dev", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ input: { prompt, aspect_ratio: "1:1" } })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || data.title || "API error");
+    if (!data.output) throw new Error("No image returned");
+
+    song.coverImageUrl = data.output;
+    song.updatedAt = nowStamp();
+    coverCache.clear();
+    saveState();
+    toast("Art generated ✨");
+    render();
+  } catch (e) {
+    console.error("Art generation failed:", e);
+    toast(e.message || "Art generation failed — try again");
+    resetBtn();
+  }
 });
 
 $("#addVersionJump")?.addEventListener("click", () => {
@@ -5876,6 +5918,12 @@ function renderSettings() {
       <div class="small">Used to suggest where files should live in Drive/iCloud/etc.</div>
 
       <div class="hr"></div>
+      <h2>AI Art</h2>
+      <div class="label">Replicate API key</div>
+      <input id="replicateKey" type="password" value="${escapeHtml(state.settings.replicateKey || "")}" placeholder="r8_..." />
+      <div class="small">Free at replicate.com — used for cover art generation (Imagen 4)</div>
+
+      <div class="hr"></div>
       <h2>Defaults</h2>
 
       <div class="row">
@@ -6008,6 +6056,7 @@ function renderSettings() {
     state.settings.defaultProject = $("#defProject").value.trim() || "";
     state.settings.defaultGenre = $("#defGenre").value.trim() || "";
     state.settings.defaultSprint = $("#defSprint").value.trim() || "";
+    state.settings.replicateKey = $("#replicateKey").value.trim() || "";
     saveState();
     toast("Saved ✅");
   });
