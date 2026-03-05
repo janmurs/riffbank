@@ -10,7 +10,7 @@
 window.onerror = (m, src, line, col) => alert(`JS ERROR:\n${m}\n${line}:${col}`);
 
 // Dev toggle: skip splash animation
- const DISABLE_SPLASH = true;
+ const DISABLE_SPLASH = false;
 
 // console.log("RIFFBANK APP.JS LOADED ✅", new Date().toISOString());
 // alert("RIFFBANK APP.JS LOADED ✅ " + new Date().toISOString());
@@ -4761,7 +4761,7 @@ $("#genArtBtn")?.addEventListener("click", async () => {
     song.genre ? `${song.genre} style` : null,
     `for a song called "${song.title}"`,
     song.project ? `by ${song.project}` : null,
-    "cinematic, dark moody aesthetic, no text, no words, square format"
+    "cinematic, dark moody aesthetic, absolutely no text, no words, no letters, no numbers, no typography, no writing, purely visual, square format"
   ].filter(Boolean).join(", ");
 
   const resetBtn = () => {
@@ -5923,6 +5923,12 @@ function renderSettings() {
       <input id="replicateKey" type="password" value="${escapeHtml(state.settings.replicateKey || "")}" placeholder="r8_..." />
       <div class="small">Free at replicate.com — used for cover art generation (Imagen 4)</div>
 
+      <div class="row" style="gap:10px; margin-top:14px">
+        <button id="genMissingArt" class="btn" style="flex:1">Generate Missing Art</button>
+        <button id="regenAllArt" class="btn" style="flex:1; background: rgba(255,200,50,.08); border-color: rgba(255,200,50,.2); color: #ffc832;">Regenerate All Art</button>
+      </div>
+      <div class="small" style="margin-top:4px">Generate art only for songs without cover art, or regenerate for every song.</div>
+
       <div class="hr"></div>
       <h2>Defaults</h2>
 
@@ -6060,6 +6066,69 @@ function renderSettings() {
     saveState();
     toast("Saved ✅");
   });
+
+  // Bulk art generation
+  const bulkGenArt = async (onlyMissing) => {
+    const apiKey = state.settings.replicateKey || $("#replicateKey")?.value?.trim() || "";
+    if (!apiKey) { toast("Add your Replicate API key first"); return; }
+
+    const songs = onlyMissing
+      ? state.songs.filter(s => !s.coverImageUrl)
+      : [...state.songs];
+
+    if (!songs.length) { toast(onlyMissing ? "All songs already have art" : "No songs to generate art for"); return; }
+
+    const label = onlyMissing ? "missing" : "all";
+    if (!confirm(`Generate art for ${songs.length} ${label} song${songs.length === 1 ? "" : "s"}? This may take a while.`)) return;
+
+    const btnMissing = $("#genMissingArt");
+    const btnAll = $("#regenAllArt");
+    let done = 0;
+    const total = songs.length;
+    const updateProgress = () => {
+      const txt = `${done}/${total} done…`;
+      if (btnMissing) btnMissing.textContent = txt;
+      if (btnAll) btnAll.textContent = txt;
+    };
+    if (btnMissing) btnMissing.disabled = true;
+    if (btnAll) btnAll.disabled = true;
+    updateProgress();
+
+    for (const song of songs) {
+      const prompt = [
+        "album cover art",
+        song.genre ? `${song.genre} style` : null,
+        `for a song called "${song.title}"`,
+        song.project ? `by ${song.project}` : null,
+        "cinematic, dark moody aesthetic, absolutely no text, no words, no letters, no numbers, no typography, no writing, purely visual, square format"
+      ].filter(Boolean).join(", ");
+
+      try {
+        const res = await fetch("https://riffbank-art.riffbank.workers.dev", {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ input: { prompt, aspect_ratio: "1:1" } })
+        });
+        const data = await res.json();
+        if (res.ok && data.output) {
+          song.coverImageUrl = data.output;
+          song.updatedAt = nowStamp();
+        }
+      } catch (e) {
+        console.error(`Art gen failed for "${song.title}":`, e);
+      }
+      done++;
+      updateProgress();
+    }
+
+    coverCache.clear();
+    saveState();
+    toast(`Generated art for ${done} song${done === 1 ? "" : "s"} ✨`);
+    renderSettings();
+  };
+
+  $("#genMissingArt")?.addEventListener("click", () => bulkGenArt(true));
+  $("#regenAllArt")?.addEventListener("click", () => bulkGenArt(false));
 
   $("#wipe").addEventListener("click", async () => {
     if (!confirm("Wipe all local RiffBank data on this browser?")) return;
