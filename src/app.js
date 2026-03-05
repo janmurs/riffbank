@@ -2650,7 +2650,7 @@ function advanceToPrevTrack({ render: doRender = false } = {}) {
 }
 
 globalAudio?.addEventListener("ended", () => {
-  if (!advanceToNextTrack()) syncMiniPlayerUI();
+  if (!advanceToNextTrack({ render: fullPlayerOpen })) syncMiniPlayerUI();
 });
 
 // ---------------------
@@ -5376,11 +5376,96 @@ function renderNowPlaying() {
 
   setHeader("Now Playing");
   const isFirstOpen = !fullPlayerOpen;
+  fullPlayerOpen = true;
   setFullPlayerOpen(true);
 
   const title = song.title || "Untitled";
   const subtitle = v.label || "Version";
   const art = coverSvg(song);
+
+  // ── Track-change horizontal slide (skip full rebuild when already open) ──
+  if (!isFirstOpen) {
+    const dir = _miniCarouselDir || 1;
+    _miniCarouselDir = 0;
+
+    const fp = document.getElementById("fullPlayer");
+    if (fp) {
+      const artCard = fp.querySelector(".fpArtCard");
+      const meta = fp.querySelector(".fpMeta");
+      const bg = fp.querySelector(".fpBg");
+
+      if (artCard && meta) {
+        const exitX  = dir === 1 ? "-110%" : "110%";
+        const enterX = dir === 1 ? "110%"  : "-110%";
+        const dur = "0.4s";
+        const ease = "cubic-bezier(.32,.72,.24,1)";
+
+        // Clone old content for exit animation
+        const fpRect   = fp.getBoundingClientRect();
+        const artRect  = artCard.getBoundingClientRect();
+        const metaRect = meta.getBoundingClientRect();
+
+        const artClone  = artCard.cloneNode(true);
+        const metaClone = meta.cloneNode(true);
+
+        for (const c of [artClone, metaClone]) {
+          c.style.position = "absolute";
+          c.style.zIndex = "5";
+          c.style.margin = "0";
+          c.style.flexShrink = "0";
+        }
+        artClone.style.top    = (artRect.top  - fpRect.top)  + "px";
+        artClone.style.left   = (artRect.left - fpRect.left) + "px";
+        artClone.style.width  = artRect.width  + "px";
+        artClone.style.height = artRect.height + "px";
+        metaClone.style.top   = (metaRect.top  - fpRect.top)  + "px";
+        metaClone.style.left  = (metaRect.left - fpRect.left) + "px";
+        metaClone.style.width = metaRect.width + "px";
+
+        fp.appendChild(artClone);
+        fp.appendChild(metaClone);
+
+        // Update real elements with new song data
+        artCard.querySelector(".fpArt").innerHTML = art;
+        meta.querySelector(".fpTitle").textContent = title;
+        meta.querySelector(".fpSub").textContent   = subtitle;
+        if (bg) bg.innerHTML = art;
+
+        // Position new content off-screen
+        artCard.style.transition = "none";
+        meta.style.transition    = "none";
+        artCard.style.transform  = `translateX(${enterX})`;
+        meta.style.transform     = `translateX(${enterX})`;
+
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          // Slide clones out
+          artClone.style.transition  = `transform ${dur} ${ease}, opacity ${dur} ease`;
+          metaClone.style.transition = `transform ${dur} ${ease}, opacity ${dur} ease`;
+          artClone.style.transform   = `translateX(${exitX})`;
+          artClone.style.opacity     = "0";
+          metaClone.style.transform  = `translateX(${exitX})`;
+          metaClone.style.opacity    = "0";
+
+          // Slide new content in
+          artCard.style.transition = `transform ${dur} ${ease}`;
+          meta.style.transition    = `transform ${dur} ${ease}`;
+          artCard.style.transform  = "translateX(0)";
+          meta.style.transform     = "translateX(0)";
+
+          const cleanUp = (el) => {
+            el.style.transition = "";
+            el.style.transform  = "";
+          };
+          artClone.addEventListener("transitionend",  () => artClone.remove(),  { once: true });
+          metaClone.addEventListener("transitionend", () => metaClone.remove(), { once: true });
+          artCard.addEventListener("transitionend",   () => cleanUp(artCard),   { once: true });
+          meta.addEventListener("transitionend",      () => cleanUp(meta),      { once: true });
+        }));
+
+        return; // skip full innerHTML rebuild
+      }
+    }
+  }
 
   const _shuffleSvg = `<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="4" y1="4" x2="21" y2="21"/></svg>`;
   const _prevSvg    = `<svg viewBox="0 0 24 24" width="35" height="35" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>`;
@@ -5488,6 +5573,7 @@ function renderNowPlaying() {
 
   const closeFullPlayer = () => {
     cleanup();
+    fullPlayerOpen = false;
     setFullPlayerOpen(false);
     playerScreen = "list";
     if (prevTabBeforeFullPlayer) {
