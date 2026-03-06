@@ -219,8 +219,8 @@ function triggerForwardSlide() {
   const overlay = document.createElement("div");
   overlay.className = "viewSlideOverlay";
   overlay.style.top = "0";
-  overlay.style.left = `${r.left}px`;
-  overlay.style.width = `${r.width}px`;
+  overlay.style.left = "0";
+  overlay.style.width = "100%";
   overlay.style.bottom = navBottomOffset;
   overlay.style.height = "";  // use bottom instead of explicit height
   overlay.style.transform = "translateX(100%)";
@@ -230,13 +230,13 @@ function triggerForwardSlide() {
   if (topbar) {
     const tbRect = topbar.getBoundingClientRect();
     const tbClone = topbar.cloneNode(true);
-    tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:0;width:100%;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
+    tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${r.left}px;width:${r.width}px;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
     overlay.appendChild(tbClone);
   }
 
   // Screen content clone — positioned below the topbar.
   const screenWrap = document.createElement("div");
-  screenWrap.style.cssText = `position:absolute;top:${r.top}px;left:0;width:100%;height:${r.height}px;overflow:hidden;`;
+  screenWrap.style.cssText = `position:absolute;top:${r.top}px;left:${r.left}px;width:${r.width}px;height:${r.height}px;overflow:hidden;`;
   screenWrap.innerHTML = el.outerHTML;
   overlay.appendChild(screenWrap);
 
@@ -4416,6 +4416,18 @@ window._refreshCoverFromDrive = async (songId, driveFileId, imgEl) => {
     }
   }
 };
+// Fallback: if cover URL is broken (expired Replicate URL, no Drive backup), clear it so SVG art shows
+window._clearBrokenCover = (songId, imgEl) => {
+  const song = state.songs.find(s => s.id === songId);
+  if (song) {
+    song.coverImageUrl = null;
+    coverCache.clear();
+    saveState();
+  }
+  if (imgEl?.parentElement) {
+    imgEl.parentElement.innerHTML = coverSvg(song || { id: songId, title: "", project: "", genre: "" }, { lite: true });
+  }
+};
 let artCooldownUntil = 0; // timestamp — global 10s cooldown after any art request
 const bulkArtState = { running: false, done: 0, total: 0 }; // bulk art gen progress
 
@@ -4521,6 +4533,9 @@ async function generateArtForSong(song, apiKey) {
       console.log("[ArtGen] Drive upload result:", driveResult);
       if (driveResult.success) {
         song.coverDriveFileId = driveResult.driveFileId;
+        // Use persistent Drive stream URL instead of temporary Replicate URL
+        const driveUrl = await gdriveGetStreamUrl(driveResult.driveFileId);
+        if (driveUrl) url = driveUrl;
       }
     }
   } catch (e) {
@@ -4628,7 +4643,8 @@ function coverSvg(song, { lite = false } = {}) {
   if (song.coverImageUrl) {
     const errHandler = song.coverDriveFileId
       ? ` onerror="this.onerror=null;window._refreshCoverFromDrive&&window._refreshCoverFromDrive('${escapeHtml(song.id)}','${escapeHtml(song.coverDriveFileId)}',this)"`
-      : "";
+      : ` onerror="this.onerror=null;window._clearBrokenCover&&window._clearBrokenCover('${escapeHtml(song.id)}',this)"`;
+
     const img = `<img src="${escapeHtml(song.coverImageUrl)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;display:block" loading="lazy" alt=""${errHandler}>`;
     coverCache.set(key, img);
     return img;
