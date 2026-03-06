@@ -111,7 +111,7 @@ const screens = {
 };
 
 const backPeekEl = document.getElementById("back-peek");
-let backPeekHTML = "";
+let backPeekNode = null;  // cloned DOM node (not HTML string) — preserves decoded images
 
 // Navigation history stack — each entry is the HTML of a screen we navigated away from.
 // Used so swipe-back and forward-slide both show the correct "ace under the queen".
@@ -121,8 +121,9 @@ let navScrollStack = [];  // scrollTop of each screen pushed to navHistoryStack
 let navStateStack = [];   // app state snapshots for each forward nav (so goBack restores correctly)
 let prevNavState = null;  // snapshot of nav state captured at render() time, pushed by triggerForwardSlide
 let _pendingBackState = null; // state popped by slideBackTransition, consumed by goBack doRender
-let prevAceViewTop = 0;   // top of the previous screen when backPeekHTML was captured
-let prevAceScrollTop = 0; // scrollTop of the previous screen when backPeekHTML was captured
+let prevAceViewTop = 0;   // top of the previous screen when backPeekNode was captured
+let prevAceScrollTop = 0; // scrollTop of the previous screen when backPeekNode was captured
+let prevAcePadding = "";  // computed padding of the screen when backPeekNode was captured
 let prevTopbarHTML = "";  // outerHTML of topbar at render() snapshot time (before setHeader changes it)
 let prevTopbarRect = null; // bounding rect of topbar at snapshot time
 let swipeAceEl = null;   // fixed-position ace overlay (home snapshot) — z-index: 499
@@ -179,7 +180,7 @@ function triggerForwardSlide() {
 
   // Push the "previous screen" HTML (and its topbar snapshot) onto the nav stacks
   // so swipe-back can restore both the correct content and topbar title.
-  if (backPeekHTML) navHistoryStack.push(backPeekHTML);
+  if (backPeekNode) navHistoryStack.push(backPeekNode);
   navHistoryTopbarStack.push(prevTopbarHTML);
   navScrollStack.push(prevAceScrollTop);
   if (prevNavState) navStateStack.push(prevNavState);
@@ -194,7 +195,7 @@ function triggerForwardSlide() {
   // including the topbar region. Contains a frozen topbar clone (prevTopbarHTML) showing
   // the previous title, plus the screen content below it (prevAceViewTop).
   let aceOverlay = null;
-  if (backPeekHTML) {
+  if (backPeekNode) {
     const viewEl = document.getElementById("view");
     const viewRect = viewEl?.getBoundingClientRect();
     const aceLeft = viewRect ? viewRect.left : r.left;
@@ -211,20 +212,18 @@ function triggerForwardSlide() {
         aceOverlay.appendChild(tbEl);
       }
     }
-    // Screen content below the topbar.
-    // prevTopbarHTML is empty for home (no visible topbar), so use it to detect home.
-    // Non-home .screen elements have CSS padding:10px 0 12px that backPeekHTML (innerHTML)
-    // doesn't include — replicate it here so content position matches the original exactly.
-    const aceHasTopbar = !!(prevTopbarHTML && prevTopbarRect);
+    // Screen content below the topbar — uses cloneNode to preserve decoded image data
+    // (innerHTML re-parses <img> tags causing flicker as images re-fetch/re-decode).
     const aceContent = document.createElement("div");
-    aceContent.style.cssText = `position:absolute;top:${prevAceViewTop}px;left:0;width:100%;bottom:0;overflow:hidden;${aceHasTopbar ? "padding:10px 0 12px;box-sizing:border-box;" : ""}`;
-    if (prevAceScrollTop > 0) {
-      aceContent.innerHTML = `<div style="margin-top:-${prevAceScrollTop}px">${backPeekHTML}</div>`;
-    } else {
-      aceContent.innerHTML = backPeekHTML;
-    }
+    aceContent.style.cssText = `position:absolute;top:${prevAceViewTop}px;left:0;width:100%;bottom:0;overflow:hidden;`;
+    const aceScreenClone = backPeekNode.cloneNode(true);
+    // Freeze padding inline so CSS class changes (e.g. body.isHome removal) don't shift content
+    aceScreenClone.style.padding = prevAcePadding;
+    aceContent.appendChild(aceScreenClone);
     aceOverlay.appendChild(aceContent);
     document.body.appendChild(aceOverlay);
+    // Set scroll position after DOM attachment (scrollTop only works on attached elements)
+    aceScreenClone.scrollTop = prevAceScrollTop;
   }
 
   // Build queen overlay (new screen) — covers full height from top:0 so the topbar
@@ -251,7 +250,7 @@ function triggerForwardSlide() {
   // Screen content clone — positioned below the topbar.
   const screenWrap = document.createElement("div");
   screenWrap.style.cssText = `position:absolute;top:${r.top}px;left:${r.left}px;width:${r.width}px;height:${r.height}px;overflow:hidden;`;
-  screenWrap.innerHTML = el.outerHTML;
+  screenWrap.appendChild(el.cloneNode(true));
   overlay.appendChild(screenWrap);
 
   document.body.appendChild(overlay);
@@ -267,7 +266,7 @@ function triggerForwardSlide() {
   overlay.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
   overlay.style.transform = "";
 
-  // Parallax: ace drifts left as queen covers it
+  // Parallax: ace drifts left as queen covers it (skip for home — keep it perfectly still)
   if (aceOverlay) {
     aceOverlay.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
     aceOverlay.style.transform = `translateX(-${ACE_PARALLAX}px)`;
@@ -1699,7 +1698,7 @@ function syncBackButton() {
 headerBackEl?.addEventListener("click", () => goBack({ animate: true }));
 
 function syncTabs() {
-  const highlightTab = (currentTab === "songs" || currentTab === "settings") ? "home" : currentTab;
+  const highlightTab = currentTab === "songs" ? "home" : currentTab;
   document.querySelectorAll(".tab").forEach((b) => {
     b.classList.toggle("active", b.dataset.tab === highlightTab);
   });
@@ -1928,9 +1927,9 @@ document.querySelectorAll(".tab").forEach((btn) => {
 
       const screenWrap = document.createElement("div");
       screenWrap.style.cssText = `position:absolute;top:${viewRect.top}px;left:${viewRect.left}px;width:${viewRect.width}px;height:${viewRect.height}px;overflow:hidden;`;
-      screenWrap.innerHTML = el.outerHTML;
-      const snap = screenWrap.querySelector(".screen");
-      if (snap && el) snap.scrollTop = el.scrollTop;
+      const cloned = el.cloneNode(true);
+      screenWrap.appendChild(cloned);
+      cloned.scrollTop = el.scrollTop;
       queenEl.appendChild(screenWrap);
     }
 
@@ -2106,9 +2105,9 @@ function slideBackTransition(renderUnderneath) {
 
   const screenWrap = document.createElement("div");
   screenWrap.style.cssText = `position:absolute;top:${viewRect.top}px;left:${viewRect.left}px;width:${viewRect.width}px;height:${viewRect.height}px;overflow:hidden;`;
-  screenWrap.innerHTML = el.outerHTML;
-  const snap = screenWrap.querySelector(".screen");
-  if (snap && el) snap.scrollTop = el.scrollTop;
+  const cloned = el.cloneNode(true);
+  screenWrap.appendChild(cloned);
+  cloned.scrollTop = el.scrollTop;
   queenEl.appendChild(screenWrap);
 
   document.body.appendChild(queenEl);
@@ -2248,11 +2247,11 @@ if (!drawerOpen && t.clientX <= 24) {
   touchStartY = t.clientY;
 
   // Pre-populate the peek layer so the previous screen is visible behind the swipe.
-  // Use navHistoryStack for accurate depth; fall back to backPeekHTML.
+  // Use navHistoryStack for accurate depth; fall back to backPeekNode.
   if (touchMode === "back") {
-    const peekContent = navHistoryStack.length > 0
+    const peekNode = navHistoryStack.length > 0
       ? navHistoryStack[navHistoryStack.length - 1]
-      : backPeekHTML;
+      : backPeekNode;
 
     // Compute the bottom boundary: stop at nav bar top so bottomNav stays visible.
     const bnEl = document.getElementById("bottomNav");
@@ -2271,7 +2270,7 @@ if (!drawerOpen && t.clientX <= 24) {
     const peekTopbarHTML = navHistoryTopbarStack.length > 0
       ? navHistoryTopbarStack[navHistoryTopbarStack.length - 1]
       : prevTopbarHTML;
-    const isHomeAce = peekContent && peekContent.includes("homeWrap");
+    const isHomeAce = peekNode && peekNode.querySelector(".homeWrap");
     const swipeAceContentTop = isHomeAce ? 0 : (viewRect ? viewRect.top : 0);
     swipeAceEl = document.createElement("div");
     swipeAceEl.style.cssText = `position:fixed;top:0;left:${aceLeft}px;width:${aceWidth}px;bottom:${navBottomOffset};z-index:499;overflow:hidden;pointer-events:none;background:var(--bg);`;
@@ -2289,16 +2288,22 @@ if (!drawerOpen && t.clientX <= 24) {
         }
       }
     }
-    // Screen content below topbar.
-    // Non-home .screen elements have CSS padding:10px 0 12px that innerHTML doesn't include.
+    // Screen content below topbar — cloneNode preserves decoded images (no flicker).
     const swipeAceContent = document.createElement("div");
-    swipeAceContent.style.cssText = `position:absolute;top:${swipeAceContentTop}px;left:0;width:100%;bottom:0;overflow:hidden;${isHomeAce ? "" : "padding:10px 0 12px;box-sizing:border-box;"}`;
+    swipeAceContent.style.cssText = `position:absolute;top:${swipeAceContentTop}px;left:0;width:100%;bottom:0;overflow:hidden;`;
     const swipeAceScrollTop = navScrollStack.length > 0 ? navScrollStack[navScrollStack.length - 1] : prevAceScrollTop;
-    swipeAceContent.innerHTML = swipeAceScrollTop > 0
-      ? `<div style="margin-top:-${swipeAceScrollTop}px">${peekContent || ""}</div>`
-      : (peekContent || "");
-    swipeAceEl.appendChild(swipeAceContent);
-    document.body.appendChild(swipeAceEl);
+    if (peekNode) {
+      const aceScreenClone = peekNode.cloneNode(true);
+      // Freeze padding so CSS class changes (body.isHome removal) don't shift content
+      if (isHomeAce) aceScreenClone.style.padding = "0";
+      swipeAceContent.appendChild(aceScreenClone);
+      swipeAceEl.appendChild(swipeAceContent);
+      document.body.appendChild(swipeAceEl);
+      aceScreenClone.scrollTop = swipeAceScrollTop;
+    } else {
+      swipeAceEl.appendChild(swipeAceContent);
+      document.body.appendChild(swipeAceEl);
+    }
 
     // QUEEN (z:500): pixel-perfect snapshot of the current songs screen.
     // Solid dark background (gradient removed). Stops at nav bar top.
@@ -2320,11 +2325,11 @@ if (!drawerOpen && t.clientX <= 24) {
       const screenRect = activeScreenEl.getBoundingClientRect();
       const screenWrap = document.createElement("div");
       screenWrap.style.cssText = `position:absolute;top:${screenRect.top}px;left:${screenRect.left}px;width:${screenRect.width}px;height:${screenRect.height}px;overflow:hidden;`;
-      // Use outerHTML so the .screen wrapper (with its padding:10px) is included —
-      // otherwise the content appears 10px too high inside the swipe queen.
-      screenWrap.innerHTML = activeScreenEl.outerHTML;
+      // cloneNode keeps the .screen wrapper (with its padding:10px) and avoids
+      // SVG re-parse flicker that innerHTML/outerHTML causes.
+      clonedScreen = activeScreenEl.cloneNode(true);
+      screenWrap.appendChild(clonedScreen);
       swipeQueenEl.appendChild(screenWrap);
-      clonedScreen = screenWrap.firstElementChild;
     }
 
     document.body.appendChild(swipeQueenEl);
@@ -3270,9 +3275,10 @@ $("#importFile")?.addEventListener("change", async (e) => {
 function render() {
   // Snapshot current screen content so back-swipe peek can show it behind the next screen
   if (activeScreenEl?.innerHTML) {
-    backPeekHTML = activeScreenEl.innerHTML;
+    backPeekNode = activeScreenEl.cloneNode(true);
     prevAceViewTop = activeScreenEl.getBoundingClientRect().top || 0;
     prevAceScrollTop = activeScreenEl.scrollTop || 0;
+    prevAcePadding = getComputedStyle(activeScreenEl).padding;
     // Note: prevNavState is captured by captureNavState() BEFORE state changes,
     // not here, because state vars are already mutated before render() is called.
     // Capture topbar state BEFORE setHeader/syncBackButton change it, so the ace overlay
@@ -4451,6 +4457,11 @@ const generatingArtSongs = new Set(); // song IDs currently generating art
 window._refreshCoverFromDrive = async (songId, driveFileId, imgEl) => {
   const url = await gdriveGetStreamUrl(driveFileId);
   if (url && imgEl) {
+    // If this refreshed URL also fails, fall back to clearing the cover entirely
+    imgEl.onerror = () => {
+      imgEl.onerror = null;
+      window._clearBrokenCover && window._clearBrokenCover(songId, imgEl);
+    };
     imgEl.src = url;
     // Update song state so future renders use fresh URL
     const song = state.songs.find(s => s.id === songId);
@@ -4458,6 +4469,17 @@ window._refreshCoverFromDrive = async (songId, driveFileId, imgEl) => {
       song.coverImageUrl = url;
       coverCache.clear();
       saveState();
+    }
+  } else if (imgEl) {
+    // Drive URL couldn't be generated (likely expired auth) — show SVG for now but keep coverDriveFileId
+    const song = state.songs.find(s => s.id === songId);
+    if (song) {
+      song.coverImageUrl = null;
+      coverCache.clear();
+      // Don't saveState here — coverDriveFileId will re-resolve on next render via lazy path
+    }
+    if (imgEl.parentElement) {
+      imgEl.parentElement.innerHTML = coverSvg(song || { id: songId, title: "", project: "", genre: "" }, { lite: true });
     }
   }
 };
@@ -4690,9 +4712,23 @@ function coverSvg(song, { lite = false } = {}) {
       ? ` onerror="this.onerror=null;window._refreshCoverFromDrive&&window._refreshCoverFromDrive('${escapeHtml(song.id)}','${escapeHtml(song.coverDriveFileId)}',this)"`
       : ` onerror="this.onerror=null;window._clearBrokenCover&&window._clearBrokenCover('${escapeHtml(song.id)}',this)"`;
 
-    const img = `<img src="${escapeHtml(song.coverImageUrl)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;display:block" loading="lazy" alt=""${errHandler}>`;
+    const img = `<img src="${escapeHtml(song.coverImageUrl)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;display:block" decoding="sync" alt=""${errHandler}>`;
     coverCache.set(key, img);
     return img;
+  }
+
+  // coverImageUrl is missing but Drive file exists — resolve it lazily
+  if (song.coverDriveFileId && !song._coverResolving) {
+    song._coverResolving = true;
+    gdriveGetStreamUrl(song.coverDriveFileId).then(url => {
+      song._coverResolving = false;
+      if (url) {
+        song.coverImageUrl = url;
+        coverCache.clear();
+        saveState();
+        render();
+      }
+    }).catch(() => { song._coverResolving = false; });
   }
 
   const seed = hashStr(`${song.id}|${song.title}|${song.project}|${song.genre}`);

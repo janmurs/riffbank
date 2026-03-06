@@ -412,16 +412,24 @@ export async function gdriveUploadCoverArt({ blob, project, songTitle }) {
 export async function gdriveGetStreamUrl(driveFileId) {
   if (!driveFileId) return null;
 
-  // Token still valid — return URL immediately
-  if (_accessToken && Date.now() < _tokenExpiry) {
-    return `https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media&access_token=${encodeURIComponent(_accessToken)}`;
-  }
-
-  // Token missing/expired — attempt a silent refresh before giving up
-  const token = await _ensureToken();
+  const token = _accessToken && Date.now() < _tokenExpiry
+    ? _accessToken
+    : await _ensureToken();
   if (!token) return null;
 
-  return `https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media&access_token=${encodeURIComponent(token)}`;
+  // Fetch via Authorization header (works even when query-param tokens get 403)
+  // and return a blob URL that <img> / <audio> can use directly
+  try {
+    const res = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  } catch {
+    return null;
+  }
 }
 
 /**
