@@ -10,7 +10,7 @@
 window.onerror = (m, src, line, col) => alert(`JS ERROR:\n${m}\n${line}:${col}`);
 
 // Dev toggle: skip splash animation
- const DISABLE_SPLASH = false;
+ const DISABLE_SPLASH = true;
 
 // console.log("RIFFBANK APP.JS LOADED ✅", new Date().toISOString());
 // alert("RIFFBANK APP.JS LOADED ✅ " + new Date().toISOString());
@@ -33,6 +33,7 @@ import {
   gdrivePullState,
   gdrivePullStateSilent,
   gdriveRebuildFromFolders,
+  gdriveUploadCoverArt,
 } from "./gdrive.js";
 
 const LS_KEY = "riffbank_v1";
@@ -109,15 +110,19 @@ const screens = {
 };
 
 const backPeekEl = document.getElementById("back-peek");
-let backPeekHTML = "";
+let backPeekNode = null;  // cloned DOM node (not HTML string) — preserves decoded images
 
 // Navigation history stack — each entry is the HTML of a screen we navigated away from.
 // Used so swipe-back and forward-slide both show the correct "ace under the queen".
 let navHistoryStack = [];
 let navHistoryTopbarStack = []; // topbar HTML for each navHistoryStack entry (for ace topbar in swipe-back)
 let navScrollStack = [];  // scrollTop of each screen pushed to navHistoryStack
-let prevAceViewTop = 0;   // top of the previous screen when backPeekHTML was captured
-let prevAceScrollTop = 0; // scrollTop of the previous screen when backPeekHTML was captured
+let navStateStack = [];   // app state snapshots for each forward nav (so goBack restores correctly)
+let prevNavState = null;  // snapshot of nav state captured at render() time, pushed by triggerForwardSlide
+let _pendingBackState = null; // state popped by slideBackTransition, consumed by goBack doRender
+let prevAceViewTop = 0;   // top of the previous screen when backPeekNode was captured
+let prevAceScrollTop = 0; // scrollTop of the previous screen when backPeekNode was captured
+let prevAcePadding = "";  // computed padding of the screen when backPeekNode was captured
 let prevTopbarHTML = "";  // outerHTML of topbar at render() snapshot time (before setHeader changes it)
 let prevTopbarRect = null; // bounding rect of topbar at snapshot time
 let swipeAceEl = null;   // fixed-position ace overlay (home snapshot) — z-index: 499
@@ -152,9 +157,21 @@ function _hidePeekBackdrop() {
   backPeekEl.innerHTML = "";
 }
 
+// Capture nav state BEFORE mutating state vars for a forward navigation.
+// Call this before changing currentTab/drawerView/etc, then call render() + triggerForwardSlide().
+function captureNavState() {
+  prevNavState = {
+    currentTab, drawerView, projectDetailScreen, releaseDetailId,
+    selectedSongId, selectedVersionId, songsView, overlayView,
+    songsBackTarget, headerTitle: headerTitle?.textContent || "RiffBank"
+  };
+}
+
 // Slide the new screen in from the right (call after render() for forward navigation).
 // Uses an opaque overlay snapshot of the new screen so the ace (previous screen) shows
 // cleanly on the left without any see-through bleed from transparent .screen elements.
+const ACE_PARALLAX = 30; // px the ace shifts left during transitions
+
 function triggerForwardSlide() {
   const el = activeScreenEl;
   const topbar = document.querySelector(".topbar");
@@ -162,9 +179,10 @@ function triggerForwardSlide() {
 
   // Push the "previous screen" HTML (and its topbar snapshot) onto the nav stacks
   // so swipe-back can restore both the correct content and topbar title.
-  if (backPeekHTML) navHistoryStack.push(backPeekHTML);
+  if (backPeekNode) navHistoryStack.push(backPeekNode);
   navHistoryTopbarStack.push(prevTopbarHTML);
   navScrollStack.push(prevAceScrollTop);
+  if (prevNavState) navStateStack.push(prevNavState);
 
   // Shared measurements.
   const bnEl = document.getElementById("bottomNav");
@@ -176,7 +194,7 @@ function triggerForwardSlide() {
   // including the topbar region. Contains a frozen topbar clone (prevTopbarHTML) showing
   // the previous title, plus the screen content below it (prevAceViewTop).
   let aceOverlay = null;
-  if (backPeekHTML) {
+  if (backPeekNode) {
     const viewEl = document.getElementById("view");
     const viewRect = viewEl?.getBoundingClientRect();
     const aceLeft = viewRect ? viewRect.left : r.left;
@@ -193,20 +211,18 @@ function triggerForwardSlide() {
         aceOverlay.appendChild(tbEl);
       }
     }
-    // Screen content below the topbar.
-    // prevTopbarHTML is empty for home (no visible topbar), so use it to detect home.
-    // Non-home .screen elements have CSS padding:10px 0 12px that backPeekHTML (innerHTML)
-    // doesn't include — replicate it here so content position matches the original exactly.
-    const aceHasTopbar = !!(prevTopbarHTML && prevTopbarRect);
+    // Screen content below the topbar — uses cloneNode to preserve decoded image data
+    // (innerHTML re-parses <img> tags causing flicker as images re-fetch/re-decode).
     const aceContent = document.createElement("div");
-    aceContent.style.cssText = `position:absolute;top:${prevAceViewTop}px;left:0;width:100%;bottom:0;overflow:hidden;${aceHasTopbar ? "padding:10px 0 12px;box-sizing:border-box;" : ""}`;
-    if (prevAceScrollTop > 0) {
-      aceContent.innerHTML = `<div style="margin-top:-${prevAceScrollTop}px">${backPeekHTML}</div>`;
-    } else {
-      aceContent.innerHTML = backPeekHTML;
-    }
+    aceContent.style.cssText = `position:absolute;top:${prevAceViewTop}px;left:0;width:100%;bottom:0;overflow:hidden;`;
+    const aceScreenClone = backPeekNode.cloneNode(true);
+    // Freeze padding inline so CSS class changes (e.g. body.isHome removal) don't shift content
+    aceScreenClone.style.padding = prevAcePadding;
+    aceContent.appendChild(aceScreenClone);
     aceOverlay.appendChild(aceContent);
     document.body.appendChild(aceOverlay);
+    // Set scroll position after DOM attachment (scrollTop only works on attached elements)
+    aceScreenClone.scrollTop = prevAceScrollTop;
   }
 
   // Build queen overlay (new screen) — covers full height from top:0 so the topbar
@@ -215,8 +231,8 @@ function triggerForwardSlide() {
   const overlay = document.createElement("div");
   overlay.className = "viewSlideOverlay";
   overlay.style.top = "0";
-  overlay.style.left = `${r.left}px`;
-  overlay.style.width = `${r.width}px`;
+  overlay.style.left = "0";
+  overlay.style.width = "100%";
   overlay.style.bottom = navBottomOffset;
   overlay.style.height = "";  // use bottom instead of explicit height
   overlay.style.transform = "translateX(100%)";
@@ -226,14 +242,14 @@ function triggerForwardSlide() {
   if (topbar) {
     const tbRect = topbar.getBoundingClientRect();
     const tbClone = topbar.cloneNode(true);
-    tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:0;width:100%;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
+    tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${r.left}px;width:${r.width}px;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
     overlay.appendChild(tbClone);
   }
 
   // Screen content clone — positioned below the topbar.
   const screenWrap = document.createElement("div");
-  screenWrap.style.cssText = `position:absolute;top:${r.top}px;left:0;width:100%;height:${r.height}px;overflow:hidden;`;
-  screenWrap.innerHTML = el.outerHTML;
+  screenWrap.style.cssText = `position:absolute;top:${r.top}px;left:${r.left}px;width:${r.width}px;height:${r.height}px;overflow:hidden;`;
+  screenWrap.appendChild(el.cloneNode(true));
   overlay.appendChild(screenWrap);
 
   document.body.appendChild(overlay);
@@ -248,6 +264,12 @@ function triggerForwardSlide() {
 
   overlay.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
   overlay.style.transform = "";
+
+  // Parallax: ace drifts left as queen covers it (skip for home — keep it perfectly still)
+  if (aceOverlay) {
+    aceOverlay.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
+    aceOverlay.style.transform = `translateX(-${ACE_PARALLAX}px)`;
+  }
 
   overlay.addEventListener("transitionend", () => {
     overlay.remove();
@@ -267,6 +289,7 @@ const toastEl = $("#toast");
 const AUDIO_DB = "riffbank_audio_v1";
 const AUDIO_STORE = "files";
 const audioUrlCache = new Map(); // localAudioId -> objectURL
+const coverUrlCache = new Map(); // coverDriveFileId -> blob objectURL (persists via IndexedDB)
 
 // ---------------------
 // iOS audio unlock (required if you do async before play())
@@ -337,6 +360,41 @@ async function getAudioBlob(id) {
     req.onsuccess = () => resolve(req.result || null);
     req.onerror = () => reject(req.error);
   });
+}
+
+// ---------------------
+// Cover art cache (IndexedDB) — survives app restarts
+// ---------------------
+async function putCoverBlob(driveFileId, blob) {
+  if (!driveFileId || !blob) return;
+  const id = `cover:${driveFileId}`;
+  await putAudioBlob({ id, blob, name: "cover", type: blob.type || "image/jpeg", size: blob.size });
+}
+
+async function getCoverBlobUrl(driveFileId) {
+  if (!driveFileId) return null;
+  if (coverUrlCache.has(driveFileId)) return coverUrlCache.get(driveFileId);
+  const rec = await getAudioBlob(`cover:${driveFileId}`);
+  if (rec?.blob) {
+    const url = URL.createObjectURL(rec.blob);
+    coverUrlCache.set(driveFileId, url);
+    return url;
+  }
+  return null;
+}
+
+// Restore cover URLs from IndexedDB for all songs (call on startup, before render)
+async function restoreCoverUrlsFromCache() {
+  for (const song of (state.songs || [])) {
+    if (!song.coverDriveFileId) continue;
+    const url = await getCoverBlobUrl(song.coverDriveFileId);
+    if (url) {
+      song.coverImageUrl = url;
+    } else {
+      // Blob URL from previous session is dead — clear it so SVG shows instead of broken img
+      if (song.coverImageUrl) song.coverImageUrl = null;
+    }
+  }
 }
 
 function getActiveTab() {
@@ -551,6 +609,11 @@ function wireNowPlayingEvents(overlay) {
   overlay.querySelector("#fpNext")?.addEventListener("click", (e) => {
     e.stopPropagation();
     if (!state.player?.queue?.length) return;
+    _miniCarouselDir = 1; // forward
+    if (state.player.nowPlaying) {
+      if (!state.player.playHistory) state.player.playHistory = [];
+      state.player.playHistory.push(state.player.nowPlaying);
+    }
     const next = state.player.queue.shift();
     state.player.nowPlaying = next;
     saveState();
@@ -693,6 +756,11 @@ const miniScrubEl  = document.getElementById("miniScrub");
 const miniTitleEl  = document.getElementById("miniTitle");
 const miniSubEl    = document.getElementById("miniSub");
 
+// Track currently displayed song so we can detect real changes
+let _miniDisplayedKey = "";
+// Direction hint for carousel: 1 = forward (slide left), -1 = backward (slide right)
+let _miniCarouselDir = 0;
+
 function isPlayable(v){
   return !!(v?.link || v?.fileId || v?.localAudioId || v?.driveFileId);
 }
@@ -752,35 +820,71 @@ if (typeof isNowPlayingFullscreen !== "undefined" && isNowPlayingFullscreen) {
     return;
   }
 
-  // show
+  // Determine if mini player is already on screen
+  const wasAlreadyVisible = miniPlayerEl.classList.contains("visible") && !miniPlayerEl.classList.contains("hidden");
+  const newKey = now.songId + "/" + now.versionId;
+  const songChanged = newKey !== _miniDisplayedKey;
+
+  // Show mini player — suppress slide-up transition if already visible
+  miniPlayerEl.style.transition = wasAlreadyVisible ? "none" : "";
   miniPlayerEl.classList.remove("hidden");
-  miniPlayerEl.setAttribute("aria-hidden", "false");
-  document.body.classList.add("hasMiniPlayer");
-  requestAnimationFrame(() => {
   miniPlayerEl.classList.add("visible");
   miniPlayerEl.setAttribute("aria-hidden", "false");
-  syncMiniPlayerReserveSpace(); // <-- IMPORTANT: updates --dock-h so content isn't covered
-  });
-
-  // album art
-  if (miniArtEl) {
-    // Use your existing neon cover generator (lite for speed)
-    miniArtEl.innerHTML = coverSvg(song, { lite: true });
+  document.body.classList.add("hasMiniPlayer");
+  syncMiniPlayerReserveSpace();
+  if (wasAlreadyVisible) {
+    requestAnimationFrame(() => { miniPlayerEl.style.transition = ""; });
   }
 
-// title / subtitle (set first so text always shows even if art generation fails)
-if (miniTitleEl) miniTitleEl.textContent = song.title || "Untitled";
-if (miniSubEl) miniSubEl.textContent = song.project || "";
+  // ── Carousel song content swap ──
+  const inner = miniPlayerEl.querySelector(".miniSwipeInner");
+  const dir = _miniCarouselDir;
+  _miniCarouselDir = 0; // consume direction
 
-// album art
-if (miniArtEl) {
-  try {
-    miniArtEl.innerHTML = coverSvg(song, { lite: true });
-  } catch (e) {
-    console.warn("mini coverSvg failed:", e);
-    miniArtEl.innerHTML = "";
+  if (wasAlreadyVisible && songChanged && inner && dir !== 0) {
+    // Build incoming content off-screen
+    const comeFrom = dir > 0 ? "110%" : "-110%";
+    const flyTo    = dir > 0 ? "-110%" : "110%";
+
+    let peekArt = "";
+    try { peekArt = coverSvg(song, { lite: true }); } catch {}
+
+    const ghost = document.createElement("div");
+    ghost.className = "miniSwipeInner";
+    ghost.style.cssText = `position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;transform:translateX(${comeFrom});transition:none;`;
+    ghost.innerHTML = `<div class="miniArt" aria-hidden="true">${peekArt}</div><div class="miniMeta"><div class="miniTitle">${escapeHtml(song.title || "Untitled")}</div><div class="miniSub">${escapeHtml(song.project || "")}</div></div>`;
+
+    const swipeZone = miniPlayerEl.querySelector(".miniSwipeZone");
+    if (swipeZone) swipeZone.appendChild(ghost);
+
+    // Slide current out + ghost in
+    inner.style.transition = "transform 220ms ease";
+    inner.style.transform = `translateX(${flyTo})`;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      ghost.style.transition = "transform 220ms ease";
+      ghost.style.transform = "translateX(0)";
+    }));
+
+    // After animation: update real inner, remove ghost
+    setTimeout(() => {
+      ghost.remove();
+      inner.style.transition = "none";
+      inner.style.transform = "translateX(0)";
+      // Update the real inner content to match the new song
+      if (miniArtEl) try { miniArtEl.innerHTML = coverSvg(song, { lite: true }); } catch { miniArtEl.innerHTML = ""; }
+      if (miniTitleEl) miniTitleEl.textContent = song.title || "Untitled";
+      if (miniSubEl) miniSubEl.textContent = song.project || "";
+    }, 240);
+  } else {
+    // No carousel — just update content in place
+    if (miniTitleEl) miniTitleEl.textContent = song.title || "Untitled";
+    if (miniSubEl) miniSubEl.textContent = song.project || "";
+    if (miniArtEl) {
+      try { miniArtEl.innerHTML = coverSvg(song, { lite: true }); } catch { miniArtEl.innerHTML = ""; }
+    }
   }
-}
+
+  _miniDisplayedKey = newKey;
 
   // play/pause icon
   if (miniToggleEl) miniToggleEl.innerHTML = globalAudio?.paused
@@ -997,6 +1101,7 @@ function normalizeState() {
       song.versions.forEach(v => { v.isActive = (v.id === newest.id); });
     }
     if (song.coverImageUrl === undefined) song.coverImageUrl = null;
+    if (song.coverDriveFileId === undefined) song.coverDriveFileId = null;
   });
   // Player state (queue)
   state.player = state.player || {};
@@ -1411,9 +1516,8 @@ async function getPlayableUrlForVersion(songId, versionId) {
     }
   }
 
-  // Priority 3b: Live fetch from Drive (only if a valid token is already in memory —
-  // never triggers a sign-in popup mid-playback)
-  if (v.driveFileId && gdriveIsConnected() && gdriveHasValidToken()) {
+  // Priority 3b: Live fetch from Drive (gdriveFetchBlob handles silent token refresh)
+  if (v.driveFileId && gdriveIsConnected()) {
     const blob = await gdriveFetchBlob(v.driveFileId);
     if (blob) {
       const url = URL.createObjectURL(blob);
@@ -1422,9 +1526,6 @@ async function getPlayableUrlForVersion(songId, versionId) {
       return url;
     }
     if (!v.link) return "drive-auth-required";
-  } else if (v.driveFileId && gdriveIsConnected() && !v.link) {
-    // Drive file exists but no token — tell user to reconnect rather than silently failing
-    return "drive-auth-required";
   }
 
   // Priority 4: Direct URL link
@@ -1632,8 +1733,9 @@ function syncBackButton() {
 headerBackEl?.addEventListener("click", () => goBack({ animate: true }));
 
 function syncTabs() {
+  const highlightTab = currentTab === "songs" ? "home" : currentTab;
   document.querySelectorAll(".tab").forEach((b) => {
-    b.classList.toggle("active", b.dataset.tab === currentTab);
+    b.classList.toggle("active", b.dataset.tab === highlightTab);
   });
 }
 
@@ -1836,15 +1938,20 @@ function openSalSheet() {
 document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
     const targetTab = btn.dataset.tab || "home";
+
     songsBackTarget = null;
     navHistoryStack = [];
     navHistoryTopbarStack = [];
     navScrollStack = [];
+    navStateStack = [];
 
     // Normal navigation
     drawerView = null;
     overlayView = null;
     selectedSongId = null;
+    selectedVersionId = null;
+    projectDetailScreen = null;
+    releaseDetailId = null;
     songsView = "list";
     songsListScrollTop = 0;
 
@@ -1853,8 +1960,6 @@ document.querySelectorAll(".tab").forEach((btn) => {
       playerScreen = "list";
     }
 
-    // ✅ Fix: if we navigate back to Home, ensure NO scroll position carries over.
-    // (On iOS, the page can sometimes scroll the window instead of the inner scroller.)
     if (targetTab === "home") {
       if (screens.home) screens.home.scrollTop = 0;
       try { window.scrollTo(0, 0); } catch {}
@@ -1873,9 +1978,16 @@ headerTitle?.addEventListener("click", () => {
   drawerView = null;
   overlayView = null;
   selectedSongId = null;
+  selectedVersionId = null;
+  projectDetailScreen = null;
+  releaseDetailId = null;
   songsView = "list";
   currentTab = "home";
   songsBackTarget = null;
+  navHistoryStack = [];
+  navHistoryTopbarStack = [];
+  navScrollStack = [];
+  navStateStack = [];
 
   // ✅ Fix: header-tap Home should also reset ALL scroll positions.
   if (screens.home) screens.home.scrollTop = 0;
@@ -1940,6 +2052,7 @@ function slideBackTransition(renderUnderneath) {
   if (navHistoryStack.length > 0) navHistoryStack.pop();
   if (navHistoryTopbarStack.length > 0) navHistoryTopbarStack.pop();
   if (navScrollStack.length > 0) navScrollStack.pop();
+  _pendingBackState = navStateStack.length > 0 ? navStateStack.pop() : null;
 
   const el = activeScreenEl;
   const tb = document.querySelector(".topbar");
@@ -1966,9 +2079,9 @@ function slideBackTransition(renderUnderneath) {
 
   const screenWrap = document.createElement("div");
   screenWrap.style.cssText = `position:absolute;top:${viewRect.top}px;left:${viewRect.left}px;width:${viewRect.width}px;height:${viewRect.height}px;overflow:hidden;`;
-  screenWrap.innerHTML = el.outerHTML;
-  const snap = screenWrap.querySelector(".screen");
-  if (snap && el) snap.scrollTop = el.scrollTop;
+  const cloned = el.cloneNode(true);
+  screenWrap.appendChild(cloned);
+  cloned.scrollTop = el.scrollTop;
   queenEl.appendChild(screenWrap);
 
   document.body.appendChild(queenEl);
@@ -1985,12 +2098,28 @@ function slideBackTransition(renderUnderneath) {
   const homeWrapEl = document.querySelector(".homeWrap");
   if (homeWrapEl) homeWrapEl.style.transition = "none";
 
+  // Parallax: ace starts shifted left, glides back to origin as queen slides off
+  const aceTarget = document.getElementById("view");
+  if (aceTarget) {
+    aceTarget.style.transform = `translateX(-${ACE_PARALLAX}px)`;
+    aceTarget.style.transition = "none";
+  }
+
   requestAnimationFrame(() => {
     if (homeWrapEl) homeWrapEl.style.transition = "";
     requestAnimationFrame(() => {
       queenEl.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
       queenEl.style.transform = "translateX(100%)";
-      queenEl.addEventListener("transitionend", () => queenEl.remove(), { once: true });
+
+      if (aceTarget) {
+        aceTarget.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
+        aceTarget.style.transform = "";
+      }
+
+      queenEl.addEventListener("transitionend", () => {
+        queenEl.remove();
+        if (aceTarget) { aceTarget.style.transition = ""; aceTarget.style.transform = ""; }
+      }, { once: true });
     });
   });
 }
@@ -1999,15 +2128,35 @@ function goBack({ animate = false } = {}) {
   const doRender = () => {
     if (drawerOpen) { closeDrawer(); return; }
 
-    // For non-animated backs (swipe commit), pop was already handled in touchend.
-    // For animated backs (back button), slideBackTransition already popped.
-    // So here we just pop if this is a plain goBack({ animate: false }) call
-    // that did NOT come from a swipe (i.e., called directly without going through
-    // slideBackTransition). Guard: only pop if the stack still has entries.
+    // For non-animated backs, pop visual stacks here (animated pops happen in slideBackTransition).
     if (!animate && navHistoryStack.length > 0) navHistoryStack.pop();
     if (!animate && navHistoryTopbarStack.length > 0) navHistoryTopbarStack.pop();
     if (!animate && navScrollStack.length > 0) navScrollStack.pop();
 
+    // Resolve the state to restore: animated backs already popped in slideBackTransition
+    // (_pendingBackState), non-animated backs pop here.
+    let restoreState = _pendingBackState;
+    _pendingBackState = null;
+    if (!animate && navStateStack.length > 0) restoreState = navStateStack.pop();
+
+    if (restoreState) {
+      // Restore the exact app state from when the user navigated forward
+      currentTab = restoreState.currentTab;
+      drawerView = restoreState.drawerView;
+      projectDetailScreen = restoreState.projectDetailScreen;
+      releaseDetailId = restoreState.releaseDetailId;
+      selectedSongId = restoreState.selectedSongId;
+      selectedVersionId = restoreState.selectedVersionId;
+      songsView = restoreState.songsView;
+      overlayView = restoreState.overlayView;
+      songsBackTarget = restoreState.songsBackTarget;
+      setHeader(restoreState.headerTitle);
+      syncTabs();
+      render();
+      return;
+    }
+
+    // Fallback: no state stack entry (e.g. legacy or root-level back)
     if (overlayView) {
       overlayView = null;
       currentTab = "home";
@@ -2017,94 +2166,25 @@ function goBack({ animate = false } = {}) {
       navHistoryStack = [];
       navHistoryTopbarStack = [];
       navScrollStack = [];
+      navStateStack = [];
       setHeader("RiffBank");
       syncTabs();
       render();
       return;
     }
 
-    if (drawerView === "releases" && releaseDetailId) {
-      releaseDetailId = null;
-      render();
-      return;
-    }
-
-    if (drawerView === "projects" && projectDetailScreen) {
+    if (currentTab !== "home" || drawerView) {
+      currentTab = "home";
+      drawerView = null;
       projectDetailScreen = null;
-      render();
-      return;
-    }
-
-    if (drawerView) {
-      drawerView = null;
+      releaseDetailId = null;
+      songsView = "list";
+      selectedSongId = null;
+      selectedVersionId = null;
       navHistoryStack = [];
       navHistoryTopbarStack = [];
       navScrollStack = [];
-      setHeader(TAB_TITLES[currentTab] || "RiffBank");
-      syncTabs();
-      render();
-      return;
-    }
-
-    // ✅ If you're in a version detail view, back goes to the song page
-    if (selectedSongId && selectedVersionId) {
-      selectedVersionId = null;
-      currentTab = "songs";
-      setHeader("Song");
-      syncTabs();
-      render();
-      return;
-    }
-
-    if (selectedSongId) {
-      selectedSongId = null;
-      selectedVersionId = null;
-      currentTab = "songs";
-      songsView = "list";
-      drawerView = null;
-      overlayView = null;
-      resetSongsFilters({ keepSort: true });
-      setHeader("Songs");
-      syncTabs();
-      render();
-      return;
-    }
-
-    if (currentTab === "songs" && songsView === "create") {
-      songsView = "list";
-      setHeader("Songs");
-      syncTabs();
-      render();
-      return;
-    }
-
-    // If Songs list was opened from a drawer view (e.g. Projects -> View songs),
-    // going back from the Songs list should return to that drawer view.
-    if (
-      currentTab === "songs" &&
-      songsView === "list" &&
-      !selectedSongId &&
-      songsBackTarget
-    ) {
-      const target = songsBackTarget;
-      songsBackTarget = null;
-
-      overlayView = null;
-      drawerView = target;
-      currentTab = "home";
-      setHeader(TAB_TITLES[currentTab] || "RiffBank");
-      syncTabs();
-      render();
-      return;
-    }
-
-    if (currentTab !== "home") {
-      currentTab = "home";
-      songsView = "list";
-      selectedSongId = null;
-      navHistoryStack = [];
-      navHistoryTopbarStack = [];
-      navScrollStack = [];
+      navStateStack = [];
       setHeader("RiffBank");
       syncTabs();
       render();
@@ -2141,11 +2221,11 @@ if (!drawerOpen && t.clientX <= 24) {
   touchStartY = t.clientY;
 
   // Pre-populate the peek layer so the previous screen is visible behind the swipe.
-  // Use navHistoryStack for accurate depth; fall back to backPeekHTML.
+  // Use navHistoryStack for accurate depth; fall back to backPeekNode.
   if (touchMode === "back") {
-    const peekContent = navHistoryStack.length > 0
+    const peekNode = navHistoryStack.length > 0
       ? navHistoryStack[navHistoryStack.length - 1]
-      : backPeekHTML;
+      : backPeekNode;
 
     // Compute the bottom boundary: stop at nav bar top so bottomNav stays visible.
     const bnEl = document.getElementById("bottomNav");
@@ -2164,7 +2244,7 @@ if (!drawerOpen && t.clientX <= 24) {
     const peekTopbarHTML = navHistoryTopbarStack.length > 0
       ? navHistoryTopbarStack[navHistoryTopbarStack.length - 1]
       : prevTopbarHTML;
-    const isHomeAce = peekContent && peekContent.includes("homeWrap");
+    const isHomeAce = peekNode && peekNode.querySelector(".homeWrap");
     const swipeAceContentTop = isHomeAce ? 0 : (viewRect ? viewRect.top : 0);
     swipeAceEl = document.createElement("div");
     swipeAceEl.style.cssText = `position:fixed;top:0;left:${aceLeft}px;width:${aceWidth}px;bottom:${navBottomOffset};z-index:499;overflow:hidden;pointer-events:none;background:var(--bg);`;
@@ -2182,16 +2262,22 @@ if (!drawerOpen && t.clientX <= 24) {
         }
       }
     }
-    // Screen content below topbar.
-    // Non-home .screen elements have CSS padding:10px 0 12px that innerHTML doesn't include.
+    // Screen content below topbar — cloneNode preserves decoded images (no flicker).
     const swipeAceContent = document.createElement("div");
-    swipeAceContent.style.cssText = `position:absolute;top:${swipeAceContentTop}px;left:0;width:100%;bottom:0;overflow:hidden;${isHomeAce ? "" : "padding:10px 0 12px;box-sizing:border-box;"}`;
+    swipeAceContent.style.cssText = `position:absolute;top:${swipeAceContentTop}px;left:0;width:100%;bottom:0;overflow:hidden;`;
     const swipeAceScrollTop = navScrollStack.length > 0 ? navScrollStack[navScrollStack.length - 1] : prevAceScrollTop;
-    swipeAceContent.innerHTML = swipeAceScrollTop > 0
-      ? `<div style="margin-top:-${swipeAceScrollTop}px">${peekContent || ""}</div>`
-      : (peekContent || "");
-    swipeAceEl.appendChild(swipeAceContent);
-    document.body.appendChild(swipeAceEl);
+    if (peekNode) {
+      const aceScreenClone = peekNode.cloneNode(true);
+      // Freeze padding so CSS class changes (body.isHome removal) don't shift content
+      if (isHomeAce) aceScreenClone.style.padding = "0";
+      swipeAceContent.appendChild(aceScreenClone);
+      swipeAceEl.appendChild(swipeAceContent);
+      document.body.appendChild(swipeAceEl);
+      aceScreenClone.scrollTop = swipeAceScrollTop;
+    } else {
+      swipeAceEl.appendChild(swipeAceContent);
+      document.body.appendChild(swipeAceEl);
+    }
 
     // QUEEN (z:500): pixel-perfect snapshot of the current songs screen.
     // Solid dark background (gradient removed). Stops at nav bar top.
@@ -2213,16 +2299,19 @@ if (!drawerOpen && t.clientX <= 24) {
       const screenRect = activeScreenEl.getBoundingClientRect();
       const screenWrap = document.createElement("div");
       screenWrap.style.cssText = `position:absolute;top:${screenRect.top}px;left:${screenRect.left}px;width:${screenRect.width}px;height:${screenRect.height}px;overflow:hidden;`;
-      // Use outerHTML so the .screen wrapper (with its padding:10px) is included —
-      // otherwise the content appears 10px too high inside the swipe queen.
-      screenWrap.innerHTML = activeScreenEl.outerHTML;
+      // cloneNode keeps the .screen wrapper (with its padding:10px) and avoids
+      // SVG re-parse flicker that innerHTML/outerHTML causes.
+      clonedScreen = activeScreenEl.cloneNode(true);
+      screenWrap.appendChild(clonedScreen);
       swipeQueenEl.appendChild(screenWrap);
-      clonedScreen = screenWrap.firstElementChild;
     }
 
     document.body.appendChild(swipeQueenEl);
     // Set scrollTop AFTER DOM attachment — browsers ignore scrollTop on detached elements.
     if (clonedScreen) clonedScreen.scrollTop = savedScrollTop;
+
+    // Parallax: ace starts shifted left (as if queen pushed it)
+    if (swipeAceEl) swipeAceEl.style.transform = `translateX(-${ACE_PARALLAX}px)`;
   }
   return;
 }
@@ -2256,6 +2345,11 @@ document.addEventListener("touchmove", (e) => {
     // Translate the queen overlay; the actual screen is never touched.
     const clamp = Math.max(0, dx);
     if (swipeQueenEl) swipeQueenEl.style.transform = `translateX(${clamp}px)`;
+    // Parallax: ace drifts from -ACE_PARALLAX toward 0 as queen moves right
+    if (swipeAceEl) {
+      const ratio = Math.min(clamp / window.innerWidth, 1);
+      swipeAceEl.style.transform = `translateX(${-ACE_PARALLAX * (1 - ratio)}px)`;
+    }
     return;
   }
 
@@ -2285,6 +2379,11 @@ document.addEventListener("touchend", (e) => {
         swipeQueenEl.style.transition = "transform 0.25s ease-out";
         swipeQueenEl.style.transform = `translateX(${window.innerWidth}px)`;
       }
+      // Parallax: ace glides to origin
+      if (swipeAceEl) {
+        swipeAceEl.style.transition = "transform 0.25s ease-out";
+        swipeAceEl.style.transform = "translateX(0)";
+      }
       setTimeout(() => {
         // Render home while queen is off-screen (translateX = 100vw, invisible).
         goBack({ animate: false });
@@ -2301,6 +2400,11 @@ document.addEventListener("touchend", (e) => {
       if (swipeQueenEl) {
         swipeQueenEl.style.transition = "transform 0.22s ease-out";
         swipeQueenEl.style.transform = "translateX(0)";
+      }
+      // Parallax: ace snaps back to shifted position
+      if (swipeAceEl) {
+        swipeAceEl.style.transition = "transform 0.22s ease-out";
+        swipeAceEl.style.transform = `translateX(-${ACE_PARALLAX}px)`;
       }
       setTimeout(cleanupSwipe, 220);
     }
@@ -2351,6 +2455,13 @@ function stopAndResetPlayback() {
 
   // Fresh-launch behavior: mini player stays hidden until a new play action this session
   hasPlayedThisSession = false;
+
+  // Clear any lingering inline transform/transition from swipe gestures
+  // so the CSS classes can properly position the mini player when it reappears
+  if (miniPlayerEl) {
+    miniPlayerEl.style.transform = "";
+    miniPlayerEl.style.transition = "";
+  }
 
   // Ensure fullscreen overlay is fully closed + removed from hit testing
   try { closeNowPlaying(); } catch {}
@@ -2553,6 +2664,7 @@ function advanceToNextTrack({ render: doRender = false } = {}) {
       if (!state.player.playHistory) state.player.playHistory = [];
       state.player.playHistory.push(state.player.nowPlaying);
     }
+    _miniCarouselDir = 1; // forward → slide left
     state.player.nowPlaying = q.shift();
     saveState();
     playNowPlaying({ autoplay: true });
@@ -2567,6 +2679,7 @@ function advanceToNextTrack({ render: doRender = false } = {}) {
         if (!state.player.playHistory) state.player.playHistory = [];
         state.player.playHistory.push(state.player.nowPlaying);
       }
+      _miniCarouselDir = 1; // forward → slide left
       const fresh = state.player.shuffle ? shuffleArray([...rq]) : [...rq];
       state.player.nowPlaying = fresh.shift();
       state.player.queue = fresh;
@@ -2589,6 +2702,7 @@ function advanceToPrevTrack({ render: doRender = false } = {}) {
   if (!history.length) return false; // dead — no history to go back to
 
   const prev = history.pop();
+  _miniCarouselDir = -1; // backward → slide right
   if (state.player?.nowPlaying) {
     state.player.queue = [state.player.nowPlaying, ...(state.player.queue || [])];
   }
@@ -2601,7 +2715,7 @@ function advanceToPrevTrack({ render: doRender = false } = {}) {
 }
 
 globalAudio?.addEventListener("ended", () => {
-  if (!advanceToNextTrack()) syncMiniPlayerUI();
+  if (!advanceToNextTrack({ render: fullPlayerOpen })) syncMiniPlayerUI();
 });
 
 // ---------------------
@@ -3135,9 +3249,12 @@ $("#importFile")?.addEventListener("change", async (e) => {
 function render() {
   // Snapshot current screen content so back-swipe peek can show it behind the next screen
   if (activeScreenEl?.innerHTML) {
-    backPeekHTML = activeScreenEl.innerHTML;
+    backPeekNode = activeScreenEl.cloneNode(true);
     prevAceViewTop = activeScreenEl.getBoundingClientRect().top || 0;
     prevAceScrollTop = activeScreenEl.scrollTop || 0;
+    prevAcePadding = getComputedStyle(activeScreenEl).padding;
+    // Note: prevNavState is captured by captureNavState() BEFORE state changes,
+    // not here, because state vars are already mutated before render() is called.
     // Capture topbar state BEFORE setHeader/syncBackButton change it, so the ace overlay
     // can show the correct previous-screen title and back-button state during the slide.
     const _tb = document.querySelector(".topbar");
@@ -3205,20 +3322,21 @@ async function preFetchDriveAudio() {
   // Only run when a token is already in memory — never triggers a sign-in popup
   if (!gdriveIsConnected() || !gdriveHasValidToken()) return;
   for (const song of (state.songs || [])) {
-    const av = (song.versions || []).find(v => v.isActive) || song.versions?.[0];
-    if (!av?.driveFileId || av.fileId) continue; // no Drive file, or local copy already exists
-    const dbKey = `gdrive:${av.driveFileId}`;
-    const existing = await audioGet(dbKey);
-    if (existing?.blob) continue; // already cached
-    const blob = await gdriveFetchBlob(av.driveFileId);
-    if (blob) {
-      await putAudioBlob({
-        id: dbKey,
-        blob,
-        name: av.fileName || av.label || "audio",
-        type: av.fileType || blob.type || "audio/*",
-        size: blob.size,
-      });
+    for (const v of (song.versions || [])) {
+      if (!v.driveFileId || v.fileId) continue; // no Drive file, or local copy already exists
+      const dbKey = `gdrive:${v.driveFileId}`;
+      const existing = await audioGet(dbKey);
+      if (existing?.blob) continue; // already cached
+      const blob = await gdriveFetchBlob(v.driveFileId);
+      if (blob) {
+        await putAudioBlob({
+          id: dbKey,
+          blob,
+          name: v.fileName || v.label || "audio",
+          type: v.fileType || blob.type || "audio/*",
+          size: blob.size,
+        });
+      }
     }
   }
 }
@@ -3239,38 +3357,7 @@ async function init() {
   // Load Google Identity Services (non-blocking, for Drive integration)
   gdriveLoadGIS();
 
-  // Try to pull latest state from Drive (if connected + token still valid)
-  if (gdriveIsConnected()) {
-    try {
-      const driveState = await gdrivePullStateSilent();      if (driveState && driveState.songs) {
-        // Compare: use Drive state if it has songs and local doesn't,
-        // or if Drive has a newer updatedAt on any song
-        const localHasSongs = state.songs && state.songs.length > 0;
-        const driveHasSongs = driveState.songs && driveState.songs.length > 0;
-
-        let useDrive = false;
-
-        if (driveHasSongs && !localHasSongs) {
-          // Local is empty, Drive has data — use Drive
-          useDrive = true;
-        } else if (driveHasSongs && localHasSongs) {
-          // Both have data — compare most recent updatedAt
-          const localNewest = Math.max(...state.songs.map(s => new Date(s.updatedAt || 0).getTime()));
-          const driveNewest = Math.max(...driveState.songs.map(s => new Date(s.updatedAt || 0).getTime()));
-          if (driveNewest > localNewest) useDrive = true;
-        }
-
-        if (useDrive) {
-          state = driveState;
-          normalizeState();
-          localStorage.setItem(LS_KEY, JSON.stringify(state));
-          toast("Synced from Drive ☁️");
-        }
-      }
-    } catch (err) {
-      console.warn("RiffBank: Drive state pull failed on init", err);
-    }
-  }
+  // Incremental sync runs in background after render (see below)
 
   // Seed example release if none exist yet
   if (!state.releases.length) {
@@ -3289,14 +3376,89 @@ async function init() {
     }
   }
 
+  // Restore cover art from IndexedDB cache (instant, no auth needed)
+  await restoreCoverUrlsFromCache();
+
   setHeader("RiffBank");
   syncTabs();
   render();
   syncMiniPlayerUI();
 
-  // Background: pre-fetch Drive audio so first play is instant (non-blocking)
+  // Background: incremental sync + pre-fetch (non-blocking)
   if (gdriveIsConnected()) {
-    preFetchDriveAudio().catch(console.warn);
+    incrementalSyncFromDrive().then(() => {
+      preFetchDriveAudio().catch(console.warn);
+    }).catch(console.warn);
+  }
+}
+
+// Incremental sync: pull Drive state JSON and merge only new/changed songs
+async function incrementalSyncFromDrive() {
+  const driveState = await gdrivePullStateSilent();
+  if (!driveState?.songs?.length) return;
+
+  const localHasSongs = state.songs && state.songs.length > 0;
+
+  if (!localHasSongs) {
+    // Local is empty — adopt Drive state wholesale
+    state.songs = driveState.songs;
+    state.releases = driveState.releases || state.releases;
+    normalizeState();
+    await restoreCoverUrlsFromCache();
+    saveState();
+    coverCache.clear();
+    render();
+    toast("Loaded library from Drive");
+    return;
+  }
+
+  // Build lookup of local songs by title+project (stable identity)
+  const localByKey = new Map();
+  for (const s of state.songs) {
+    localByKey.set(`${(s.title || "").trim()}|${(s.project || "").trim()}`, s);
+  }
+
+  let added = 0, updated = 0;
+
+  for (const ds of driveState.songs) {
+    const key = `${(ds.title || "").trim()}|${(ds.project || "").trim()}`;
+    const local = localByKey.get(key);
+
+    if (!local) {
+      // New song from Drive — add it
+      state.songs.push(ds);
+      added++;
+    } else {
+      // Existing song — check if Drive version is newer
+      const localTime = new Date(local.updatedAt || 0).getTime();
+      const driveTime = new Date(ds.updatedAt || 0).getTime();
+      if (driveTime > localTime) {
+        // Merge: update metadata but preserve local-only fields
+        const preserveFields = ["_coverResolving"];
+        for (const f of preserveFields) {
+          if (local[f] !== undefined) ds[f] = local[f];
+        }
+        Object.assign(local, ds);
+        updated++;
+      }
+      // Merge cover art if local is missing it
+      if (!local.coverDriveFileId && ds.coverDriveFileId) {
+        local.coverDriveFileId = ds.coverDriveFileId;
+        updated++;
+      }
+    }
+  }
+
+  if (added || updated) {
+    normalizeState();
+    // Restore covers for any newly added songs
+    await restoreCoverUrlsFromCache();
+    saveState();
+    coverCache.clear();
+    render();
+    if (added && updated) toast(`Synced: ${added} new, ${updated} updated`);
+    else if (added) toast(`Synced: ${added} new song${added > 1 ? "s" : ""}`);
+    else toast(`Synced: ${updated} song${updated > 1 ? "s" : ""} updated`);
   }
 }
 
@@ -3325,13 +3487,16 @@ function renderProjects() {
   const buildRows = (q) => projects
     .filter(p => !q || p.toLowerCase().includes(q.toLowerCase()))
     .map(p => {
-      const count = state.songs.filter(s => (s.project || "").trim() === p).length;
+      const projSongs = state.songs.filter(s => (s.project || "").trim() === p);
+      const count = projSongs.length;
       const isDefault = (state.settings.defaultProject || "").trim() === p;
-      const fakeSong = { id: p, title: p, project: p, genre: "" };
+      // Use the most recently updated song for album art
+      const repSong = projSongs.slice().sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))[0]
+        || { id: p, title: p, project: p, genre: "" };
       return `
         <div class="songRow" data-open-proj="${escapeHtml(p)}">
-          <div class="songThumb" aria-hidden="true">
-            ${coverSvg(fakeSong, { lite: true })}
+          <div class="songThumb" data-proj-thumb="${escapeHtml(p)}" aria-hidden="true">
+            ${coverSvg(repSong, { lite: true })}
           </div>
           <div class="songMain">
             <div class="songTop">
@@ -3369,6 +3534,7 @@ function renderProjects() {
     projListEl.querySelectorAll("[data-open-proj]").forEach(row => {
       row.addEventListener("click", (e) => {
         if (e.target.closest("[data-proj-more]")) return;
+        captureNavState();
         projectDetailScreen = row.getAttribute("data-open-proj");
         render();
         triggerForwardSlide();
@@ -3479,6 +3645,7 @@ function renderProjectSongs(projectName) {
   activeScreenEl.querySelectorAll("[data-open-song]").forEach(row => {
     row.addEventListener("click", (e) => {
       if (e.target.closest("[data-proj-song-more]")) return;
+      captureNavState();
       const sid = row.getAttribute("data-open-song");
       projectDetailScreen = null;
       drawerView = null;
@@ -3540,6 +3707,7 @@ function renderReleases() {
 
   activeScreenEl.querySelectorAll("[data-rel-open]").forEach(row => {
     row.addEventListener("click", () => {
+      captureNavState();
       releaseDetailId = row.getAttribute("data-rel-open");
       render();
       triggerForwardSlide();
@@ -3640,6 +3808,7 @@ function renderReleaseDetail(releaseId) {
 
   activeScreenEl.querySelectorAll("[data-open-song]").forEach(row => {
     row.addEventListener("click", () => {
+      captureNavState();
       releaseDetailId = null;
       drawerView = null;
       currentTab = "songs";
@@ -3840,7 +4009,7 @@ function renderHome() {
 
           <!-- Songs — tall left card, spans 2 rows -->
           <button class="hCard hSongs" data-home="songs" aria-label="Songs">
-            <div class="hArt"><img src="./songs-card.png" style="width:100%;height:100%;object-fit:cover;object-position:35% center;display:block;"></div>
+            <div class="hArt"><img src="./songs-card.jpg" style="width:100%;height:100%;object-fit:cover;object-position:35% center;display:block;"></div>
             <div class="hGrad"></div>
             <div class="hBody">
               <div class="hLabel">Songs</div>
@@ -3849,7 +4018,7 @@ function renderHome() {
 
           <!-- Projects — small, right column top -->
           <button class="hCard hProjects" data-home="projects" aria-label="Projects">
-            <div class="hArt"><img src="./projects-card.png" style="width:100%;height:100%;object-fit:cover;object-position:center 22%;display:block;"></div>
+            <div class="hArt"><img src="./projects-card.jpg" style="width:100%;height:100%;object-fit:cover;object-position:center 22%;display:block;"></div>
             <div class="hGrad"></div>
             <div class="hBody">
               <div class="hLabel">Projects</div>
@@ -3858,7 +4027,7 @@ function renderHome() {
 
           <!-- Releases — small, right column bottom -->
           <button class="hCard hPlayer" data-home="releases" aria-label="Releases">
-            <div class="hArt"><img src="./releases-card.png" style="width:100%;height:100%;object-fit:cover;object-position:center 45%;display:block;"></div>
+            <div class="hArt"><img src="./releases-card.jpg" style="width:100%;height:100%;object-fit:cover;object-position:center 45%;display:block;"></div>
             <div class="hGrad"></div>
             <div class="hBody">
               <div class="hLabel">Releases</div>
@@ -3867,7 +4036,7 @@ function renderHome() {
 
           <!-- Lyrics — full width -->
           <button class="hCard hLyrics hWide" data-home="lyrics" aria-label="Lyrics">
-            <div class="hArt"><img src="./lyrics-card.png" style="width:100%;height:150%;object-fit:cover;transform:scale(1.1);display:block;"></div>
+            <div class="hArt"><img src="./lyrics-card.jpg" style="width:100%;height:150%;object-fit:cover;transform:scale(1.1);display:block;"></div>
             <div class="hGrad"></div>
             <div class="hBody">
               <div class="hLabel">Lyrics</div>
@@ -3876,7 +4045,7 @@ function renderHome() {
 
           <!-- Actions — full width -->
           <button class="hCard hNext hWide" data-home="next" aria-label="Actions">
-            <div class="hArt"><img src="./actions-card.png" style="width:100%;height:100%;object-fit:cover;transform:scale(1.1);display:block;"></div>
+            <div class="hArt"><img src="./actions-card.jpg" style="width:100%;height:100%;object-fit:cover;transform:scale(1.1);display:block;"></div>
             <div class="hGrad"></div>
             <div class="hBody">
               <div class="hLabel">Actions</div>
@@ -3896,16 +4065,19 @@ function renderHome() {
     renderGlobalSearch();
   });
   activeScreenEl.querySelector("#htbSettings")?.addEventListener("click", () => {
+    captureNavState();
     currentTab = "settings";
     setHeader("Settings");
     syncTabs();
     render();
+    triggerForwardSlide();
   });
 
   // Card navigation
   activeScreenEl.querySelectorAll("[data-home]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const target = btn.getAttribute("data-home");
+      captureNavState();
       if (target === "songs") {
         resetSongsFilters({ keepSort: true });
         songsBackTarget = null;
@@ -4264,6 +4436,7 @@ function renderNextActions() {
   });
   activeScreenEl.querySelectorAll("[data-open-song]").forEach((el) =>
     el.addEventListener("click", () => {
+      captureNavState();
       currentTab = "songs";
       selectedSongId = el.getAttribute("data-open-song");
       setHeader("Song");
@@ -4298,6 +4471,248 @@ function makeRng(seed){
 
 // --- Cover caching + iOS "lite" mode ---
 const coverCache = new Map();
+const generatingArtSongs = new Set(); // song IDs currently generating art
+
+// Global handler: refresh cover image from Drive when cached URL expires
+window._refreshCoverFromDrive = async (songId, driveFileId, imgEl) => {
+  // Try IndexedDB cache first (no auth needed)
+  let url = await getCoverBlobUrl(driveFileId);
+  // Fall back to fetching from Drive and caching
+  if (!url) {
+    const blob = await gdriveFetchBlob(driveFileId);
+    if (blob) {
+      await putCoverBlob(driveFileId, blob);
+      url = URL.createObjectURL(blob);
+      coverUrlCache.set(driveFileId, url);
+    }
+  }
+  if (url && imgEl) {
+    imgEl.onerror = () => {
+      imgEl.onerror = null;
+      window._clearBrokenCover && window._clearBrokenCover(songId, imgEl);
+    };
+    imgEl.src = url;
+    const song = state.songs.find(s => s.id === songId);
+    if (song) {
+      song.coverImageUrl = url;
+      coverCache.clear();
+      saveState();
+    }
+  } else if (imgEl) {
+    const song = state.songs.find(s => s.id === songId);
+    if (song) {
+      song.coverImageUrl = null;
+      coverCache.clear();
+    }
+    if (imgEl.parentElement) {
+      imgEl.parentElement.innerHTML = coverSvg(song || { id: songId, title: "", project: "", genre: "" }, { lite: true });
+    }
+  }
+};
+// Fallback: if cover URL is broken (expired Replicate URL, no Drive backup), clear it so SVG art shows
+window._clearBrokenCover = (songId, imgEl) => {
+  const song = state.songs.find(s => s.id === songId);
+  if (song) {
+    song.coverImageUrl = null;
+    coverCache.clear();
+    saveState();
+  }
+  if (imgEl?.parentElement) {
+    imgEl.parentElement.innerHTML = coverSvg(song || { id: songId, title: "", project: "", genre: "" }, { lite: true });
+  }
+};
+let artCooldownUntil = 0; // timestamp — global 10s cooldown after any art request
+const bulkArtState = { running: false, done: 0, total: 0 }; // bulk art gen progress
+
+function buildArtPrompt(song) {
+  // Deterministic hash from song title + project to pick scene/style combos
+  const seed = (song.title || "").length * 7 + (song.project || "").length * 13
+    + (song.title || "").charCodeAt(0) * 31
+    + ((song.title || "").charCodeAt(1) || 0) * 17;
+
+  const scenes = [
+    "vast mountain landscape at golden hour, dramatic peaks, alpine lake reflection, wildflowers in foreground, volumetric light rays through clouds",
+    "deep ocean underwater scene, bioluminescent jellyfish, coral reef, shafts of sunlight through water, ethereal blue-green glow, floating particles",
+    "abandoned industrial warehouse, shattered windows, overgrown vines reclaiming concrete, dramatic god-rays, dust particles in light beams",
+    "dense enchanted forest, towering ancient trees, mystical fog, fireflies glowing, moss-covered roots, dappled moonlight filtering through canopy",
+    "vast desert at twilight, sand dunes with wind ripples, lone joshua tree silhouette, purple-orange gradient sky, stars emerging",
+    "futuristic neon cityscape from rooftop, holographic billboards, flying vehicles, rain-slicked streets far below, cyberpunk atmosphere, glowing windows",
+    "frozen tundra landscape, northern lights aurora borealis, ice formations, starfield sky, teal and purple light dancing, snow-covered terrain",
+    "lush tropical coastline at sunset, palm trees swaying, turquoise waves crashing, dramatic cloud formations, golden hour warmth, volcanic island in distance",
+    "cosmic nebula scene, swirling galaxies, colorful interstellar gas clouds, distant stars, asteroid field, deep space, celestial wonder",
+    "overgrown ancient temple ruins, jungle reclaiming stone architecture, shafts of green-tinted light, carved stone faces, hanging vines, mystical atmosphere",
+    "stormy seascape, towering waves, lightning illuminating dark clouds, lighthouse beam cutting through rain, dramatic ocean spray, powerful nature",
+    "cherry blossom garden at night, lantern-lit pathway, pink petals falling, koi pond reflection, misty atmosphere, Japanese aesthetic",
+    "volcanic landscape, molten lava flows, dark rock formations, fiery orange glow against dark sky, smoke and ash, raw elemental power",
+    "abstract fluid art, swirling metallic paint, iridescent colors blending, macro photography feel, glossy surface tension, mesmerizing patterns",
+    "sunflower field stretching to horizon, dramatic cumulus clouds, warm afternoon light, single weathered barn, painted sky, rural serenity",
+    "underground crystal cavern, massive amethyst and quartz formations, underground river, bioluminescent fungi, prismatic light reflections",
+  ];
+
+  const styles = [
+    "cinematic photography",
+    "oil painting, thick brushstrokes",
+    "moody atmospheric digital art",
+    "watercolor illustration, soft edges",
+    "retro analog film grain aesthetic",
+    "hyper-detailed digital matte painting",
+    "minimalist graphic art, bold shapes",
+    "dreamlike surrealist composition",
+  ];
+
+  const palettes = [
+    "warm amber and deep crimson tones",
+    "cool blues and silver moonlight",
+    "vibrant teal and electric magenta",
+    "muted earth tones, olive and rust",
+    "pastel pink and lavender haze",
+    "deep indigo and gold accents",
+    "emerald green and copper highlights",
+    "monochrome with one vivid accent color",
+  ];
+
+  const scene = scenes[seed % scenes.length];
+  const style = styles[(seed * 3 + 5) % styles.length];
+  const palette = palettes[(seed * 7 + 11) % palettes.length];
+
+  return [
+    "album cover art",
+    song.genre ? `${song.genre} music mood` : null,
+    scene,
+    style,
+    palette,
+    "no text, no words, no letters, no numbers, no typography, no writing, no logos, no symbols, no watermarks, textless, wordless, purely visual composition, square format"
+  ].filter(Boolean).join(", ");
+}
+
+async function generateArtForSong(song, apiKey) {
+  const prompt = buildArtPrompt(song);
+  const ac = new AbortController();
+  const timeout = setTimeout(() => ac.abort(), 60000);
+  let res;
+  try {
+    res = await fetch("https://riffbank-art.riffbank.workers.dev", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ input: { prompt, aspect_ratio: "1:1" } }),
+      signal: ac.signal,
+    });
+  } catch (e) {
+    if (e.name === "AbortError") throw new Error("Request timed out — try again");
+    throw e;
+  } finally {
+    clearTimeout(timeout);
+  }
+  const data = await res.json();
+  console.log("[ArtGen] Worker response:", res.status, data);
+  if (!res.ok) throw new Error(data.detail || data.title || JSON.stringify(data));
+  if (!data.output) throw new Error("No image returned");
+  let url = Array.isArray(data.output) ? data.output[0] : data.output;
+  console.log("[ArtGen] Image URL:", url);
+
+  // Download image and upload to Google Drive for persistence
+  try {
+    console.log("[ArtGen] Fetching image...");
+    const imgRes = await fetch(url);
+    console.log("[ArtGen] Image fetch done:", imgRes.status);
+    if (imgRes.ok) {
+      const blob = await imgRes.blob();
+      console.log("[ArtGen] Uploading to Drive...");
+      const driveResult = await gdriveUploadCoverArt({
+        blob,
+        project: song.project,
+        songTitle: song.title,
+      });
+      console.log("[ArtGen] Drive upload result:", driveResult);
+      if (driveResult.success) {
+        song.coverDriveFileId = driveResult.driveFileId;
+        // Cache the blob locally so it persists across restarts
+        await putCoverBlob(driveResult.driveFileId, blob);
+        const cachedUrl = URL.createObjectURL(blob);
+        coverUrlCache.set(driveResult.driveFileId, cachedUrl);
+        url = cachedUrl;
+      }
+    }
+  } catch (e) {
+    console.warn("Cover art Drive upload failed (art still saved as URL):", e);
+  }
+
+  song.coverImageUrl = url;
+  song.updatedAt = nowStamp();
+}
+
+async function startBulkGenArt(onlyMissing) {
+  if (bulkArtState.running) { toast("Bulk art generation already in progress"); return; }
+
+  const apiKey = state.settings.replicateKey || "";
+  if (!apiKey) { toast("Add your Replicate API key first"); return; }
+
+  const songs = onlyMissing
+    ? state.songs.filter(s => !s.coverImageUrl)
+    : [...state.songs];
+
+  if (!songs.length) { toast(onlyMissing ? "All songs already have art" : "No songs to generate art for"); return; }
+
+  const label = onlyMissing ? "missing" : "all";
+  if (!confirm(`Generate art for ${songs.length} ${label} song${songs.length === 1 ? "" : "s"}? This may take a while.`)) return;
+
+  bulkArtState.running = true;
+  bulkArtState.done = 0;
+  bulkArtState.total = songs.length;
+  for (const s of songs) generatingArtSongs.add(s.id);
+  coverCache.clear();
+  render();
+
+  let succeeded = 0;
+  let lastError = "";
+
+  for (const song of songs) {
+    try {
+      await generateArtForSong(song, apiKey);
+      succeeded++;
+    } catch (e) {
+      console.error(`Art gen failed for "${song.title}":`, e);
+      lastError = e.message;
+    }
+    generatingArtSongs.delete(song.id);
+    coverCache.clear();
+    bulkArtState.done++;
+    saveState();
+    // Live-update the song card art if songs list is visible
+    const cardArtEl = document.querySelector(`.songCard[data-id="${song.id}"] .songCardArt`);
+    if (cardArtEl) cardArtEl.innerHTML = coverSvg(song, { lite: true });
+    // Also update song detail hero if viewing this song
+    const heroArt = document.querySelector(".albumArt");
+    if (heroArt && selectedSongId === song.id) heroArt.innerHTML = coverSvg(song);
+    // Live-update project row thumbnail if projects view is visible
+    if (song.project) {
+      const projThumb = document.querySelector(`[data-proj-thumb="${CSS.escape(song.project.trim())}"]`);
+      if (projThumb) projThumb.innerHTML = coverSvg(song, { lite: true });
+    }
+    // Rate limit: wait 12s between requests (6 req/min limit)
+    if (bulkArtState.done < bulkArtState.total) await new Promise(r => setTimeout(r, 12000));
+    // Update settings buttons if they're currently visible
+    const btnMissing = $("#genMissingArt");
+    const btnAll = $("#regenAllArt");
+    if (btnMissing || btnAll) {
+      const txt = `${bulkArtState.done}/${bulkArtState.total} done…`;
+      if (btnMissing) { btnMissing.disabled = true; btnMissing.textContent = txt; }
+      if (btnAll) { btnAll.disabled = true; btnAll.textContent = txt; }
+    }
+  }
+
+  bulkArtState.running = false;
+  coverCache.clear();
+  const total = bulkArtState.total;
+  if (succeeded === 0) {
+    toast(lastError ? `Art generation failed: ${lastError}` : "No art was generated");
+  } else if (succeeded < total) {
+    toast(`Generated art for ${succeeded}/${total} songs (${total - succeeded} failed)`);
+  } else {
+    toast(`Generated art for ${succeeded} song${succeeded === 1 ? "" : "s"} ✨`);
+  }
+  render();
+}
 
 function isIOSDevice(){
   // iPadOS can report as MacIntel with touch points
@@ -4309,16 +4724,55 @@ function coverSvg(song, { lite = false } = {}) {
   const forceLite = lite || isIOSDevice();
   const key = `${song.id}|${song.title}|${song.project}|${song.genre}|${song.coverImageUrl || ""}|${forceLite ? "lite" : "full"}`;
 
+  if (generatingArtSongs.has(song.id)) {
+    return `<div style="width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;background:linear-gradient(135deg,#1a1a2e,#16213e);border-radius:inherit;color:#888;font-size:13px;gap:8px">
+      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#666" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="animation:spin 2s linear infinite">
+        <path d="M12 2a10 10 0 0 1 10 10" /><style>@keyframes spin{to{transform:rotate(360deg)}}</style>
+      </svg>
+      <span style="opacity:.6">Generating…</span>
+    </div>`;
+  }
+
   if (coverCache.has(key)) return coverCache.get(key);
 
   if (song.coverImageUrl) {
-    const img = `<img src="${escapeHtml(song.coverImageUrl)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;display:block" loading="lazy" alt="">`;
+    const errHandler = song.coverDriveFileId
+      ? ` onerror="this.onerror=null;window._refreshCoverFromDrive&&window._refreshCoverFromDrive('${escapeHtml(song.id)}','${escapeHtml(song.coverDriveFileId)}',this)"`
+      : ` onerror="this.onerror=null;window._clearBrokenCover&&window._clearBrokenCover('${escapeHtml(song.id)}',this)"`;
+
+    const img = `<img src="${escapeHtml(song.coverImageUrl)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;display:block" decoding="sync" alt=""${errHandler}>`;
     coverCache.set(key, img);
     return img;
   }
 
+  // coverImageUrl is missing but Drive file exists — resolve from IDB cache or Drive
+  if (song.coverDriveFileId && !song._coverResolving) {
+    song._coverResolving = true;
+    (async () => {
+      // Try local IndexedDB cache first (no auth needed)
+      let url = await getCoverBlobUrl(song.coverDriveFileId);
+      // Fall back to fetching from Drive and caching
+      if (!url) {
+        const blob = await gdriveFetchBlob(song.coverDriveFileId);
+        if (blob) {
+          await putCoverBlob(song.coverDriveFileId, blob);
+          url = URL.createObjectURL(blob);
+          coverUrlCache.set(song.coverDriveFileId, url);
+        }
+      }
+      song._coverResolving = false;
+      if (url) {
+        song.coverImageUrl = url;
+        coverCache.clear();
+        saveState();
+        render();
+      }
+    })().catch(() => { song._coverResolving = false; });
+  }
+
   const seed = hashStr(`${song.id}|${song.title}|${song.project}|${song.genre}`);
   const r = makeRng(seed);
+  const u = (seed >>> 0).toString(36); // unique prefix for SVG IDs
 
   const h1 = Math.floor(r()*360);
   const h2 = (h1 + 90 + Math.floor(r()*90)) % 360;
@@ -4344,38 +4798,38 @@ function coverSvg(song, { lite = false } = {}) {
   const svg = forceLite ? `
   <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
     <defs>
-      <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <linearGradient id="g${u}" x1="0" y1="0" x2="1" y2="1">
         <stop offset="0" stop-color="${c1}" stop-opacity=".95"/>
         <stop offset=".55" stop-color="${c2}" stop-opacity=".85"/>
         <stop offset="1" stop-color="${c3}" stop-opacity=".9"/>
       </linearGradient>
-      <radialGradient id="vig" cx="50%" cy="45%" r="70%">
+      <radialGradient id="v${u}" cx="50%" cy="45%" r="70%">
         <stop offset="55%" stop-color="rgba(0,0,0,0)"/>
         <stop offset="100%" stop-color="rgba(0,0,0,.28)"/>
       </radialGradient>
     </defs>
 
-    <rect width="120" height="120" fill="url(#g)"/>
+    <rect width="120" height="120" fill="url(#g${u})"/>
     ${b.map(x => `<circle cx="${x.x}" cy="${x.y}" r="${x.rad}" fill="${x.col}" opacity=".22"/>`).join("")}
 
     <path d="M ${sx1} ${sy1} C ${sx1+35} ${sy1-30}, ${sx2-35} ${sy2+30}, ${sx2} ${sy2}"
       stroke="rgba(255,255,255,.55)" stroke-width="5" stroke-linecap="round" opacity=".18"/>
 
-    <rect width="120" height="120" fill="url(#vig)"/>
+    <rect width="120" height="120" fill="url(#v${u})"/>
   </svg>` : `
   <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
     <defs>
-      <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <linearGradient id="g${u}" x1="0" y1="0" x2="1" y2="1">
         <stop offset="0" stop-color="${c1}" stop-opacity=".95"/>
         <stop offset=".55" stop-color="${c2}" stop-opacity=".85"/>
         <stop offset="1" stop-color="${c3}" stop-opacity=".9"/>
       </linearGradient>
 
-      <filter id="blur">
+      <filter id="b${u}">
         <feGaussianBlur stdDeviation="12" />
       </filter>
 
-      <filter id="grain">
+      <filter id="n${u}">
         <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch" />
         <feColorMatrix type="matrix" values="
           1 0 0 0 0
@@ -4384,7 +4838,7 @@ function coverSvg(song, { lite = false } = {}) {
           0 0 0 .12 0"/>
       </filter>
 
-      <filter id="glow">
+      <filter id="w${u}">
         <feGaussianBlur stdDeviation="3" result="b"/>
         <feMerge>
           <feMergeNode in="b"/>
@@ -4392,23 +4846,23 @@ function coverSvg(song, { lite = false } = {}) {
         </feMerge>
       </filter>
 
-      <radialGradient id="vig" cx="50%" cy="45%" r="70%">
+      <radialGradient id="v${u}" cx="50%" cy="45%" r="70%">
         <stop offset="55%" stop-color="rgba(0,0,0,0)"/>
         <stop offset="100%" stop-color="rgba(0,0,0,.35)"/>
       </radialGradient>
     </defs>
 
-    <rect width="120" height="120" fill="url(#g)"/>
+    <rect width="120" height="120" fill="url(#g${u})"/>
 
-    <g filter="url(#blur)" opacity=".9">
+    <g filter="url(#b${u})" opacity=".9">
       ${b.map(x => `<circle cx="${x.x}" cy="${x.y}" r="${x.rad}" fill="${x.col}" opacity=".55"/>`).join("")}
     </g>
 
     <path d="M ${sx1} ${sy1} C ${sx1+35} ${sy1-30}, ${sx2-35} ${sy2+30}, ${sx2} ${sy2}"
-      stroke="rgba(255,255,255,.65)" stroke-width="6" stroke-linecap="round" opacity=".22" filter="url(#glow)"/>
+      stroke="rgba(255,255,255,.65)" stroke-width="6" stroke-linecap="round" opacity=".22" filter="url(#w${u})"/>
 
-    <rect width="120" height="120" fill="url(#vig)"/>
-    <rect width="120" height="120" filter="url(#grain)" opacity=".55"/>
+    <rect width="120" height="120" fill="url(#v${u})"/>
+    <rect width="120" height="120" filter="url(#n${u})" opacity=".55"/>
   </svg>`;
 
   coverCache.set(key, svg);
@@ -4445,8 +4899,7 @@ function renderSongsList() {
       </div>
     </div>
 
-    <div id="songList" class="songsList"></div>
-    <div class="small">Tip: use the center "New record" button to create.</div>
+    <div id="songList"></div>
   `;
 
   const listEl = $("#songList");
@@ -4479,29 +4932,94 @@ function renderSongsList() {
         return (b.updatedAt || "").localeCompare(a.updatedAt || "");
       });
 
-    listEl.innerHTML = filtered.length
-      ? filtered.map((s) => {
-          return `
-            <div class="songRow" data-id="${s.id}">
-              <div class="songThumb" aria-hidden="true">
-                ${coverSvg(s, { lite: true })}
-              </div>
-              <div class="songMain">
-                <div class="songTop">
-                  <div class="songTitleRow">
-                    <div class="songTitle">${escapeHtml(s.title)}</div>
-                  </div>
-                  <button class="songMore" data-more="${s.id}" aria-label="Song menu">⋯</button>
-                </div>
-                <div class="songSub">${escapeHtml(s.project || "—")}</div>
+    if (!filtered.length) {
+      listEl.innerHTML = `<div class="small">No matches.</div>`;
+    } else {
+      // Group by artist (project field), sorted A-Z
+      const groups = {};
+      for (const s of filtered) {
+        const artist = (s.project || "").trim() || "Unknown";
+        (groups[artist] ||= []).push(s);
+      }
+      const sortedArtists = Object.keys(groups).sort((a, b) => a.localeCompare(b));
+
+      const cardHtml = (s, span) => {
+        const vCount = s.versions?.length || 0;
+        const spanStyle = span > 1 ? ` style="grid-column:span ${span}"` : "";
+        return `
+          <div class="songCard" data-id="${s.id}"${spanStyle}>
+            <div class="songCardStack">
+              <div class="songCardLayer songCardLayer2"></div>
+              <div class="songCardLayer songCardLayer1"></div>
+              <div class="songCardFront">
+                <div class="songCardArt">${coverSvg(s, { lite: true })}</div>
               </div>
             </div>
-          `;
-        }).join("")
-      : `<div class="small">No matches.</div>`;
+            <div class="songCardInfo">
+              <div class="songCardTitle">${escapeHtml(s.title)}</div>
+              <div class="songCardSub">${vCount} ver${vCount !== 1 ? "s" : ""}</div>
+            </div>
+          </div>
+        `;
+      };
 
-    listEl.querySelectorAll("[data-id]").forEach((el) => {
+      const groupCardsHtml = (artistSongs) => {
+        const count = artistSongs.length;
+        if (count === 1) return cardHtml(artistSongs[0], 3);
+        if (count === 2) {
+          const sorted = [...artistSongs].sort((a, b) =>
+            (b.updatedAt || b.createdAt || "").localeCompare(a.updatedAt || a.createdAt || "")
+          );
+          return cardHtml(sorted[0], 2) + cardHtml(sorted[1], 1);
+        }
+        // For 3+, fill complete rows; if remainder, last row gets adjusted spans
+        const remainder = count % 3;
+        if (remainder === 0) return artistSongs.map(s => cardHtml(s, 1)).join("");
+        // Full rows first
+        const fullCount = count - (remainder === 1 ? 4 : remainder);
+        let html = artistSongs.slice(0, fullCount).map(s => cardHtml(s, 1)).join("");
+        const tail = artistSongs.slice(fullCount);
+        if (remainder === 2) {
+          // 2 left over → span 2 + span 1
+          html += cardHtml(tail[0], 2) + cardHtml(tail[1], 1);
+        } else {
+          // remainder === 1 → take last 4 songs, make two rows of span 2 + span 1 (alternating)
+          html += cardHtml(tail[0], 2) + cardHtml(tail[1], 1);
+          html += cardHtml(tail[2], 1) + cardHtml(tail[3], 2);
+        }
+        return html;
+      };
+
+      listEl.innerHTML = sortedArtists.map(artist => `
+        <div class="songsGroup">
+          <div class="songsGroupHead" data-artist="${escapeHtml(artist)}" style="cursor:pointer">${escapeHtml(artist)}</div>
+          <div class="songsGroupLine"></div>
+          <div class="songsList">${groupCardsHtml(groups[artist])}</div>
+        </div>
+      `).join("");
+    }
+
+    listEl.querySelectorAll(".songCard[data-id]").forEach((el) => {
+      let longPressTimer = null;
+      let didLongPress = false;
+
+      el.addEventListener("touchstart", () => {
+        didLongPress = false;
+        longPressTimer = setTimeout(() => {
+          didLongPress = true;
+          navigator.vibrate?.(30);
+          const id = el.getAttribute("data-id");
+          if (id) openSongMenu(id);
+        }, 500);
+      }, { passive: true });
+
+      el.addEventListener("touchend", () => { clearTimeout(longPressTimer); });
+      el.addEventListener("touchmove", () => { clearTimeout(longPressTimer); });
+      el.addEventListener("touchcancel", () => { clearTimeout(longPressTimer); });
+
       el.addEventListener("click", () => {
+        if (didLongPress) return;
+        captureNavState();
         songsListScrollTop = activeScreenEl.scrollTop;
         selectedSongId = el.getAttribute("data-id");
         render();
@@ -4509,11 +5027,15 @@ function renderSongsList() {
       });
     });
 
-        listEl.querySelectorAll("[data-more]").forEach((btn) => {
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        const id = btn.getAttribute("data-more");
-        if (id) openSongMenu(id);
+    listEl.querySelectorAll(".songsGroupHead[data-artist]").forEach((el) => {
+      el.addEventListener("click", () => {
+        const artist = el.getAttribute("data-artist");
+        if (!artist) return;
+        captureNavState();
+        drawerView = "projects";
+        projectDetailScreen = artist;
+        render();
+        triggerForwardSlide();
       });
     });
   };
@@ -4609,8 +5131,8 @@ activeScreenEl.innerHTML = `
       <button class="songHeroDetails" id="songDetailsBtn">
         Details
       </button>
-      <button class="songHeroQueue" id="genArtBtn" title="Generate AI cover art">
-        ${song.coverImageUrl ? "🔄 Regen Art" : "✨ Gen Art"}
+      <button class="songHeroQueue" id="genArtBtn" title="Generate AI cover art" ${generatingArtSongs.has(song.id) || Date.now() < artCooldownUntil ? "disabled" : ""}>
+        ${generatingArtSongs.has(song.id) ? "✨ Generating…" : Date.now() < artCooldownUntil ? "⏳ Please wait…" : song.coverImageUrl ? "🔄 Regen Art" : "✨ Gen Art"}
       </button>
     </div>
   </div>
@@ -4673,27 +5195,35 @@ $("#songDetailsBtn")?.addEventListener("click", () => {
   render();
 });
 
-$("#genArtBtn")?.addEventListener("click", () => {
-  const btn = $("#genArtBtn");
-  if (btn) { btn.disabled = true; btn.textContent = "✨ Generating…"; }
+$("#genArtBtn")?.addEventListener("click", async () => {
+  if (generatingArtSongs.has(song.id) || Date.now() < artCooldownUntil) return;
 
-  const prompt = [
-    "album cover art",
-    song.genre ? `${song.genre} style` : null,
-    `for a song called "${song.title}"`,
-    song.project ? `by ${song.project}` : null,
-    "cinematic, dark moody aesthetic, no text, no words, square format"
-  ].filter(Boolean).join(", ");
+  const apiKey = state.settings.replicateKey || "";
+  if (!apiKey) {
+    toast("Add your Replicate API key in Settings first");
+    return;
+  }
 
-  const seed = Math.floor(Math.random() * 1_000_000);
-  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=512&height=512&nologo=true&model=flux&seed=${seed}`;
-
-  song.coverImageUrl = url;
-  song.updatedAt = nowStamp();
-  saveState();
-  toast("Generating art ✨ — takes ~20s to appear");
-  if (btn) { btn.disabled = false; }
+  generatingArtSongs.add(song.id);
+  artCooldownUntil = Date.now() + 10000;
+  coverCache.clear();
   render();
+
+  try {
+    await generateArtForSong(song, apiKey);
+    coverCache.clear();
+    saveState();
+    toast("Art generated ✨");
+  } catch (e) {
+    console.error("Art generation failed:", e);
+    toast(e.message || "Art generation failed — try again");
+  } finally {
+    generatingArtSongs.delete(song.id);
+    coverCache.clear();
+    render();
+    const remaining = artCooldownUntil - Date.now();
+    if (remaining > 0) setTimeout(() => render(), remaining + 50);
+  }
 });
 
 $("#addVersionJump")?.addEventListener("click", () => {
@@ -4734,6 +5264,7 @@ $("#addVersionJump")?.addEventListener("click", () => {
 
   rowsEl.querySelectorAll("[data-vrow]").forEach((row) => {
     row.addEventListener("click", () => {
+      captureNavState();
       selectedVersionId = row.getAttribute("data-vrow");
       render();
       triggerForwardSlide();
@@ -5327,11 +5858,96 @@ function renderNowPlaying() {
 
   setHeader("Now Playing");
   const isFirstOpen = !fullPlayerOpen;
+  fullPlayerOpen = true;
   setFullPlayerOpen(true);
 
   const title = song.title || "Untitled";
   const subtitle = v.label || "Version";
   const art = coverSvg(song);
+
+  // ── Track-change horizontal slide (skip full rebuild when already open) ──
+  if (!isFirstOpen) {
+    const dir = _miniCarouselDir || 1;
+    _miniCarouselDir = 0;
+
+    const fp = document.getElementById("fullPlayer");
+    if (fp) {
+      const artCard = fp.querySelector(".fpArtCard");
+      const meta = fp.querySelector(".fpMeta");
+      const bg = fp.querySelector(".fpBg");
+
+      if (artCard && meta) {
+        const exitX  = dir === 1 ? "-110%" : "110%";
+        const enterX = dir === 1 ? "110%"  : "-110%";
+        const dur = "0.4s";
+        const ease = "cubic-bezier(.32,.72,.24,1)";
+
+        // Clone old content for exit animation
+        const fpRect   = fp.getBoundingClientRect();
+        const artRect  = artCard.getBoundingClientRect();
+        const metaRect = meta.getBoundingClientRect();
+
+        const artClone  = artCard.cloneNode(true);
+        const metaClone = meta.cloneNode(true);
+
+        for (const c of [artClone, metaClone]) {
+          c.style.position = "absolute";
+          c.style.zIndex = "5";
+          c.style.margin = "0";
+          c.style.flexShrink = "0";
+        }
+        artClone.style.top    = (artRect.top  - fpRect.top)  + "px";
+        artClone.style.left   = (artRect.left - fpRect.left) + "px";
+        artClone.style.width  = artRect.width  + "px";
+        artClone.style.height = artRect.height + "px";
+        metaClone.style.top   = (metaRect.top  - fpRect.top)  + "px";
+        metaClone.style.left  = (metaRect.left - fpRect.left) + "px";
+        metaClone.style.width = metaRect.width + "px";
+
+        fp.appendChild(artClone);
+        fp.appendChild(metaClone);
+
+        // Update real elements with new song data
+        artCard.querySelector(".fpArt").innerHTML = art;
+        meta.querySelector(".fpTitle").textContent = title;
+        meta.querySelector(".fpSub").textContent   = subtitle;
+        if (bg) bg.innerHTML = art;
+
+        // Position new content off-screen
+        artCard.style.transition = "none";
+        meta.style.transition    = "none";
+        artCard.style.transform  = `translateX(${enterX})`;
+        meta.style.transform     = `translateX(${enterX})`;
+
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          // Slide clones out
+          artClone.style.transition  = `transform ${dur} ${ease}, opacity ${dur} ease`;
+          metaClone.style.transition = `transform ${dur} ${ease}, opacity ${dur} ease`;
+          artClone.style.transform   = `translateX(${exitX})`;
+          artClone.style.opacity     = "0";
+          metaClone.style.transform  = `translateX(${exitX})`;
+          metaClone.style.opacity    = "0";
+
+          // Slide new content in
+          artCard.style.transition = `transform ${dur} ${ease}`;
+          meta.style.transition    = `transform ${dur} ${ease}`;
+          artCard.style.transform  = "translateX(0)";
+          meta.style.transform     = "translateX(0)";
+
+          const cleanUp = (el) => {
+            el.style.transition = "";
+            el.style.transform  = "";
+          };
+          artClone.addEventListener("transitionend",  () => artClone.remove(),  { once: true });
+          metaClone.addEventListener("transitionend", () => metaClone.remove(), { once: true });
+          artCard.addEventListener("transitionend",   () => cleanUp(artCard),   { once: true });
+          meta.addEventListener("transitionend",      () => cleanUp(meta),      { once: true });
+        }));
+
+        return; // skip full innerHTML rebuild
+      }
+    }
+  }
 
   const _shuffleSvg = `<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="4" y1="4" x2="21" y2="21"/></svg>`;
   const _prevSvg    = `<svg viewBox="0 0 24 24" width="35" height="35" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>`;
@@ -5439,6 +6055,7 @@ function renderNowPlaying() {
 
   const closeFullPlayer = () => {
     cleanup();
+    fullPlayerOpen = false;
     setFullPlayerOpen(false);
     playerScreen = "list";
     if (prevTabBeforeFullPlayer) {
@@ -5456,12 +6073,15 @@ function renderNowPlaying() {
 
   $("#npBackBtn")?.addEventListener("click", closeFullPlayer);
 
-  // ✅ Swipe down to close
+  // ✅ Swipe down to close — reveals previous screen underneath
   const fp = $("#fullPlayer");
   let swipeOn = false;
   let startY = 0;
   let startX = 0;
   let lastDy = 0;
+  let _peekReady = false;
+  let _savedPrevTab = null;
+  let _savedPrevSongId = null;
 
   fp?.addEventListener("touchstart", (e) => {
     const t = e.touches?.[0];
@@ -5472,6 +6092,7 @@ function renderNowPlaying() {
     startY = t.clientY;
     startX = t.clientX;
     lastDy = 0;
+    _peekReady = false;
   }, { passive: true });
 
   fp?.addEventListener("touchmove", (e) => {
@@ -5485,23 +6106,68 @@ function renderNowPlaying() {
     if (Math.abs(dx) > Math.abs(dy)) return;
 
     e.preventDefault();
-
     lastDy = dy;
+
+    // First significant drag: lift player to body, render previous screen underneath
+    if (!_peekReady && dy > 8) {
+      _peekReady = true;
+      _savedPrevTab = prevTabBeforeFullPlayer;
+      _savedPrevSongId = prevSelectedSongIdBeforeFullPlayer;
+
+      // Move fp to body so it floats above everything
+      document.body.appendChild(fp);
+
+      // Restore previous screen underneath
+      fullPlayerOpen = false;
+      setFullPlayerOpen(false);
+      playerScreen = "list";
+      if (_savedPrevTab) {
+        currentTab = _savedPrevTab;
+        selectedSongId = _savedPrevSongId;
+        prevTabBeforeFullPlayer = null;
+        prevSelectedSongIdBeforeFullPlayer = null;
+        setHeader(currentTab === "songs" && selectedSongId ? "Song" : TAB_TITLES[currentTab] || "RiffBank");
+      } else {
+        setHeader("Player");
+      }
+      syncTabs();
+      render();
+    }
+
     fp.style.transform = `translateY(${dy}px)`;
     fp.style.transition = "none";
-    fp.style.opacity = String(Math.max(0, 1 - (dy / window.innerHeight)));
   }, { passive: false });
 
   fp?.addEventListener("touchend", () => {
     if (!swipeOn) return;
     swipeOn = false;
 
-    const shouldClose = lastDy > 80;
-    fp.style.transition = "transform 180ms ease, opacity 180ms ease";
-    fp.style.transform = "translateY(0px)";
-    fp.style.opacity = "1";
-
-    if (shouldClose) closeFullPlayer();
+    if (_peekReady) {
+      if (lastDy > 80) {
+        // Commit close: slide player off-screen, then remove
+        cleanup();
+        fp.style.transition = "transform 280ms cubic-bezier(.32,0,.6,1), opacity 200ms ease";
+        fp.style.transform = "translateY(100%)";
+        fp.style.opacity = "0";
+        fp.addEventListener("transitionend", () => fp.remove(), { once: true });
+      } else {
+        // Cancel: re-open full player
+        fp.remove();
+        fullPlayerOpen = true;
+        setFullPlayerOpen(true);
+        prevTabBeforeFullPlayer = _savedPrevTab;
+        prevSelectedSongIdBeforeFullPlayer = _savedPrevSongId;
+        currentTab = "player";
+        playerScreen = "now-playing";
+        syncTabs();
+        render();
+      }
+      _peekReady = false;
+    } else {
+      fp.style.transition = "transform 180ms ease, opacity 180ms ease";
+      fp.style.transform = "translateY(0px)";
+      fp.style.opacity = "1";
+    }
   }, { passive: true });
 
   npScrub?.addEventListener("input", (e) => {
@@ -5688,6 +6354,18 @@ function renderSettings() {
       <div class="small">Used to suggest where files should live in Drive/iCloud/etc.</div>
 
       <div class="hr"></div>
+      <h2>AI Art</h2>
+      <div class="label">Replicate API key</div>
+      <input id="replicateKey" type="password" value="${escapeHtml(state.settings.replicateKey || "")}" placeholder="r8_..." />
+      <div class="small">Free at replicate.com — used for cover art generation (Imagen 4)</div>
+
+      <div class="row" style="gap:10px; margin-top:14px">
+        <button id="genMissingArt" class="btn" style="flex:1" ${bulkArtState.running ? "disabled" : ""}>${bulkArtState.running ? `${bulkArtState.done}/${bulkArtState.total} done…` : "Generate Missing Art"}</button>
+        <button id="regenAllArt" class="btn" style="flex:1; background: rgba(255,200,50,.08); border-color: rgba(255,200,50,.2); color: #ffc832;" ${bulkArtState.running ? "disabled" : ""}>${bulkArtState.running ? `${bulkArtState.done}/${bulkArtState.total} done…` : "Regenerate All Art"}</button>
+      </div>
+      <div class="small" style="margin-top:4px">Generate art only for songs without cover art, or regenerate for every song.</div>
+
+      <div class="hr"></div>
       <h2>Defaults</h2>
 
       <div class="row">
@@ -5807,6 +6485,41 @@ function renderSettings() {
 
     if (!confirm(`Found ${songs.length} songs from Drive folders. Replace local library?`)) return;
 
+    // Merge cover art from saved state JSON for songs missing cover.jpg on disk
+    try {
+      const driveState = await gdrivePullStateSilent();
+      if (driveState && driveState.songs) {
+        for (const song of songs) {
+          if (song.coverDriveFileId) continue; // folder scan found cover.jpg
+          const match = driveState.songs.find(
+            s => s.title === song.title && s.project === song.project
+          );
+          if (match) {
+            if (match.coverDriveFileId) song.coverDriveFileId = match.coverDriveFileId;
+            if (match.coverImageUrl) song.coverImageUrl = match.coverImageUrl;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("Could not merge cover art from state JSON:", e);
+    }
+
+    // Resolve cover art Drive IDs — try local cache first, then fetch & cache
+    for (const song of songs) {
+      if (song.coverDriveFileId) {
+        let url = await getCoverBlobUrl(song.coverDriveFileId);
+        if (!url) {
+          const blob = await gdriveFetchBlob(song.coverDriveFileId);
+          if (blob) {
+            await putCoverBlob(song.coverDriveFileId, blob);
+            url = URL.createObjectURL(blob);
+            coverUrlCache.set(song.coverDriveFileId, url);
+          }
+        }
+        if (url) song.coverImageUrl = url;
+      }
+    }
+
     state.songs = songs;
     normalizeState();
     saveState();
@@ -5820,9 +6533,25 @@ function renderSettings() {
     state.settings.defaultProject = $("#defProject").value.trim() || "";
     state.settings.defaultGenre = $("#defGenre").value.trim() || "";
     state.settings.defaultSprint = $("#defSprint").value.trim() || "";
+    state.settings.replicateKey = $("#replicateKey").value.trim() || "";
     saveState();
     toast("Saved ✅");
   });
+
+  // Bulk art generation — sync buttons to global bulkArtState
+  const syncBulkBtns = () => {
+    const btnMissing = $("#genMissingArt");
+    const btnAll = $("#regenAllArt");
+    if (bulkArtState.running) {
+      const txt = `${bulkArtState.done}/${bulkArtState.total} done…`;
+      if (btnMissing) { btnMissing.disabled = true; btnMissing.textContent = txt; }
+      if (btnAll) { btnAll.disabled = true; btnAll.textContent = txt; }
+    }
+  };
+  syncBulkBtns();
+
+  $("#genMissingArt")?.addEventListener("click", () => startBulkGenArt(true));
+  $("#regenAllArt")?.addEventListener("click", () => startBulkGenArt(false));
 
   $("#wipe").addEventListener("click", async () => {
     if (!confirm("Wipe all local RiffBank data on this browser?")) return;

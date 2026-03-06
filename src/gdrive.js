@@ -336,6 +336,72 @@ export async function gdriveUploadAudio({ file, fileName, project, songTitle }) 
 }
 
 /**
+ * Upload (or replace) a cover art image for a song on Drive.
+ * Saves it as "cover.jpg" in the song's folder: Home / Project / SongTitle /
+ *
+ * @param {{ blob: Blob, project: string, songTitle: string }} opts
+ * @returns {{ success: boolean, driveFileId?: string, error?: string }}
+ */
+export async function gdriveUploadCoverArt({ blob, project, songTitle }) {
+  if (!gdriveIsConnected()) {
+    return { success: false, error: "Not connected to Google Drive." };
+  }
+
+  const token = await _ensureToken();
+  if (!token) return { success: false, error: "Auth expired. Please reconnect." };
+
+  const homeId = _config.homeFolderId;
+  const projId = await _findOrCreateFolder(_sanitize(project || "Project"), homeId);
+  const songFolderId = await _findOrCreateFolder(_sanitize(songTitle || "Untitled"), projId);
+
+  if (!songFolderId) {
+    return { success: false, error: "Could not create folder structure on Drive." };
+  }
+
+  try {
+    // Check if cover.jpg already exists — if so, delete it first
+    const existing = await _listChildren(songFolderId, token, false);
+    const oldCover = existing.find(f => /^cover\.(jpg|png|webp)$/i.test(f.name));
+    if (oldCover) {
+      await gdriveDeleteFile(oldCover.id);
+    }
+
+    const metadata = {
+      name: "cover.jpg",
+      parents: [songFolderId],
+    };
+
+    const form = new FormData();
+    form.append(
+      "metadata",
+      new Blob([JSON.stringify(metadata)], { type: "application/json" })
+    );
+    form.append("file", blob);
+
+    const res = await fetch(
+      "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id",
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+      }
+    );
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error("Drive cover upload failed:", res.status, errText);
+      return { success: false, error: `Upload failed (${res.status})` };
+    }
+
+    const data = await res.json();
+    return { success: true, driveFileId: data.id };
+  } catch (err) {
+    console.error("Drive cover upload error:", err);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
  * Get a streamable download URL for a Drive file.
  * If the token is missing or expired, attempts a silent refresh via GIS
  * (uses prompt:"" so no disruptive popup if the user has an active session).
@@ -346,16 +412,24 @@ export async function gdriveUploadAudio({ file, fileName, project, songTitle }) 
 export async function gdriveGetStreamUrl(driveFileId) {
   if (!driveFileId) return null;
 
-  // Token still valid — return URL immediately
-  if (_accessToken && Date.now() < _tokenExpiry) {
-    return `https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media&access_token=${encodeURIComponent(_accessToken)}`;
-  }
-
-  // Token missing/expired — attempt a silent refresh before giving up
-  const token = await _ensureToken();
+  const token = _accessToken && Date.now() < _tokenExpiry
+    ? _accessToken
+    : await _ensureToken();
   if (!token) return null;
 
-  return `https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media&access_token=${encodeURIComponent(token)}`;
+  // Fetch via Authorization header (works even when query-param tokens get 403)
+  // and return a blob URL that <img> / <audio> can use directly
+  try {
+    const res = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -472,9 +546,10 @@ export async function gdriveRebuildFromFolders() {
       const songFolders = await _listChildren(project.id, token, true);
 
       for (const songFolder of songFolders) {
-        // Level 3: look for a "Versions" subfolder
-        const subfolders = await _listChildren(songFolder.id, token, true);
-        const versionsFolder = subfolders.find(f => f.name === "Versions");
+        // Level 3: list ALL children (folders + files) to find Versions subfolder and cover art
+        const songChildren = await _listChildren(songFolder.id, token, false);
+        const versionsFolder = songChildren.find(f => f.mimeType === FOLDER_MIME && f.name === "Versions");
+        const coverFile = songChildren.find(f => /^cover\.(jpg|png|webp)$/i.test(f.name));
 
         const versions = [];
 
@@ -522,6 +597,7 @@ export async function gdriveRebuildFromFolders() {
           status: "idea",
           featuredVersionId: versions.length > 0 ? versions[0].id : null,
           versions,
+          coverDriveFileId: coverFile ? coverFile.id : null,
           createdAt: songFolder.modifiedTime || new Date().toISOString(),
           updatedAt: songFolder.modifiedTime || new Date().toISOString(),
         });
