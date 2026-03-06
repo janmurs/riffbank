@@ -8,7 +8,7 @@
 
 // Type ./start.sh to start local server
 
-const CACHE_VERSION = "2026-03-05_1"; // <-- bump this when you deploy
+const CACHE_VERSION = "2026-03-06_20"; // <-- bump this when you deploy
 const STATIC_CACHE = `riffbank-static-${CACHE_VERSION}`;
 const RUNTIME_CACHE = `riffbank-runtime-${CACHE_VERSION}`;
 
@@ -19,6 +19,11 @@ const PRECACHE_URLS = [
   "/src/app.js",
   "/manifest.json",
   "/icon-1024.png",
+  "/songs-card.jpg",
+  "/projects-card.jpg",
+  "/releases-card.jpg",
+  "/lyrics-card.jpg",
+  "/actions-card.jpg",
 ];
 
 self.addEventListener("message", (event) => {

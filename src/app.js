@@ -10,7 +10,7 @@
 window.onerror = (m, src, line, col) => alert(`JS ERROR:\n${m}\n${line}:${col}`);
 
 // Dev toggle: skip splash animation
- const DISABLE_SPLASH = false;
+ const DISABLE_SPLASH = true;
 
 // console.log("RIFFBANK APP.JS LOADED ✅", new Date().toISOString());
 // alert("RIFFBANK APP.JS LOADED ✅ " + new Date().toISOString());
@@ -33,6 +33,8 @@ import {
   gdrivePullState,
   gdrivePullStateSilent,
   gdriveRebuildFromFolders,
+  gdriveUploadCoverArt,
+  gdriveGetStreamUrl,
 } from "./gdrive.js";
 
 const LS_KEY = "riffbank_v1";
@@ -1043,6 +1045,7 @@ function normalizeState() {
       song.versions.forEach(v => { v.isActive = (v.id === newest.id); });
     }
     if (song.coverImageUrl === undefined) song.coverImageUrl = null;
+    if (song.coverDriveFileId === undefined) song.coverDriveFileId = null;
   });
   // Player state (queue)
   state.player = state.player || {};
@@ -3893,7 +3896,7 @@ function renderHome() {
 
           <!-- Songs — tall left card, spans 2 rows -->
           <button class="hCard hSongs" data-home="songs" aria-label="Songs">
-            <div class="hArt"><img src="./songs-card.png" style="width:100%;height:100%;object-fit:cover;object-position:35% center;display:block;"></div>
+            <div class="hArt"><img src="./songs-card.jpg" style="width:100%;height:100%;object-fit:cover;object-position:35% center;display:block;"></div>
             <div class="hGrad"></div>
             <div class="hBody">
               <div class="hLabel">Songs</div>
@@ -3902,7 +3905,7 @@ function renderHome() {
 
           <!-- Projects — small, right column top -->
           <button class="hCard hProjects" data-home="projects" aria-label="Projects">
-            <div class="hArt"><img src="./projects-card.png" style="width:100%;height:100%;object-fit:cover;object-position:center 22%;display:block;"></div>
+            <div class="hArt"><img src="./projects-card.jpg" style="width:100%;height:100%;object-fit:cover;object-position:center 22%;display:block;"></div>
             <div class="hGrad"></div>
             <div class="hBody">
               <div class="hLabel">Projects</div>
@@ -3911,7 +3914,7 @@ function renderHome() {
 
           <!-- Releases — small, right column bottom -->
           <button class="hCard hPlayer" data-home="releases" aria-label="Releases">
-            <div class="hArt"><img src="./releases-card.png" style="width:100%;height:100%;object-fit:cover;object-position:center 45%;display:block;"></div>
+            <div class="hArt"><img src="./releases-card.jpg" style="width:100%;height:100%;object-fit:cover;object-position:center 45%;display:block;"></div>
             <div class="hGrad"></div>
             <div class="hBody">
               <div class="hLabel">Releases</div>
@@ -3920,7 +3923,7 @@ function renderHome() {
 
           <!-- Lyrics — full width -->
           <button class="hCard hLyrics hWide" data-home="lyrics" aria-label="Lyrics">
-            <div class="hArt"><img src="./lyrics-card.png" style="width:100%;height:150%;object-fit:cover;transform:scale(1.1);display:block;"></div>
+            <div class="hArt"><img src="./lyrics-card.jpg" style="width:100%;height:150%;object-fit:cover;transform:scale(1.1);display:block;"></div>
             <div class="hGrad"></div>
             <div class="hBody">
               <div class="hLabel">Lyrics</div>
@@ -3929,7 +3932,7 @@ function renderHome() {
 
           <!-- Actions — full width -->
           <button class="hCard hNext hWide" data-home="next" aria-label="Actions">
-            <div class="hArt"><img src="./actions-card.png" style="width:100%;height:100%;object-fit:cover;transform:scale(1.1);display:block;"></div>
+            <div class="hArt"><img src="./actions-card.jpg" style="width:100%;height:100%;object-fit:cover;transform:scale(1.1);display:block;"></div>
             <div class="hGrad"></div>
             <div class="hBody">
               <div class="hLabel">Actions</div>
@@ -4351,6 +4354,181 @@ function makeRng(seed){
 
 // --- Cover caching + iOS "lite" mode ---
 const coverCache = new Map();
+const generatingArtSongs = new Set(); // song IDs currently generating art
+
+// Global handler: refresh cover image from Drive when cached URL expires
+window._refreshCoverFromDrive = async (songId, driveFileId, imgEl) => {
+  const url = await gdriveGetStreamUrl(driveFileId);
+  if (url && imgEl) {
+    imgEl.src = url;
+    // Update song state so future renders use fresh URL
+    const song = state.songs.find(s => s.id === songId);
+    if (song) {
+      song.coverImageUrl = url;
+      coverCache.clear();
+      saveState();
+    }
+  }
+};
+let artCooldownUntil = 0; // timestamp — global 10s cooldown after any art request
+const bulkArtState = { running: false, done: 0, total: 0 }; // bulk art gen progress
+
+function buildArtPrompt(song) {
+  // Deterministic hash from song title + project to pick scene/style combos
+  const seed = (song.title || "").length * 7 + (song.project || "").length * 13
+    + (song.title || "").charCodeAt(0) * 31
+    + ((song.title || "").charCodeAt(1) || 0) * 17;
+
+  const scenes = [
+    "vast mountain landscape at golden hour, dramatic peaks, alpine lake reflection, wildflowers in foreground, volumetric light rays through clouds",
+    "deep ocean underwater scene, bioluminescent jellyfish, coral reef, shafts of sunlight through water, ethereal blue-green glow, floating particles",
+    "abandoned industrial warehouse, shattered windows, overgrown vines reclaiming concrete, dramatic god-rays, dust particles in light beams",
+    "dense enchanted forest, towering ancient trees, mystical fog, fireflies glowing, moss-covered roots, dappled moonlight filtering through canopy",
+    "vast desert at twilight, sand dunes with wind ripples, lone joshua tree silhouette, purple-orange gradient sky, stars emerging",
+    "futuristic neon cityscape from rooftop, holographic billboards, flying vehicles, rain-slicked streets far below, cyberpunk atmosphere, glowing windows",
+    "frozen tundra landscape, northern lights aurora borealis, ice formations, starfield sky, teal and purple light dancing, snow-covered terrain",
+    "lush tropical coastline at sunset, palm trees swaying, turquoise waves crashing, dramatic cloud formations, golden hour warmth, volcanic island in distance",
+    "cosmic nebula scene, swirling galaxies, colorful interstellar gas clouds, distant stars, asteroid field, deep space, celestial wonder",
+    "overgrown ancient temple ruins, jungle reclaiming stone architecture, shafts of green-tinted light, carved stone faces, hanging vines, mystical atmosphere",
+    "stormy seascape, towering waves, lightning illuminating dark clouds, lighthouse beam cutting through rain, dramatic ocean spray, powerful nature",
+    "cherry blossom garden at night, lantern-lit pathway, pink petals falling, koi pond reflection, misty atmosphere, Japanese aesthetic",
+    "volcanic landscape, molten lava flows, dark rock formations, fiery orange glow against dark sky, smoke and ash, raw elemental power",
+    "abstract fluid art, swirling metallic paint, iridescent colors blending, macro photography feel, glossy surface tension, mesmerizing patterns",
+    "sunflower field stretching to horizon, dramatic cumulus clouds, warm afternoon light, single weathered barn, painted sky, rural serenity",
+    "underground crystal cavern, massive amethyst and quartz formations, underground river, bioluminescent fungi, prismatic light reflections",
+  ];
+
+  const styles = [
+    "cinematic photography",
+    "oil painting, thick brushstrokes",
+    "moody atmospheric digital art",
+    "watercolor illustration, soft edges",
+    "retro analog film grain aesthetic",
+    "hyper-detailed digital matte painting",
+    "minimalist graphic art, bold shapes",
+    "dreamlike surrealist composition",
+  ];
+
+  const palettes = [
+    "warm amber and deep crimson tones",
+    "cool blues and silver moonlight",
+    "vibrant teal and electric magenta",
+    "muted earth tones, olive and rust",
+    "pastel pink and lavender haze",
+    "deep indigo and gold accents",
+    "emerald green and copper highlights",
+    "monochrome with one vivid accent color",
+  ];
+
+  const scene = scenes[seed % scenes.length];
+  const style = styles[(seed * 3 + 5) % styles.length];
+  const palette = palettes[(seed * 7 + 11) % palettes.length];
+
+  return [
+    "album cover art",
+    song.genre ? `${song.genre} music mood` : null,
+    scene,
+    style,
+    palette,
+    "no text, no words, no letters, no numbers, no typography, no writing, no logos, no symbols, no watermarks, textless, wordless, purely visual composition, square format"
+  ].filter(Boolean).join(", ");
+}
+
+async function generateArtForSong(song, apiKey) {
+  const prompt = buildArtPrompt(song);
+  const res = await fetch("https://riffbank-art.riffbank.workers.dev", {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ input: { prompt, aspect_ratio: "1:1" } })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || data.title || JSON.stringify(data));
+  if (!data.output) throw new Error("No image returned");
+  const url = Array.isArray(data.output) ? data.output[0] : data.output;
+
+  // Download image and upload to Google Drive for persistence
+  try {
+    const imgRes = await fetch(url);
+    if (imgRes.ok) {
+      const blob = await imgRes.blob();
+      const driveResult = await gdriveUploadCoverArt({
+        blob,
+        project: song.project,
+        songTitle: song.title,
+      });
+      if (driveResult.success) {
+        song.coverDriveFileId = driveResult.driveFileId;
+      }
+    }
+  } catch (e) {
+    console.warn("Cover art Drive upload failed (art still saved as URL):", e);
+  }
+
+  song.coverImageUrl = url;
+  song.updatedAt = nowStamp();
+}
+
+async function startBulkGenArt(onlyMissing) {
+  if (bulkArtState.running) { toast("Bulk art generation already in progress"); return; }
+
+  const apiKey = state.settings.replicateKey || "";
+  if (!apiKey) { toast("Add your Replicate API key first"); return; }
+
+  const songs = onlyMissing
+    ? state.songs.filter(s => !s.coverImageUrl)
+    : [...state.songs];
+
+  if (!songs.length) { toast(onlyMissing ? "All songs already have art" : "No songs to generate art for"); return; }
+
+  const label = onlyMissing ? "missing" : "all";
+  if (!confirm(`Generate art for ${songs.length} ${label} song${songs.length === 1 ? "" : "s"}? This may take a while.`)) return;
+
+  bulkArtState.running = true;
+  bulkArtState.done = 0;
+  bulkArtState.total = songs.length;
+  for (const s of songs) generatingArtSongs.add(s.id);
+  coverCache.clear();
+  render();
+
+  let succeeded = 0;
+  let lastError = "";
+
+  for (const song of songs) {
+    try {
+      await generateArtForSong(song, apiKey);
+      succeeded++;
+    } catch (e) {
+      console.error(`Art gen failed for "${song.title}":`, e);
+      lastError = e.message;
+    }
+    generatingArtSongs.delete(song.id);
+    coverCache.clear();
+    bulkArtState.done++;
+    saveState();
+    // Rate limit: wait 12s between requests (6 req/min limit)
+    if (bulkArtState.done < bulkArtState.total) await new Promise(r => setTimeout(r, 12000));
+    // Update settings buttons if they're currently visible
+    const btnMissing = $("#genMissingArt");
+    const btnAll = $("#regenAllArt");
+    if (btnMissing || btnAll) {
+      const txt = `${bulkArtState.done}/${bulkArtState.total} done…`;
+      if (btnMissing) { btnMissing.disabled = true; btnMissing.textContent = txt; }
+      if (btnAll) { btnAll.disabled = true; btnAll.textContent = txt; }
+    }
+  }
+
+  bulkArtState.running = false;
+  coverCache.clear();
+  const total = bulkArtState.total;
+  if (succeeded === 0) {
+    toast(lastError ? `Art generation failed: ${lastError}` : "No art was generated");
+  } else if (succeeded < total) {
+    toast(`Generated art for ${succeeded}/${total} songs (${total - succeeded} failed)`);
+  } else {
+    toast(`Generated art for ${succeeded} song${succeeded === 1 ? "" : "s"} ✨`);
+  }
+  render();
+}
 
 function isIOSDevice(){
   // iPadOS can report as MacIntel with touch points
@@ -4362,10 +4540,22 @@ function coverSvg(song, { lite = false } = {}) {
   const forceLite = lite || isIOSDevice();
   const key = `${song.id}|${song.title}|${song.project}|${song.genre}|${song.coverImageUrl || ""}|${forceLite ? "lite" : "full"}`;
 
+  if (generatingArtSongs.has(song.id)) {
+    return `<div style="width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;background:linear-gradient(135deg,#1a1a2e,#16213e);border-radius:inherit;color:#888;font-size:13px;gap:8px">
+      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#666" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="animation:spin 2s linear infinite">
+        <path d="M12 2a10 10 0 0 1 10 10" /><style>@keyframes spin{to{transform:rotate(360deg)}}</style>
+      </svg>
+      <span style="opacity:.6">Generating…</span>
+    </div>`;
+  }
+
   if (coverCache.has(key)) return coverCache.get(key);
 
   if (song.coverImageUrl) {
-    const img = `<img src="${escapeHtml(song.coverImageUrl)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;display:block" loading="lazy" alt="">`;
+    const errHandler = song.coverDriveFileId
+      ? ` onerror="this.onerror=null;window._refreshCoverFromDrive&&window._refreshCoverFromDrive('${escapeHtml(song.id)}','${escapeHtml(song.coverDriveFileId)}',this)"`
+      : "";
+    const img = `<img src="${escapeHtml(song.coverImageUrl)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;display:block" loading="lazy" alt=""${errHandler}>`;
     coverCache.set(key, img);
     return img;
   }
@@ -4681,8 +4871,8 @@ activeScreenEl.innerHTML = `
       <button class="songHeroDetails" id="songDetailsBtn">
         Details
       </button>
-      <button class="songHeroQueue" id="genArtBtn" title="Generate AI cover art">
-        ${song.coverImageUrl ? "🔄 Regen Art" : "✨ Gen Art"}
+      <button class="songHeroQueue" id="genArtBtn" title="Generate AI cover art" ${generatingArtSongs.has(song.id) || Date.now() < artCooldownUntil ? "disabled" : ""}>
+        ${generatingArtSongs.has(song.id) ? "✨ Generating…" : Date.now() < artCooldownUntil ? "⏳ Please wait…" : song.coverImageUrl ? "🔄 Regen Art" : "✨ Gen Art"}
       </button>
     </div>
   </div>
@@ -4746,48 +4936,33 @@ $("#songDetailsBtn")?.addEventListener("click", () => {
 });
 
 $("#genArtBtn")?.addEventListener("click", async () => {
-  const btn = $("#genArtBtn");
-  if (btn) { btn.disabled = true; btn.textContent = "✨ Generating…"; }
+  if (generatingArtSongs.has(song.id) || Date.now() < artCooldownUntil) return;
 
   const apiKey = state.settings.replicateKey || "";
   if (!apiKey) {
     toast("Add your Replicate API key in Settings first");
-    if (btn) { btn.disabled = false; btn.textContent = song.coverImageUrl ? "🔄 Regen Art" : "✨ Gen Art"; }
     return;
   }
 
-  const prompt = [
-    "album cover art",
-    song.genre ? `${song.genre} style` : null,
-    `for a song called "${song.title}"`,
-    song.project ? `by ${song.project}` : null,
-    "cinematic, dark moody aesthetic, absolutely no text, no words, no letters, no numbers, no typography, no writing, purely visual, square format"
-  ].filter(Boolean).join(", ");
-
-  const resetBtn = () => {
-    if (btn) { btn.disabled = false; btn.textContent = song.coverImageUrl ? "🔄 Regen Art" : "✨ Gen Art"; }
-  };
+  generatingArtSongs.add(song.id);
+  artCooldownUntil = Date.now() + 10000;
+  coverCache.clear();
+  render();
 
   try {
-    const res = await fetch("https://riffbank-art.riffbank.workers.dev", {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ input: { prompt, aspect_ratio: "1:1" } })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || data.title || "API error");
-    if (!data.output) throw new Error("No image returned");
-
-    song.coverImageUrl = data.output;
-    song.updatedAt = nowStamp();
+    await generateArtForSong(song, apiKey);
     coverCache.clear();
     saveState();
     toast("Art generated ✨");
-    render();
   } catch (e) {
     console.error("Art generation failed:", e);
     toast(e.message || "Art generation failed — try again");
-    resetBtn();
+  } finally {
+    generatingArtSongs.delete(song.id);
+    coverCache.clear();
+    render();
+    const remaining = artCooldownUntil - Date.now();
+    if (remaining > 0) setTimeout(() => render(), remaining + 50);
   }
 });
 
@@ -5924,8 +6099,8 @@ function renderSettings() {
       <div class="small">Free at replicate.com — used for cover art generation (Imagen 4)</div>
 
       <div class="row" style="gap:10px; margin-top:14px">
-        <button id="genMissingArt" class="btn" style="flex:1">Generate Missing Art</button>
-        <button id="regenAllArt" class="btn" style="flex:1; background: rgba(255,200,50,.08); border-color: rgba(255,200,50,.2); color: #ffc832;">Regenerate All Art</button>
+        <button id="genMissingArt" class="btn" style="flex:1" ${bulkArtState.running ? "disabled" : ""}>${bulkArtState.running ? `${bulkArtState.done}/${bulkArtState.total} done…` : "Generate Missing Art"}</button>
+        <button id="regenAllArt" class="btn" style="flex:1; background: rgba(255,200,50,.08); border-color: rgba(255,200,50,.2); color: #ffc832;" ${bulkArtState.running ? "disabled" : ""}>${bulkArtState.running ? `${bulkArtState.done}/${bulkArtState.total} done…` : "Regenerate All Art"}</button>
       </div>
       <div class="small" style="margin-top:4px">Generate art only for songs without cover art, or regenerate for every song.</div>
 
@@ -6049,6 +6224,14 @@ function renderSettings() {
 
     if (!confirm(`Found ${songs.length} songs from Drive folders. Replace local library?`)) return;
 
+    // Resolve cover art Drive IDs into streamable URLs
+    for (const song of songs) {
+      if (song.coverDriveFileId) {
+        const coverUrl = await gdriveGetStreamUrl(song.coverDriveFileId);
+        if (coverUrl) song.coverImageUrl = coverUrl;
+      }
+    }
+
     state.songs = songs;
     normalizeState();
     saveState();
@@ -6067,68 +6250,20 @@ function renderSettings() {
     toast("Saved ✅");
   });
 
-  // Bulk art generation
-  const bulkGenArt = async (onlyMissing) => {
-    const apiKey = state.settings.replicateKey || $("#replicateKey")?.value?.trim() || "";
-    if (!apiKey) { toast("Add your Replicate API key first"); return; }
-
-    const songs = onlyMissing
-      ? state.songs.filter(s => !s.coverImageUrl)
-      : [...state.songs];
-
-    if (!songs.length) { toast(onlyMissing ? "All songs already have art" : "No songs to generate art for"); return; }
-
-    const label = onlyMissing ? "missing" : "all";
-    if (!confirm(`Generate art for ${songs.length} ${label} song${songs.length === 1 ? "" : "s"}? This may take a while.`)) return;
-
+  // Bulk art generation — sync buttons to global bulkArtState
+  const syncBulkBtns = () => {
     const btnMissing = $("#genMissingArt");
     const btnAll = $("#regenAllArt");
-    let done = 0;
-    const total = songs.length;
-    const updateProgress = () => {
-      const txt = `${done}/${total} done…`;
-      if (btnMissing) btnMissing.textContent = txt;
-      if (btnAll) btnAll.textContent = txt;
-    };
-    if (btnMissing) btnMissing.disabled = true;
-    if (btnAll) btnAll.disabled = true;
-    updateProgress();
-
-    for (const song of songs) {
-      const prompt = [
-        "album cover art",
-        song.genre ? `${song.genre} style` : null,
-        `for a song called "${song.title}"`,
-        song.project ? `by ${song.project}` : null,
-        "cinematic, dark moody aesthetic, absolutely no text, no words, no letters, no numbers, no typography, no writing, purely visual, square format"
-      ].filter(Boolean).join(", ");
-
-      try {
-        const res = await fetch("https://riffbank-art.riffbank.workers.dev", {
-          method: "POST",
-          headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ input: { prompt, aspect_ratio: "1:1" } })
-        });
-        const data = await res.json();
-        if (res.ok && data.output) {
-          song.coverImageUrl = data.output;
-          song.updatedAt = nowStamp();
-        }
-      } catch (e) {
-        console.error(`Art gen failed for "${song.title}":`, e);
-      }
-      done++;
-      updateProgress();
+    if (bulkArtState.running) {
+      const txt = `${bulkArtState.done}/${bulkArtState.total} done…`;
+      if (btnMissing) { btnMissing.disabled = true; btnMissing.textContent = txt; }
+      if (btnAll) { btnAll.disabled = true; btnAll.textContent = txt; }
     }
-
-    coverCache.clear();
-    saveState();
-    toast(`Generated art for ${done} song${done === 1 ? "" : "s"} ✨`);
-    renderSettings();
   };
+  syncBulkBtns();
 
-  $("#genMissingArt")?.addEventListener("click", () => bulkGenArt(true));
-  $("#regenAllArt")?.addEventListener("click", () => bulkGenArt(false));
+  $("#genMissingArt")?.addEventListener("click", () => startBulkGenArt(true));
+  $("#regenAllArt")?.addEventListener("click", () => startBulkGenArt(false));
 
   $("#wipe").addEventListener("click", async () => {
     if (!confirm("Wipe all local RiffBank data on this browser?")) return;
