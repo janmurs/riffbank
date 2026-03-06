@@ -118,6 +118,9 @@ let backPeekHTML = "";
 let navHistoryStack = [];
 let navHistoryTopbarStack = []; // topbar HTML for each navHistoryStack entry (for ace topbar in swipe-back)
 let navScrollStack = [];  // scrollTop of each screen pushed to navHistoryStack
+let navStateStack = [];   // app state snapshots for each forward nav (so goBack restores correctly)
+let prevNavState = null;  // snapshot of nav state captured at render() time, pushed by triggerForwardSlide
+let _pendingBackState = null; // state popped by slideBackTransition, consumed by goBack doRender
 let prevAceViewTop = 0;   // top of the previous screen when backPeekHTML was captured
 let prevAceScrollTop = 0; // scrollTop of the previous screen when backPeekHTML was captured
 let prevTopbarHTML = "";  // outerHTML of topbar at render() snapshot time (before setHeader changes it)
@@ -154,6 +157,16 @@ function _hidePeekBackdrop() {
   backPeekEl.innerHTML = "";
 }
 
+// Capture nav state BEFORE mutating state vars for a forward navigation.
+// Call this before changing currentTab/drawerView/etc, then call render() + triggerForwardSlide().
+function captureNavState() {
+  prevNavState = {
+    currentTab, drawerView, projectDetailScreen, releaseDetailId,
+    selectedSongId, selectedVersionId, songsView, overlayView,
+    songsBackTarget, headerTitle: headerTitle?.textContent || "RiffBank"
+  };
+}
+
 // Slide the new screen in from the right (call after render() for forward navigation).
 // Uses an opaque overlay snapshot of the new screen so the ace (previous screen) shows
 // cleanly on the left without any see-through bleed from transparent .screen elements.
@@ -169,6 +182,7 @@ function triggerForwardSlide() {
   if (backPeekHTML) navHistoryStack.push(backPeekHTML);
   navHistoryTopbarStack.push(prevTopbarHTML);
   navScrollStack.push(prevAceScrollTop);
+  if (prevNavState) navStateStack.push(prevNavState);
 
   // Shared measurements.
   const bnEl = document.getElementById("bottomNav");
@@ -1890,15 +1904,49 @@ function openSalSheet() {
 document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
     const targetTab = btn.dataset.tab || "home";
+    const wasOnHomeRoot = (currentTab === "home" && !drawerView && !overlayView && !selectedSongId && !selectedVersionId);
+
+    // Animate transition to Home: slide back from any non-home-root state
+    const animateHome = (targetTab === "home" && !wasOnHomeRoot && activeScreenEl);
+
+    // Snapshot current screen BEFORE state changes (for the queen overlay)
+    let queenEl = null;
+    if (animateHome) {
+      const el = activeScreenEl;
+      const tb = document.querySelector(".topbar");
+      const tbRect = tb ? tb.getBoundingClientRect() : null;
+      const viewRect = el.getBoundingClientRect();
+
+      queenEl = document.createElement("div");
+      queenEl.style.cssText = "position:fixed;inset:0;z-index:500;overflow:hidden;pointer-events:none;background:var(--bg);";
+
+      if (tbRect && tb) {
+        const tbClone = tb.cloneNode(true);
+        tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${tbRect.left}px;width:${tbRect.width}px;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
+        queenEl.appendChild(tbClone);
+      }
+
+      const screenWrap = document.createElement("div");
+      screenWrap.style.cssText = `position:absolute;top:${viewRect.top}px;left:${viewRect.left}px;width:${viewRect.width}px;height:${viewRect.height}px;overflow:hidden;`;
+      screenWrap.innerHTML = el.outerHTML;
+      const snap = screenWrap.querySelector(".screen");
+      if (snap && el) snap.scrollTop = el.scrollTop;
+      queenEl.appendChild(screenWrap);
+    }
+
     songsBackTarget = null;
     navHistoryStack = [];
     navHistoryTopbarStack = [];
     navScrollStack = [];
+    navStateStack = [];
 
     // Normal navigation
     drawerView = null;
     overlayView = null;
     selectedSongId = null;
+    selectedVersionId = null;
+    projectDetailScreen = null;
+    releaseDetailId = null;
     songsView = "list";
     songsListScrollTop = 0;
 
@@ -1907,8 +1955,6 @@ document.querySelectorAll(".tab").forEach((btn) => {
       playerScreen = "list";
     }
 
-    // ✅ Fix: if we navigate back to Home, ensure NO scroll position carries over.
-    // (On iOS, the page can sometimes scroll the window instead of the inner scroller.)
     if (targetTab === "home") {
       if (screens.home) screens.home.scrollTop = 0;
       try { window.scrollTo(0, 0); } catch {}
@@ -1919,6 +1965,38 @@ document.querySelectorAll(".tab").forEach((btn) => {
     syncTabs();
     setHeader(TAB_TITLES[currentTab] || "RiffBank");
     render();
+
+    // Queen slides off to the right, revealing home (ace) underneath
+    if (animateHome && queenEl) {
+      document.body.appendChild(queenEl);
+
+      const homeWrapEl = document.querySelector(".homeWrap");
+      if (homeWrapEl) homeWrapEl.style.transition = "none";
+
+      const aceTarget = document.getElementById("view");
+      if (aceTarget) {
+        aceTarget.style.transform = `translateX(-${ACE_PARALLAX}px)`;
+        aceTarget.style.transition = "none";
+      }
+
+      requestAnimationFrame(() => {
+        if (homeWrapEl) homeWrapEl.style.transition = "";
+        requestAnimationFrame(() => {
+          queenEl.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
+          queenEl.style.transform = "translateX(100%)";
+
+          if (aceTarget) {
+            aceTarget.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
+            aceTarget.style.transform = "";
+          }
+
+          queenEl.addEventListener("transitionend", () => {
+            queenEl.remove();
+            if (aceTarget) { aceTarget.style.transition = ""; aceTarget.style.transform = ""; }
+          }, { once: true });
+        });
+      });
+    }
   });
 });
 
@@ -1927,9 +2005,16 @@ headerTitle?.addEventListener("click", () => {
   drawerView = null;
   overlayView = null;
   selectedSongId = null;
+  selectedVersionId = null;
+  projectDetailScreen = null;
+  releaseDetailId = null;
   songsView = "list";
   currentTab = "home";
   songsBackTarget = null;
+  navHistoryStack = [];
+  navHistoryTopbarStack = [];
+  navScrollStack = [];
+  navStateStack = [];
 
   // ✅ Fix: header-tap Home should also reset ALL scroll positions.
   if (screens.home) screens.home.scrollTop = 0;
@@ -1994,6 +2079,7 @@ function slideBackTransition(renderUnderneath) {
   if (navHistoryStack.length > 0) navHistoryStack.pop();
   if (navHistoryTopbarStack.length > 0) navHistoryTopbarStack.pop();
   if (navScrollStack.length > 0) navScrollStack.pop();
+  _pendingBackState = navStateStack.length > 0 ? navStateStack.pop() : null;
 
   const el = activeScreenEl;
   const tb = document.querySelector(".topbar");
@@ -2069,15 +2155,35 @@ function goBack({ animate = false } = {}) {
   const doRender = () => {
     if (drawerOpen) { closeDrawer(); return; }
 
-    // For non-animated backs (swipe commit), pop was already handled in touchend.
-    // For animated backs (back button), slideBackTransition already popped.
-    // So here we just pop if this is a plain goBack({ animate: false }) call
-    // that did NOT come from a swipe (i.e., called directly without going through
-    // slideBackTransition). Guard: only pop if the stack still has entries.
+    // For non-animated backs, pop visual stacks here (animated pops happen in slideBackTransition).
     if (!animate && navHistoryStack.length > 0) navHistoryStack.pop();
     if (!animate && navHistoryTopbarStack.length > 0) navHistoryTopbarStack.pop();
     if (!animate && navScrollStack.length > 0) navScrollStack.pop();
 
+    // Resolve the state to restore: animated backs already popped in slideBackTransition
+    // (_pendingBackState), non-animated backs pop here.
+    let restoreState = _pendingBackState;
+    _pendingBackState = null;
+    if (!animate && navStateStack.length > 0) restoreState = navStateStack.pop();
+
+    if (restoreState) {
+      // Restore the exact app state from when the user navigated forward
+      currentTab = restoreState.currentTab;
+      drawerView = restoreState.drawerView;
+      projectDetailScreen = restoreState.projectDetailScreen;
+      releaseDetailId = restoreState.releaseDetailId;
+      selectedSongId = restoreState.selectedSongId;
+      selectedVersionId = restoreState.selectedVersionId;
+      songsView = restoreState.songsView;
+      overlayView = restoreState.overlayView;
+      songsBackTarget = restoreState.songsBackTarget;
+      setHeader(restoreState.headerTitle);
+      syncTabs();
+      render();
+      return;
+    }
+
+    // Fallback: no state stack entry (e.g. legacy or root-level back)
     if (overlayView) {
       overlayView = null;
       currentTab = "home";
@@ -2087,94 +2193,25 @@ function goBack({ animate = false } = {}) {
       navHistoryStack = [];
       navHistoryTopbarStack = [];
       navScrollStack = [];
+      navStateStack = [];
       setHeader("RiffBank");
       syncTabs();
       render();
       return;
     }
 
-    if (drawerView === "releases" && releaseDetailId) {
-      releaseDetailId = null;
-      render();
-      return;
-    }
-
-    if (drawerView === "projects" && projectDetailScreen) {
+    if (currentTab !== "home" || drawerView) {
+      currentTab = "home";
+      drawerView = null;
       projectDetailScreen = null;
-      render();
-      return;
-    }
-
-    if (drawerView) {
-      drawerView = null;
+      releaseDetailId = null;
+      songsView = "list";
+      selectedSongId = null;
+      selectedVersionId = null;
       navHistoryStack = [];
       navHistoryTopbarStack = [];
       navScrollStack = [];
-      setHeader(TAB_TITLES[currentTab] || "RiffBank");
-      syncTabs();
-      render();
-      return;
-    }
-
-    // ✅ If you're in a version detail view, back goes to the song page
-    if (selectedSongId && selectedVersionId) {
-      selectedVersionId = null;
-      currentTab = "songs";
-      setHeader("Song");
-      syncTabs();
-      render();
-      return;
-    }
-
-    if (selectedSongId) {
-      selectedSongId = null;
-      selectedVersionId = null;
-      currentTab = "songs";
-      songsView = "list";
-      drawerView = null;
-      overlayView = null;
-      resetSongsFilters({ keepSort: true });
-      setHeader("Songs");
-      syncTabs();
-      render();
-      return;
-    }
-
-    if (currentTab === "songs" && songsView === "create") {
-      songsView = "list";
-      setHeader("Songs");
-      syncTabs();
-      render();
-      return;
-    }
-
-    // If Songs list was opened from a drawer view (e.g. Projects -> View songs),
-    // going back from the Songs list should return to that drawer view.
-    if (
-      currentTab === "songs" &&
-      songsView === "list" &&
-      !selectedSongId &&
-      songsBackTarget
-    ) {
-      const target = songsBackTarget;
-      songsBackTarget = null;
-
-      overlayView = null;
-      drawerView = target;
-      currentTab = "home";
-      setHeader(TAB_TITLES[currentTab] || "RiffBank");
-      syncTabs();
-      render();
-      return;
-    }
-
-    if (currentTab !== "home") {
-      currentTab = "home";
-      songsView = "list";
-      selectedSongId = null;
-      navHistoryStack = [];
-      navHistoryTopbarStack = [];
-      navScrollStack = [];
+      navStateStack = [];
       setHeader("RiffBank");
       syncTabs();
       render();
@@ -3236,6 +3273,8 @@ function render() {
     backPeekHTML = activeScreenEl.innerHTML;
     prevAceViewTop = activeScreenEl.getBoundingClientRect().top || 0;
     prevAceScrollTop = activeScreenEl.scrollTop || 0;
+    // Note: prevNavState is captured by captureNavState() BEFORE state changes,
+    // not here, because state vars are already mutated before render() is called.
     // Capture topbar state BEFORE setHeader/syncBackButton change it, so the ace overlay
     // can show the correct previous-screen title and back-button state during the slide.
     const _tb = document.querySelector(".topbar");
@@ -3471,6 +3510,7 @@ function renderProjects() {
     projListEl.querySelectorAll("[data-open-proj]").forEach(row => {
       row.addEventListener("click", (e) => {
         if (e.target.closest("[data-proj-more]")) return;
+        captureNavState();
         projectDetailScreen = row.getAttribute("data-open-proj");
         render();
         triggerForwardSlide();
@@ -3581,6 +3621,7 @@ function renderProjectSongs(projectName) {
   activeScreenEl.querySelectorAll("[data-open-song]").forEach(row => {
     row.addEventListener("click", (e) => {
       if (e.target.closest("[data-proj-song-more]")) return;
+      captureNavState();
       const sid = row.getAttribute("data-open-song");
       projectDetailScreen = null;
       drawerView = null;
@@ -3642,6 +3683,7 @@ function renderReleases() {
 
   activeScreenEl.querySelectorAll("[data-rel-open]").forEach(row => {
     row.addEventListener("click", () => {
+      captureNavState();
       releaseDetailId = row.getAttribute("data-rel-open");
       render();
       triggerForwardSlide();
@@ -3742,6 +3784,7 @@ function renderReleaseDetail(releaseId) {
 
   activeScreenEl.querySelectorAll("[data-open-song]").forEach(row => {
     row.addEventListener("click", () => {
+      captureNavState();
       releaseDetailId = null;
       drawerView = null;
       currentTab = "songs";
@@ -4008,6 +4051,7 @@ function renderHome() {
   activeScreenEl.querySelectorAll("[data-home]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const target = btn.getAttribute("data-home");
+      captureNavState();
       if (target === "songs") {
         resetSongsFilters({ keepSort: true });
         songsBackTarget = null;
@@ -4366,6 +4410,7 @@ function renderNextActions() {
   });
   activeScreenEl.querySelectorAll("[data-open-song]").forEach((el) =>
     el.addEventListener("click", () => {
+      captureNavState();
       currentTab = "songs";
       selectedSongId = el.getAttribute("data-open-song");
       setHeader("Song");
@@ -4514,7 +4559,7 @@ async function generateArtForSong(song, apiKey) {
   console.log("[ArtGen] Worker response:", res.status, data);
   if (!res.ok) throw new Error(data.detail || data.title || JSON.stringify(data));
   if (!data.output) throw new Error("No image returned");
-  const url = Array.isArray(data.output) ? data.output[0] : data.output;
+  let url = Array.isArray(data.output) ? data.output[0] : data.output;
   console.log("[ArtGen] Image URL:", url);
 
   // Download image and upload to Google Drive for persistence
@@ -4867,6 +4912,7 @@ function renderSongsList() {
 
     listEl.querySelectorAll(".songCard[data-id]").forEach((el) => {
       el.addEventListener("click", () => {
+        captureNavState();
         songsListScrollTop = activeScreenEl.scrollTop;
         selectedSongId = el.getAttribute("data-id");
         render();
@@ -4886,10 +4932,10 @@ function renderSongsList() {
       el.addEventListener("click", () => {
         const artist = el.getAttribute("data-artist");
         if (!artist) return;
+        captureNavState();
         drawerView = "projects";
         projectDetailScreen = artist;
-        setActiveScreen("drawer");
-        renderProjectSongs(artist);
+        render();
         triggerForwardSlide();
       });
     });
@@ -5119,6 +5165,7 @@ $("#addVersionJump")?.addEventListener("click", () => {
 
   rowsEl.querySelectorAll("[data-vrow]").forEach((row) => {
     row.addEventListener("click", () => {
+      captureNavState();
       selectedVersionId = row.getAttribute("data-vrow");
       render();
       triggerForwardSlide();
@@ -6339,7 +6386,26 @@ function renderSettings() {
 
     if (!confirm(`Found ${songs.length} songs from Drive folders. Replace local library?`)) return;
 
-    // Resolve cover art Drive IDs into streamable URLs
+    // Merge cover art from saved state JSON for songs missing cover.jpg on disk
+    try {
+      const driveState = await gdrivePullStateSilent();
+      if (driveState && driveState.songs) {
+        for (const song of songs) {
+          if (song.coverDriveFileId) continue; // folder scan found cover.jpg
+          const match = driveState.songs.find(
+            s => s.title === song.title && s.project === song.project
+          );
+          if (match) {
+            if (match.coverDriveFileId) song.coverDriveFileId = match.coverDriveFileId;
+            if (match.coverImageUrl) song.coverImageUrl = match.coverImageUrl;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("Could not merge cover art from state JSON:", e);
+    }
+
+    // Resolve cover art Drive IDs into fresh streamable URLs
     for (const song of songs) {
       if (song.coverDriveFileId) {
         const coverUrl = await gdriveGetStreamUrl(song.coverDriveFileId);
