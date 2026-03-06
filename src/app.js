@@ -1677,8 +1677,9 @@ function syncBackButton() {
 headerBackEl?.addEventListener("click", () => goBack({ animate: true }));
 
 function syncTabs() {
+  const highlightTab = (currentTab === "songs" || currentTab === "settings") ? "home" : currentTab;
   document.querySelectorAll(".tab").forEach((b) => {
-    b.classList.toggle("active", b.dataset.tab === currentTab);
+    b.classList.toggle("active", b.dataset.tab === highlightTab);
   });
 }
 
@@ -3381,13 +3382,16 @@ function renderProjects() {
   const buildRows = (q) => projects
     .filter(p => !q || p.toLowerCase().includes(q.toLowerCase()))
     .map(p => {
-      const count = state.songs.filter(s => (s.project || "").trim() === p).length;
+      const projSongs = state.songs.filter(s => (s.project || "").trim() === p);
+      const count = projSongs.length;
       const isDefault = (state.settings.defaultProject || "").trim() === p;
-      const fakeSong = { id: p, title: p, project: p, genre: "" };
+      // Use the most recently updated song for album art
+      const repSong = projSongs.slice().sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))[0]
+        || { id: p, title: p, project: p, genre: "" };
       return `
         <div class="songRow" data-open-proj="${escapeHtml(p)}">
-          <div class="songThumb" aria-hidden="true">
-            ${coverSvg(fakeSong, { lite: true })}
+          <div class="songThumb" data-proj-thumb="${escapeHtml(p)}" aria-hidden="true">
+            ${coverSvg(repSong, { lite: true })}
           </div>
           <div class="songMain">
             <div class="songTop">
@@ -4436,26 +4440,43 @@ function buildArtPrompt(song) {
 
 async function generateArtForSong(song, apiKey) {
   const prompt = buildArtPrompt(song);
-  const res = await fetch("https://riffbank-art.riffbank.workers.dev", {
-    method: "POST",
-    headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ input: { prompt, aspect_ratio: "1:1" } })
-  });
+  const ac = new AbortController();
+  const timeout = setTimeout(() => ac.abort(), 60000);
+  let res;
+  try {
+    res = await fetch("https://riffbank-art.riffbank.workers.dev", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ input: { prompt, aspect_ratio: "1:1" } }),
+      signal: ac.signal,
+    });
+  } catch (e) {
+    if (e.name === "AbortError") throw new Error("Request timed out — try again");
+    throw e;
+  } finally {
+    clearTimeout(timeout);
+  }
   const data = await res.json();
+  console.log("[ArtGen] Worker response:", res.status, data);
   if (!res.ok) throw new Error(data.detail || data.title || JSON.stringify(data));
   if (!data.output) throw new Error("No image returned");
   const url = Array.isArray(data.output) ? data.output[0] : data.output;
+  console.log("[ArtGen] Image URL:", url);
 
   // Download image and upload to Google Drive for persistence
   try {
+    console.log("[ArtGen] Fetching image...");
     const imgRes = await fetch(url);
+    console.log("[ArtGen] Image fetch done:", imgRes.status);
     if (imgRes.ok) {
       const blob = await imgRes.blob();
+      console.log("[ArtGen] Uploading to Drive...");
       const driveResult = await gdriveUploadCoverArt({
         blob,
         project: song.project,
         songTitle: song.title,
       });
+      console.log("[ArtGen] Drive upload result:", driveResult);
       if (driveResult.success) {
         song.coverDriveFileId = driveResult.driveFileId;
       }
@@ -4505,6 +4526,17 @@ async function startBulkGenArt(onlyMissing) {
     coverCache.clear();
     bulkArtState.done++;
     saveState();
+    // Live-update the song card art if songs list is visible
+    const cardArtEl = document.querySelector(`.songCard[data-id="${song.id}"] .songCardArt`);
+    if (cardArtEl) cardArtEl.innerHTML = coverSvg(song, { lite: true });
+    // Also update song detail hero if viewing this song
+    const heroArt = document.querySelector(".albumArt");
+    if (heroArt && selectedSongId === song.id) heroArt.innerHTML = coverSvg(song);
+    // Live-update project row thumbnail if projects view is visible
+    if (song.project) {
+      const projThumb = document.querySelector(`[data-proj-thumb="${CSS.escape(song.project.trim())}"]`);
+      if (projThumb) projThumb.innerHTML = coverSvg(song, { lite: true });
+    }
     // Rate limit: wait 12s between requests (6 req/min limit)
     if (bulkArtState.done < bulkArtState.total) await new Promise(r => setTimeout(r, 12000));
     // Update settings buttons if they're currently visible
@@ -4733,10 +4765,11 @@ function renderSongsList() {
       }
       const sortedArtists = Object.keys(groups).sort((a, b) => a.localeCompare(b));
 
-      const cardHtml = (s) => {
+      const cardHtml = (s, span) => {
         const vCount = s.versions?.length || 0;
+        const spanStyle = span > 1 ? ` style="grid-column:span ${span}"` : "";
         return `
-          <div class="songCard" data-id="${s.id}">
+          <div class="songCard" data-id="${s.id}"${spanStyle}>
             <div class="songCardStack">
               <div class="songCardLayer songCardLayer2"></div>
               <div class="songCardLayer songCardLayer1"></div>
@@ -4753,11 +4786,23 @@ function renderSongsList() {
         `;
       };
 
+      const groupCardsHtml = (artistSongs) => {
+        const count = artistSongs.length;
+        if (count === 1) return cardHtml(artistSongs[0], 3);
+        if (count === 2) {
+          const sorted = [...artistSongs].sort((a, b) =>
+            (b.updatedAt || b.createdAt || "").localeCompare(a.updatedAt || a.createdAt || "")
+          );
+          return cardHtml(sorted[0], 2) + cardHtml(sorted[1], 1);
+        }
+        return artistSongs.map(s => cardHtml(s, 1)).join("");
+      };
+
       listEl.innerHTML = sortedArtists.map(artist => `
         <div class="songsGroup">
           <div class="songsGroupHead">${escapeHtml(artist)}</div>
           <div class="songsGroupLine"></div>
-          <div class="songsList">${groups[artist].map(cardHtml).join("")}</div>
+          <div class="songsList">${groupCardsHtml(groups[artist])}</div>
         </div>
       `).join("");
     }
