@@ -34,7 +34,6 @@ import {
   gdrivePullStateSilent,
   gdriveRebuildFromFolders,
   gdriveUploadCoverArt,
-  gdriveGetStreamUrl,
 } from "./gdrive.js";
 
 const LS_KEY = "riffbank_v1";
@@ -290,6 +289,7 @@ const toastEl = $("#toast");
 const AUDIO_DB = "riffbank_audio_v1";
 const AUDIO_STORE = "files";
 const audioUrlCache = new Map(); // localAudioId -> objectURL
+const coverUrlCache = new Map(); // coverDriveFileId -> blob objectURL (persists via IndexedDB)
 
 // ---------------------
 // iOS audio unlock (required if you do async before play())
@@ -360,6 +360,41 @@ async function getAudioBlob(id) {
     req.onsuccess = () => resolve(req.result || null);
     req.onerror = () => reject(req.error);
   });
+}
+
+// ---------------------
+// Cover art cache (IndexedDB) — survives app restarts
+// ---------------------
+async function putCoverBlob(driveFileId, blob) {
+  if (!driveFileId || !blob) return;
+  const id = `cover:${driveFileId}`;
+  await putAudioBlob({ id, blob, name: "cover", type: blob.type || "image/jpeg", size: blob.size });
+}
+
+async function getCoverBlobUrl(driveFileId) {
+  if (!driveFileId) return null;
+  if (coverUrlCache.has(driveFileId)) return coverUrlCache.get(driveFileId);
+  const rec = await getAudioBlob(`cover:${driveFileId}`);
+  if (rec?.blob) {
+    const url = URL.createObjectURL(rec.blob);
+    coverUrlCache.set(driveFileId, url);
+    return url;
+  }
+  return null;
+}
+
+// Restore cover URLs from IndexedDB for all songs (call on startup, before render)
+async function restoreCoverUrlsFromCache() {
+  for (const song of (state.songs || [])) {
+    if (!song.coverDriveFileId) continue;
+    const url = await getCoverBlobUrl(song.coverDriveFileId);
+    if (url) {
+      song.coverImageUrl = url;
+    } else {
+      // Blob URL from previous session is dead — clear it so SVG shows instead of broken img
+      if (song.coverImageUrl) song.coverImageUrl = null;
+    }
+  }
 }
 
 function getActiveTab() {
@@ -1903,35 +1938,6 @@ function openSalSheet() {
 document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
     const targetTab = btn.dataset.tab || "home";
-    const wasOnHomeRoot = (currentTab === "home" && !drawerView && !overlayView && !selectedSongId && !selectedVersionId);
-
-    // Animate transition to Home: slide back from any non-home-root state
-    const animateHome = (targetTab === "home" && !wasOnHomeRoot && activeScreenEl);
-
-    // Snapshot current screen BEFORE state changes (for the queen overlay)
-    let queenEl = null;
-    if (animateHome) {
-      const el = activeScreenEl;
-      const tb = document.querySelector(".topbar");
-      const tbRect = tb ? tb.getBoundingClientRect() : null;
-      const viewRect = el.getBoundingClientRect();
-
-      queenEl = document.createElement("div");
-      queenEl.style.cssText = "position:fixed;inset:0;z-index:500;overflow:hidden;pointer-events:none;background:var(--bg);";
-
-      if (tbRect && tb) {
-        const tbClone = tb.cloneNode(true);
-        tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${tbRect.left}px;width:${tbRect.width}px;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
-        queenEl.appendChild(tbClone);
-      }
-
-      const screenWrap = document.createElement("div");
-      screenWrap.style.cssText = `position:absolute;top:${viewRect.top}px;left:${viewRect.left}px;width:${viewRect.width}px;height:${viewRect.height}px;overflow:hidden;`;
-      const cloned = el.cloneNode(true);
-      screenWrap.appendChild(cloned);
-      cloned.scrollTop = el.scrollTop;
-      queenEl.appendChild(screenWrap);
-    }
 
     songsBackTarget = null;
     navHistoryStack = [];
@@ -1964,38 +1970,6 @@ document.querySelectorAll(".tab").forEach((btn) => {
     syncTabs();
     setHeader(TAB_TITLES[currentTab] || "RiffBank");
     render();
-
-    // Queen slides off to the right, revealing home (ace) underneath
-    if (animateHome && queenEl) {
-      document.body.appendChild(queenEl);
-
-      const homeWrapEl = document.querySelector(".homeWrap");
-      if (homeWrapEl) homeWrapEl.style.transition = "none";
-
-      const aceTarget = document.getElementById("view");
-      if (aceTarget) {
-        aceTarget.style.transform = `translateX(-${ACE_PARALLAX}px)`;
-        aceTarget.style.transition = "none";
-      }
-
-      requestAnimationFrame(() => {
-        if (homeWrapEl) homeWrapEl.style.transition = "";
-        requestAnimationFrame(() => {
-          queenEl.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
-          queenEl.style.transform = "translateX(100%)";
-
-          if (aceTarget) {
-            aceTarget.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
-            aceTarget.style.transform = "";
-          }
-
-          queenEl.addEventListener("transitionend", () => {
-            queenEl.remove();
-            if (aceTarget) { aceTarget.style.transition = ""; aceTarget.style.transform = ""; }
-          }, { once: true });
-        });
-      });
-    }
   });
 });
 
@@ -3383,38 +3357,7 @@ async function init() {
   // Load Google Identity Services (non-blocking, for Drive integration)
   gdriveLoadGIS();
 
-  // Try to pull latest state from Drive (if connected + token still valid)
-  if (gdriveIsConnected()) {
-    try {
-      const driveState = await gdrivePullStateSilent();      if (driveState && driveState.songs) {
-        // Compare: use Drive state if it has songs and local doesn't,
-        // or if Drive has a newer updatedAt on any song
-        const localHasSongs = state.songs && state.songs.length > 0;
-        const driveHasSongs = driveState.songs && driveState.songs.length > 0;
-
-        let useDrive = false;
-
-        if (driveHasSongs && !localHasSongs) {
-          // Local is empty, Drive has data — use Drive
-          useDrive = true;
-        } else if (driveHasSongs && localHasSongs) {
-          // Both have data — compare most recent updatedAt
-          const localNewest = Math.max(...state.songs.map(s => new Date(s.updatedAt || 0).getTime()));
-          const driveNewest = Math.max(...driveState.songs.map(s => new Date(s.updatedAt || 0).getTime()));
-          if (driveNewest > localNewest) useDrive = true;
-        }
-
-        if (useDrive) {
-          state = driveState;
-          normalizeState();
-          localStorage.setItem(LS_KEY, JSON.stringify(state));
-          toast("Synced from Drive ☁️");
-        }
-      }
-    } catch (err) {
-      console.warn("RiffBank: Drive state pull failed on init", err);
-    }
-  }
+  // Incremental sync runs in background after render (see below)
 
   // Seed example release if none exist yet
   if (!state.releases.length) {
@@ -3433,14 +3376,89 @@ async function init() {
     }
   }
 
+  // Restore cover art from IndexedDB cache (instant, no auth needed)
+  await restoreCoverUrlsFromCache();
+
   setHeader("RiffBank");
   syncTabs();
   render();
   syncMiniPlayerUI();
 
-  // Background: pre-fetch Drive audio so first play is instant (non-blocking)
+  // Background: incremental sync + pre-fetch (non-blocking)
   if (gdriveIsConnected()) {
-    preFetchDriveAudio().catch(console.warn);
+    incrementalSyncFromDrive().then(() => {
+      preFetchDriveAudio().catch(console.warn);
+    }).catch(console.warn);
+  }
+}
+
+// Incremental sync: pull Drive state JSON and merge only new/changed songs
+async function incrementalSyncFromDrive() {
+  const driveState = await gdrivePullStateSilent();
+  if (!driveState?.songs?.length) return;
+
+  const localHasSongs = state.songs && state.songs.length > 0;
+
+  if (!localHasSongs) {
+    // Local is empty — adopt Drive state wholesale
+    state.songs = driveState.songs;
+    state.releases = driveState.releases || state.releases;
+    normalizeState();
+    await restoreCoverUrlsFromCache();
+    saveState();
+    coverCache.clear();
+    render();
+    toast("Loaded library from Drive");
+    return;
+  }
+
+  // Build lookup of local songs by title+project (stable identity)
+  const localByKey = new Map();
+  for (const s of state.songs) {
+    localByKey.set(`${(s.title || "").trim()}|${(s.project || "").trim()}`, s);
+  }
+
+  let added = 0, updated = 0;
+
+  for (const ds of driveState.songs) {
+    const key = `${(ds.title || "").trim()}|${(ds.project || "").trim()}`;
+    const local = localByKey.get(key);
+
+    if (!local) {
+      // New song from Drive — add it
+      state.songs.push(ds);
+      added++;
+    } else {
+      // Existing song — check if Drive version is newer
+      const localTime = new Date(local.updatedAt || 0).getTime();
+      const driveTime = new Date(ds.updatedAt || 0).getTime();
+      if (driveTime > localTime) {
+        // Merge: update metadata but preserve local-only fields
+        const preserveFields = ["_coverResolving"];
+        for (const f of preserveFields) {
+          if (local[f] !== undefined) ds[f] = local[f];
+        }
+        Object.assign(local, ds);
+        updated++;
+      }
+      // Merge cover art if local is missing it
+      if (!local.coverDriveFileId && ds.coverDriveFileId) {
+        local.coverDriveFileId = ds.coverDriveFileId;
+        updated++;
+      }
+    }
+  }
+
+  if (added || updated) {
+    normalizeState();
+    // Restore covers for any newly added songs
+    await restoreCoverUrlsFromCache();
+    saveState();
+    coverCache.clear();
+    render();
+    if (added && updated) toast(`Synced: ${added} new, ${updated} updated`);
+    else if (added) toast(`Synced: ${added} new song${added > 1 ? "s" : ""}`);
+    else toast(`Synced: ${updated} song${updated > 1 ? "s" : ""} updated`);
   }
 }
 
@@ -4047,10 +4065,12 @@ function renderHome() {
     renderGlobalSearch();
   });
   activeScreenEl.querySelector("#htbSettings")?.addEventListener("click", () => {
+    captureNavState();
     currentTab = "settings";
     setHeader("Settings");
     syncTabs();
     render();
+    triggerForwardSlide();
   });
 
   // Card navigation
@@ -4455,15 +4475,23 @@ const generatingArtSongs = new Set(); // song IDs currently generating art
 
 // Global handler: refresh cover image from Drive when cached URL expires
 window._refreshCoverFromDrive = async (songId, driveFileId, imgEl) => {
-  const url = await gdriveGetStreamUrl(driveFileId);
+  // Try IndexedDB cache first (no auth needed)
+  let url = await getCoverBlobUrl(driveFileId);
+  // Fall back to fetching from Drive and caching
+  if (!url) {
+    const blob = await gdriveFetchBlob(driveFileId);
+    if (blob) {
+      await putCoverBlob(driveFileId, blob);
+      url = URL.createObjectURL(blob);
+      coverUrlCache.set(driveFileId, url);
+    }
+  }
   if (url && imgEl) {
-    // If this refreshed URL also fails, fall back to clearing the cover entirely
     imgEl.onerror = () => {
       imgEl.onerror = null;
       window._clearBrokenCover && window._clearBrokenCover(songId, imgEl);
     };
     imgEl.src = url;
-    // Update song state so future renders use fresh URL
     const song = state.songs.find(s => s.id === songId);
     if (song) {
       song.coverImageUrl = url;
@@ -4471,12 +4499,10 @@ window._refreshCoverFromDrive = async (songId, driveFileId, imgEl) => {
       saveState();
     }
   } else if (imgEl) {
-    // Drive URL couldn't be generated (likely expired auth) — show SVG for now but keep coverDriveFileId
     const song = state.songs.find(s => s.id === songId);
     if (song) {
       song.coverImageUrl = null;
       coverCache.clear();
-      // Don't saveState here — coverDriveFileId will re-resolve on next render via lazy path
     }
     if (imgEl.parentElement) {
       imgEl.parentElement.innerHTML = coverSvg(song || { id: songId, title: "", project: "", genre: "" }, { lite: true });
@@ -4600,9 +4626,11 @@ async function generateArtForSong(song, apiKey) {
       console.log("[ArtGen] Drive upload result:", driveResult);
       if (driveResult.success) {
         song.coverDriveFileId = driveResult.driveFileId;
-        // Use persistent Drive stream URL instead of temporary Replicate URL
-        const driveUrl = await gdriveGetStreamUrl(driveResult.driveFileId);
-        if (driveUrl) url = driveUrl;
+        // Cache the blob locally so it persists across restarts
+        await putCoverBlob(driveResult.driveFileId, blob);
+        const cachedUrl = URL.createObjectURL(blob);
+        coverUrlCache.set(driveResult.driveFileId, cachedUrl);
+        url = cachedUrl;
       }
     }
   } catch (e) {
@@ -4717,10 +4745,21 @@ function coverSvg(song, { lite = false } = {}) {
     return img;
   }
 
-  // coverImageUrl is missing but Drive file exists — resolve it lazily
+  // coverImageUrl is missing but Drive file exists — resolve from IDB cache or Drive
   if (song.coverDriveFileId && !song._coverResolving) {
     song._coverResolving = true;
-    gdriveGetStreamUrl(song.coverDriveFileId).then(url => {
+    (async () => {
+      // Try local IndexedDB cache first (no auth needed)
+      let url = await getCoverBlobUrl(song.coverDriveFileId);
+      // Fall back to fetching from Drive and caching
+      if (!url) {
+        const blob = await gdriveFetchBlob(song.coverDriveFileId);
+        if (blob) {
+          await putCoverBlob(song.coverDriveFileId, blob);
+          url = URL.createObjectURL(blob);
+          coverUrlCache.set(song.coverDriveFileId, url);
+        }
+      }
       song._coverResolving = false;
       if (url) {
         song.coverImageUrl = url;
@@ -4728,7 +4767,7 @@ function coverSvg(song, { lite = false } = {}) {
         saveState();
         render();
       }
-    }).catch(() => { song._coverResolving = false; });
+    })().catch(() => { song._coverResolving = false; });
   }
 
   const seed = hashStr(`${song.id}|${song.title}|${song.project}|${song.genre}`);
@@ -4920,7 +4959,6 @@ function renderSongsList() {
               <div class="songCardTitle">${escapeHtml(s.title)}</div>
               <div class="songCardSub">${vCount} ver${vCount !== 1 ? "s" : ""}</div>
             </div>
-            <button class="songCardMore" data-more="${s.id}" aria-label="Song menu">⋯</button>
           </div>
         `;
       };
@@ -4934,7 +4972,22 @@ function renderSongsList() {
           );
           return cardHtml(sorted[0], 2) + cardHtml(sorted[1], 1);
         }
-        return artistSongs.map(s => cardHtml(s, 1)).join("");
+        // For 3+, fill complete rows; if remainder, last row gets adjusted spans
+        const remainder = count % 3;
+        if (remainder === 0) return artistSongs.map(s => cardHtml(s, 1)).join("");
+        // Full rows first
+        const fullCount = count - (remainder === 1 ? 4 : remainder);
+        let html = artistSongs.slice(0, fullCount).map(s => cardHtml(s, 1)).join("");
+        const tail = artistSongs.slice(fullCount);
+        if (remainder === 2) {
+          // 2 left over → span 2 + span 1
+          html += cardHtml(tail[0], 2) + cardHtml(tail[1], 1);
+        } else {
+          // remainder === 1 → take last 4 songs, make two rows of span 2 + span 1 (alternating)
+          html += cardHtml(tail[0], 2) + cardHtml(tail[1], 1);
+          html += cardHtml(tail[2], 1) + cardHtml(tail[3], 2);
+        }
+        return html;
       };
 
       listEl.innerHTML = sortedArtists.map(artist => `
@@ -4947,20 +5000,30 @@ function renderSongsList() {
     }
 
     listEl.querySelectorAll(".songCard[data-id]").forEach((el) => {
+      let longPressTimer = null;
+      let didLongPress = false;
+
+      el.addEventListener("touchstart", () => {
+        didLongPress = false;
+        longPressTimer = setTimeout(() => {
+          didLongPress = true;
+          navigator.vibrate?.(30);
+          const id = el.getAttribute("data-id");
+          if (id) openSongMenu(id);
+        }, 500);
+      }, { passive: true });
+
+      el.addEventListener("touchend", () => { clearTimeout(longPressTimer); });
+      el.addEventListener("touchmove", () => { clearTimeout(longPressTimer); });
+      el.addEventListener("touchcancel", () => { clearTimeout(longPressTimer); });
+
       el.addEventListener("click", () => {
+        if (didLongPress) return;
         captureNavState();
         songsListScrollTop = activeScreenEl.scrollTop;
         selectedSongId = el.getAttribute("data-id");
         render();
         triggerForwardSlide();
-      });
-    });
-
-    listEl.querySelectorAll(".songCardMore[data-more]").forEach((btn) => {
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        const id = btn.getAttribute("data-more");
-        if (id) openSongMenu(id);
       });
     });
 
@@ -6441,11 +6504,19 @@ function renderSettings() {
       console.warn("Could not merge cover art from state JSON:", e);
     }
 
-    // Resolve cover art Drive IDs into fresh streamable URLs
+    // Resolve cover art Drive IDs — try local cache first, then fetch & cache
     for (const song of songs) {
       if (song.coverDriveFileId) {
-        const coverUrl = await gdriveGetStreamUrl(song.coverDriveFileId);
-        if (coverUrl) song.coverImageUrl = coverUrl;
+        let url = await getCoverBlobUrl(song.coverDriveFileId);
+        if (!url) {
+          const blob = await gdriveFetchBlob(song.coverDriveFileId);
+          if (blob) {
+            await putCoverBlob(song.coverDriveFileId, blob);
+            url = URL.createObjectURL(blob);
+            coverUrlCache.set(song.coverDriveFileId, url);
+          }
+        }
+        if (url) song.coverImageUrl = url;
       }
     }
 
