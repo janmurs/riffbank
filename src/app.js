@@ -157,6 +157,8 @@ function _hidePeekBackdrop() {
 // Slide the new screen in from the right (call after render() for forward navigation).
 // Uses an opaque overlay snapshot of the new screen so the ace (previous screen) shows
 // cleanly on the left without any see-through bleed from transparent .screen elements.
+const ACE_PARALLAX = 30; // px the ace shifts left during transitions
+
 function triggerForwardSlide() {
   const el = activeScreenEl;
   const topbar = document.querySelector(".topbar");
@@ -250,6 +252,12 @@ function triggerForwardSlide() {
 
   overlay.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
   overlay.style.transform = "";
+
+  // Parallax: ace drifts left as queen covers it
+  if (aceOverlay) {
+    aceOverlay.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
+    aceOverlay.style.transform = `translateX(-${ACE_PARALLAX}px)`;
+  }
 
   overlay.addEventListener("transitionend", () => {
     overlay.remove();
@@ -2031,12 +2039,28 @@ function slideBackTransition(renderUnderneath) {
   const homeWrapEl = document.querySelector(".homeWrap");
   if (homeWrapEl) homeWrapEl.style.transition = "none";
 
+  // Parallax: ace starts shifted left, glides back to origin as queen slides off
+  const aceTarget = document.getElementById("view");
+  if (aceTarget) {
+    aceTarget.style.transform = `translateX(-${ACE_PARALLAX}px)`;
+    aceTarget.style.transition = "none";
+  }
+
   requestAnimationFrame(() => {
     if (homeWrapEl) homeWrapEl.style.transition = "";
     requestAnimationFrame(() => {
       queenEl.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
       queenEl.style.transform = "translateX(100%)";
-      queenEl.addEventListener("transitionend", () => queenEl.remove(), { once: true });
+
+      if (aceTarget) {
+        aceTarget.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
+        aceTarget.style.transform = "";
+      }
+
+      queenEl.addEventListener("transitionend", () => {
+        queenEl.remove();
+        if (aceTarget) { aceTarget.style.transition = ""; aceTarget.style.transform = ""; }
+      }, { once: true });
     });
   });
 }
@@ -2269,6 +2293,9 @@ if (!drawerOpen && t.clientX <= 24) {
     document.body.appendChild(swipeQueenEl);
     // Set scrollTop AFTER DOM attachment — browsers ignore scrollTop on detached elements.
     if (clonedScreen) clonedScreen.scrollTop = savedScrollTop;
+
+    // Parallax: ace starts shifted left (as if queen pushed it)
+    if (swipeAceEl) swipeAceEl.style.transform = `translateX(-${ACE_PARALLAX}px)`;
   }
   return;
 }
@@ -2302,6 +2329,11 @@ document.addEventListener("touchmove", (e) => {
     // Translate the queen overlay; the actual screen is never touched.
     const clamp = Math.max(0, dx);
     if (swipeQueenEl) swipeQueenEl.style.transform = `translateX(${clamp}px)`;
+    // Parallax: ace drifts from -ACE_PARALLAX toward 0 as queen moves right
+    if (swipeAceEl) {
+      const ratio = Math.min(clamp / window.innerWidth, 1);
+      swipeAceEl.style.transform = `translateX(${-ACE_PARALLAX * (1 - ratio)}px)`;
+    }
     return;
   }
 
@@ -2331,6 +2363,11 @@ document.addEventListener("touchend", (e) => {
         swipeQueenEl.style.transition = "transform 0.25s ease-out";
         swipeQueenEl.style.transform = `translateX(${window.innerWidth}px)`;
       }
+      // Parallax: ace glides to origin
+      if (swipeAceEl) {
+        swipeAceEl.style.transition = "transform 0.25s ease-out";
+        swipeAceEl.style.transform = "translateX(0)";
+      }
       setTimeout(() => {
         // Render home while queen is off-screen (translateX = 100vw, invisible).
         goBack({ animate: false });
@@ -2347,6 +2384,11 @@ document.addEventListener("touchend", (e) => {
       if (swipeQueenEl) {
         swipeQueenEl.style.transition = "transform 0.22s ease-out";
         swipeQueenEl.style.transform = "translateX(0)";
+      }
+      // Parallax: ace snaps back to shifted position
+      if (swipeAceEl) {
+        swipeAceEl.style.transition = "transform 0.22s ease-out";
+        swipeAceEl.style.transform = `translateX(-${ACE_PARALLAX}px)`;
       }
       setTimeout(cleanupSwipe, 220);
     }
@@ -4800,7 +4842,7 @@ function renderSongsList() {
 
       listEl.innerHTML = sortedArtists.map(artist => `
         <div class="songsGroup">
-          <div class="songsGroupHead">${escapeHtml(artist)}</div>
+          <div class="songsGroupHead" data-artist="${escapeHtml(artist)}" style="cursor:pointer">${escapeHtml(artist)}</div>
           <div class="songsGroupLine"></div>
           <div class="songsList">${groupCardsHtml(groups[artist])}</div>
         </div>
@@ -4821,6 +4863,18 @@ function renderSongsList() {
         e.stopPropagation();
         const id = btn.getAttribute("data-more");
         if (id) openSongMenu(id);
+      });
+    });
+
+    listEl.querySelectorAll(".songsGroupHead[data-artist]").forEach((el) => {
+      el.addEventListener("click", () => {
+        const artist = el.getAttribute("data-artist");
+        if (!artist) return;
+        drawerView = "projects";
+        projectDetailScreen = artist;
+        setActiveScreen("drawer");
+        renderProjectSongs(artist);
+        triggerForwardSlide();
       });
     });
   };
