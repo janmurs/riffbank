@@ -109,24 +109,481 @@ const screens = {
   drawer: document.getElementById("screen-drawer"),
 };
 
-const backPeekEl = document.getElementById("back-peek");
-let backPeekNode = null;  // cloned DOM node (not HTML string) — preserves decoded images
+// ---------------------
+// Nav — centralized navigation transition engine
+// ---------------------
+// All forward/back slide transitions, swipe gestures, and nav history
+// live here. Call nav.forward(screenEl) / nav.back(screenEl, renderFn)
+// instead of wiring up transition logic at each call site.
+class Nav {
+  constructor() {
+    this.stack = [];        // cloned DOM nodes (previous screens)
+    this.topbarStack = [];  // topbar outerHTML strings
+    this.scrollStack = [];  // scrollTop values
+    this.stateStack = [];   // app state snapshots
+    this.rectStack = [];    // { top, left, width, height } of screen at capture time
+    this.paddingStack = []; // computed padding at capture time
+    this.tbRectStack = [];  // topbar rect at capture time
 
-// Navigation history stack — each entry is the HTML of a screen we navigated away from.
-// Used so swipe-back and forward-slide both show the correct "ace under the queen".
-let navHistoryStack = [];
-let navHistoryTopbarStack = []; // topbar HTML for each navHistoryStack entry (for ace topbar in swipe-back)
-let navScrollStack = [];  // scrollTop of each screen pushed to navHistoryStack
-let navStateStack = [];   // app state snapshots for each forward nav (so goBack restores correctly)
-let prevNavState = null;  // snapshot of nav state captured at render() time, pushed by triggerForwardSlide
-let _pendingBackState = null; // state popped by slideBackTransition, consumed by goBack doRender
-let prevAceViewTop = 0;   // top of the previous screen when backPeekNode was captured
-let prevAceScrollTop = 0; // scrollTop of the previous screen when backPeekNode was captured
-let prevAcePadding = "";  // computed padding of the screen when backPeekNode was captured
-let prevTopbarHTML = "";  // outerHTML of topbar at render() snapshot time (before setHeader changes it)
-let prevTopbarRect = null; // bounding rect of topbar at snapshot time
-let swipeAceEl = null;   // fixed-position ace overlay (home snapshot) — z-index: 499
-let swipeQueenEl = null; // fixed-position queen overlay (songs snapshot) — z-index: 500
+    this.pendingBackState = null;
+    this._isBackNav = false;
+    this._restoredScrollTop = 0;
+
+    // Snapshot state (captured at render() time, before DOM mutations)
+    this.peekNode = null;
+    this.aceViewTop = 0;
+    this.aceScrollTop = 0;
+    this.acePadding = "";
+    this.aceRect = null;    // screen bounding rect at capture time
+    this.topbarHTML = "";
+    this.topbarRect = null;
+    this.prevState = null;
+
+    // Swipe overlay references
+    this.swipeAceEl = null;
+    this.swipeQueenEl = null;
+
+    this.ACE_PARALLAX = 30;
+  }
+
+  get depth() { return this.stack.length; }
+
+  // Capture current screen so back transitions can show it as the ace.
+  // Call at the start of render() before any DOM mutations.
+  snapshot(screenEl) {
+    if (!screenEl?.innerHTML) return;
+    this.peekNode = screenEl.cloneNode(true);
+    const r = screenEl.getBoundingClientRect();
+    this.aceViewTop = r.top || 0;
+    this.aceScrollTop = screenEl.scrollTop || 0;
+    this.acePadding = getComputedStyle(screenEl).padding;
+    this.aceRect = { top: r.top, left: r.left, width: r.width, height: r.height };
+
+    const tb = document.querySelector(".topbar");
+    const tbRect = tb?.getBoundingClientRect();
+    const tbVisible = tbRect && tbRect.height > 0;
+    this.topbarHTML = tbVisible ? (tb?.outerHTML || "") : "";
+    this.topbarRect = tbVisible ? { top: tbRect.top, height: tbRect.height } : null;
+  }
+
+  // Capture app state BEFORE mutating state vars for forward navigation.
+  captureState(stateObj) {
+    this.prevState = { ...stateObj };
+  }
+
+  // Clear all stacks (used when navigating to root).
+  clearStacks() {
+    this.stack = [];
+    this.topbarStack = [];
+    this.scrollStack = [];
+    this.stateStack = [];
+    this.rectStack = [];
+    this.paddingStack = [];
+    this.tbRectStack = [];
+  }
+
+  // --- Shared helpers ---
+
+  _bottomOffset() {
+    const bnEl = document.getElementById("bottomNav");
+    const bnRect = bnEl?.getBoundingClientRect();
+    return bnRect ? `${window.innerHeight - bnRect.top}px` : "0px";
+  }
+
+  // Lock a screen element into a context-independent frozen clone.
+  // The clone renders pixel-perfect no matter where it's placed in the DOM
+  // (immune to parent CSS classes like .app.pdActive, body.isHome, etc.).
+  _freeze(el) {
+    const rect = el.getBoundingClientRect();
+    const computed = getComputedStyle(el);
+    const clone = el.cloneNode(true);
+    clone.style.width = `${rect.width}px`;
+    clone.style.height = `${rect.height}px`;
+    clone.style.padding = computed.padding;
+    clone.style.margin = "0";
+    clone.style.boxSizing = "border-box";
+    clone.style.overflow = "hidden";
+    return clone;
+  }
+
+  // --- Forward slide ---
+  // Slide new screen in from the right. Call AFTER render().
+
+  forward(screenEl) {
+    const topbar = document.querySelector(".topbar");
+    if (!screenEl) return;
+
+    // Push previous screen onto stacks
+    if (this.peekNode) this.stack.push(this.peekNode);
+    this.topbarStack.push(this.topbarHTML);
+    this.scrollStack.push(this.aceScrollTop);
+    this.rectStack.push(this.aceRect);
+    this.paddingStack.push(this.acePadding);
+    this.tbRectStack.push(this.topbarRect);
+    if (this.prevState) this.stateStack.push(this.prevState);
+
+    const navBottomOffset = this._bottomOffset();
+    const r = screenEl.getBoundingClientRect();
+
+    // Ace overlay (previous screen)
+    let aceOverlay = null;
+    if (this.peekNode) {
+      const viewEl = document.getElementById("view");
+      const viewRect = viewEl?.getBoundingClientRect();
+      const aceLeft = viewRect ? viewRect.left : r.left;
+      const aceWidth = viewRect ? viewRect.width : r.width;
+      aceOverlay = document.createElement("div");
+      aceOverlay.style.cssText = `position:fixed;top:0;left:${aceLeft}px;width:${aceWidth}px;bottom:${navBottomOffset};z-index:499;overflow:hidden;pointer-events:none;background:var(--bg);`;
+
+      if (this.topbarHTML && this.topbarRect) {
+        const tbWrap = document.createElement("div");
+        tbWrap.innerHTML = this.topbarHTML;
+        const tbEl = tbWrap.firstElementChild;
+        if (tbEl) {
+          tbEl.style.cssText = `display:flex;position:absolute;top:${this.topbarRect.top}px;left:0;width:100%;height:${this.topbarRect.height}px;overflow:hidden;pointer-events:none;box-sizing:border-box;`;
+          aceOverlay.appendChild(tbEl);
+        }
+      }
+
+      const aceContent = document.createElement("div");
+      aceContent.style.cssText = `position:absolute;top:${this.aceViewTop}px;left:0;width:100%;bottom:0;overflow:hidden;`;
+      const aceScreenClone = this.peekNode.cloneNode(true);
+      aceScreenClone.style.padding = this.acePadding;
+      aceContent.appendChild(aceScreenClone);
+      aceOverlay.appendChild(aceContent);
+      document.body.appendChild(aceOverlay);
+      aceScreenClone.scrollTop = this.aceScrollTop;
+    }
+
+    // Queen overlay (new screen sliding in)
+    const overlay = document.createElement("div");
+    overlay.className = "viewSlideOverlay";
+    overlay.style.top = "0";
+    overlay.style.left = "0";
+    overlay.style.width = "100%";
+    overlay.style.bottom = navBottomOffset;
+    overlay.style.height = "";
+    overlay.style.transform = "translateX(100%)";
+    overlay.style.transition = "none";
+
+    if (topbar) {
+      const tbRect = topbar.getBoundingClientRect();
+      const tbClone = topbar.cloneNode(true);
+      tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${r.left}px;width:${r.width}px;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
+      overlay.appendChild(tbClone);
+    }
+
+    const screenWrap = document.createElement("div");
+    screenWrap.style.cssText = `position:absolute;top:${r.top}px;left:${r.left}px;width:${r.width}px;height:${r.height}px;overflow:hidden;`;
+    screenWrap.appendChild(this._freeze(screenEl));
+    overlay.appendChild(screenWrap);
+
+    document.body.appendChild(overlay);
+
+    screenEl.style.opacity = "0";
+    if (topbar) topbar.style.opacity = "0";
+
+    // Force reflow
+    // eslint-disable-next-line no-unused-expressions
+    overlay.offsetWidth;
+
+    overlay.style.transition = "transform 0.3s cubic-bezier(.4,0,.2,1)";
+    overlay.style.transform = "";
+
+    if (aceOverlay) {
+      aceOverlay.style.transition = "transform 0.3s cubic-bezier(.4,0,.2,1)";
+      aceOverlay.style.transform = `translateX(-${this.ACE_PARALLAX}px)`;
+    }
+
+    overlay.addEventListener("transitionend", () => {
+      overlay.remove();
+      if (aceOverlay) { aceOverlay.remove(); aceOverlay = null; }
+      screenEl.style.opacity = "";
+      if (topbar) topbar.style.opacity = "";
+    }, { once: true });
+  }
+
+  // --- Back slide ---
+  // Both ace (previous screen) and queen (current screen) are frozen snapshots.
+  // The live DOM renders invisibly underneath and is revealed when animation completes.
+
+  back(screenEl, renderUnderneath) {
+    if (!screenEl) return renderUnderneath();
+
+    // Peek at stack BEFORE popping — we need the ace snapshot + its frozen dimensions
+    const aceNode = this.stack.length > 0 ? this.stack[this.stack.length - 1] : this.peekNode;
+    const aceTopbarHTML = this.topbarStack.length > 0
+      ? this.topbarStack[this.topbarStack.length - 1]
+      : this.topbarHTML;
+    const aceScrollTop = this.scrollStack.length > 0
+      ? this.scrollStack[this.scrollStack.length - 1]
+      : this.aceScrollTop;
+    const aceRect = this.rectStack.length > 0
+      ? this.rectStack[this.rectStack.length - 1]
+      : this.aceRect;
+    const acePadding = this.paddingStack.length > 0
+      ? this.paddingStack[this.paddingStack.length - 1]
+      : this.acePadding;
+    const aceTbRect = this.tbRectStack.length > 0
+      ? this.tbRectStack[this.tbRectStack.length - 1]
+      : this.topbarRect;
+
+    // Now pop stacks
+    if (this.stack.length > 0) this.stack.pop();
+    if (this.topbarStack.length > 0) this.topbarStack.pop();
+    if (this.scrollStack.length > 0) this.scrollStack.pop();
+    if (this.rectStack.length > 0) this.rectStack.pop();
+    if (this.paddingStack.length > 0) this.paddingStack.pop();
+    if (this.tbRectStack.length > 0) this.tbRectStack.pop();
+    this.pendingBackState = this.stateStack.length > 0 ? this.stateStack.pop() : null;
+
+    const navBottomOffset = this._bottomOffset();
+    const tb = document.querySelector(".topbar");
+    const tbRect = tb ? tb.getBoundingClientRect() : null;
+    const viewRect = screenEl.getBoundingClientRect();
+
+    // --- Queen overlay (frozen current screen) ---
+    const queenEl = document.createElement("div");
+    queenEl.style.cssText = "position:fixed;inset:0;z-index:500;overflow:hidden;pointer-events:none;background:var(--bg);";
+
+    if (tbRect && tb) {
+      const tbClone = tb.cloneNode(true);
+      tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${tbRect.left}px;width:${tbRect.width}px;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
+      queenEl.appendChild(tbClone);
+    }
+
+    const screenWrap = document.createElement("div");
+    screenWrap.style.cssText = `position:absolute;top:${viewRect.top}px;left:${viewRect.left}px;width:${viewRect.width}px;height:${viewRect.height}px;overflow:hidden;`;
+    const queenClone = this._freeze(screenEl);
+    queenClone.scrollTop = screenEl.scrollTop;
+    screenWrap.appendChild(queenClone);
+    queenEl.appendChild(screenWrap);
+
+    // Queen goes on first — covers everything while we render + build ace
+    document.body.appendChild(queenEl);
+
+    // Render live DOM invisibly underneath the queen overlay.
+    // This removes pdActive, restores normal .view dimensions, etc.
+    this._isBackNav = true;
+    renderUnderneath();
+    this._isBackNav = false;
+
+    // Restore scroll position on the newly-rendered screen
+    if (aceScrollTop && activeScreenEl) activeScreenEl.scrollTop = aceScrollTop;
+
+    // --- Ace overlay (frozen previous screen from stack) ---
+    // Uses stored pixel rect from capture time — no live DOM measurement needed.
+    // The ace clone is dimension-locked just like the queen.
+    let aceOverlay = null;
+    if (aceNode && aceRect) {
+      const isHomeAce = aceNode.querySelector(".homeWrap");
+
+      aceOverlay = document.createElement("div");
+      aceOverlay.style.cssText = `position:fixed;inset:0;bottom:${navBottomOffset};z-index:499;overflow:hidden;pointer-events:none;background:var(--bg);`;
+
+      // Topbar clone for the ace (using stored HTML + rect from capture time)
+      if (aceTopbarHTML && aceTbRect) {
+        const tbWrap = document.createElement("div");
+        tbWrap.innerHTML = aceTopbarHTML;
+        const tbEl = tbWrap.firstElementChild;
+        if (tbEl) {
+          tbEl.style.cssText = `display:flex;position:absolute;top:${aceTbRect.top}px;left:${aceRect.left}px;width:${aceRect.width}px;height:${aceTbRect.height}px;overflow:hidden;pointer-events:none;box-sizing:border-box;`;
+          aceOverlay.appendChild(tbEl);
+        }
+      }
+
+      // Screen content — frozen at exact capture-time dimensions
+      const aceWrap = document.createElement("div");
+      aceWrap.style.cssText = `position:absolute;top:${aceRect.top}px;left:${aceRect.left}px;width:${aceRect.width}px;height:${aceRect.height}px;overflow:hidden;`;
+      const aceClone = aceNode.cloneNode(true);
+      aceClone.style.width = `${aceRect.width}px`;
+      aceClone.style.height = `${aceRect.height}px`;
+      aceClone.style.padding = isHomeAce ? "0" : acePadding;
+      aceClone.style.margin = "0";
+      aceClone.style.boxSizing = "border-box";
+      aceClone.style.position = "relative";
+      aceClone.style.inset = "auto";
+      aceWrap.appendChild(aceClone);
+      aceOverlay.appendChild(aceWrap);
+      document.body.appendChild(aceOverlay);
+      aceClone.scrollTop = aceScrollTop;
+    }
+
+    // Suppress homeWrap height transition so it settles instantly
+    const homeWrapEl = document.querySelector(".homeWrap");
+    if (homeWrapEl) homeWrapEl.style.transition = "none";
+
+    // Parallax on the frozen ace overlay (NOT the live DOM)
+    if (aceOverlay) {
+      aceOverlay.style.transform = `translateX(-${this.ACE_PARALLAX}px)`;
+      aceOverlay.style.transition = "none";
+    }
+
+    requestAnimationFrame(() => {
+      if (homeWrapEl) homeWrapEl.style.transition = "";
+      requestAnimationFrame(() => {
+        queenEl.style.transition = "transform 0.3s cubic-bezier(.4,0,.2,1)";
+        queenEl.style.transform = "translateX(100%)";
+
+        if (aceOverlay) {
+          aceOverlay.style.transition = "transform 0.3s cubic-bezier(.4,0,.2,1)";
+          aceOverlay.style.transform = "";
+        }
+
+        queenEl.addEventListener("transitionend", () => {
+          queenEl.remove();
+          if (aceOverlay) aceOverlay.remove();
+        }, { once: true });
+      });
+    });
+  }
+
+  // Pop stacks without animation (for non-animated goBack).
+  popStacks() {
+    if (this.stack.length > 0) this.stack.pop();
+    if (this.topbarStack.length > 0) this.topbarStack.pop();
+    this._restoredScrollTop = this.scrollStack.length > 0 ? this.scrollStack.pop() : 0;
+    if (this.rectStack.length > 0) this.rectStack.pop();
+    if (this.paddingStack.length > 0) this.paddingStack.pop();
+    if (this.tbRectStack.length > 0) this.tbRectStack.pop();
+    return this.stateStack.length > 0 ? this.stateStack.pop() : null;
+  }
+
+  // Consume pending back state (set by animated back).
+  consumePendingState() {
+    const s = this.pendingBackState;
+    this.pendingBackState = null;
+    return s;
+  }
+
+  // --- Swipe gesture helpers ---
+
+  swipeStart(screenEl) {
+    const navBottomOffset = this._bottomOffset();
+
+    const peekNode = this.stack.length > 0 ? this.stack[this.stack.length - 1] : this.peekNode;
+    const peekTopbarHTML = this.topbarStack.length > 0
+      ? this.topbarStack[this.topbarStack.length - 1]
+      : this.topbarHTML;
+    const peekRect = this.rectStack.length > 0
+      ? this.rectStack[this.rectStack.length - 1]
+      : this.aceRect;
+    const peekPadding = this.paddingStack.length > 0
+      ? this.paddingStack[this.paddingStack.length - 1]
+      : this.acePadding;
+    const peekTopbarRect = this.topbarRect;
+    const isHomeAce = peekNode && peekNode.querySelector(".homeWrap");
+    const swipeAceScrollTop = this.scrollStack.length > 0 ? this.scrollStack[this.scrollStack.length - 1] : this.aceScrollTop;
+
+    // ACE overlay (frozen previous screen using stored dimensions)
+    this.swipeAceEl = document.createElement("div");
+    this.swipeAceEl.style.cssText = `position:fixed;inset:0;bottom:${navBottomOffset};z-index:499;overflow:hidden;pointer-events:none;background:var(--bg);`;
+
+    if (peekTopbarHTML && peekTopbarRect && peekRect) {
+      const tbWrap = document.createElement("div");
+      tbWrap.innerHTML = peekTopbarHTML;
+      const tbEl = tbWrap.firstElementChild;
+      if (tbEl) {
+        tbEl.style.cssText = `display:flex;position:absolute;top:${peekTopbarRect.top}px;left:${peekRect.left}px;width:${peekRect.width}px;height:${peekTopbarRect.height}px;overflow:hidden;pointer-events:none;box-sizing:border-box;`;
+        this.swipeAceEl.appendChild(tbEl);
+      }
+    }
+
+    if (peekNode && peekRect) {
+      const aceWrap = document.createElement("div");
+      aceWrap.style.cssText = `position:absolute;top:${peekRect.top}px;left:${peekRect.left}px;width:${peekRect.width}px;height:${peekRect.height}px;overflow:hidden;`;
+      const aceScreenClone = peekNode.cloneNode(true);
+      aceScreenClone.style.width = `${peekRect.width}px`;
+      aceScreenClone.style.height = `${peekRect.height}px`;
+      aceScreenClone.style.padding = isHomeAce ? "0" : peekPadding;
+      aceScreenClone.style.margin = "0";
+      aceScreenClone.style.boxSizing = "border-box";
+      aceScreenClone.style.position = "relative";
+      aceScreenClone.style.inset = "auto";
+      aceWrap.appendChild(aceScreenClone);
+      this.swipeAceEl.appendChild(aceWrap);
+      document.body.appendChild(this.swipeAceEl);
+      aceScreenClone.scrollTop = swipeAceScrollTop;
+    } else {
+      document.body.appendChild(this.swipeAceEl);
+    }
+
+    // QUEEN overlay (current screen)
+    this.swipeQueenEl = document.createElement("div");
+    this.swipeQueenEl.style.cssText = `position:fixed;top:0;left:0;right:0;bottom:${navBottomOffset};z-index:500;overflow:hidden;pointer-events:none;background:var(--bg);`;
+
+    const swipeTb = document.querySelector(".topbar");
+    if (swipeTb) {
+      const tbRect = swipeTb.getBoundingClientRect();
+      const tbClone = swipeTb.cloneNode(true);
+      tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${tbRect.left}px;width:${tbRect.width}px;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
+      this.swipeQueenEl.appendChild(tbClone);
+    }
+
+    let clonedScreen = null;
+    const savedScrollTop = screenEl ? screenEl.scrollTop : 0;
+    if (screenEl) {
+      const screenRect = screenEl.getBoundingClientRect();
+      const screenWrap = document.createElement("div");
+      screenWrap.style.cssText = `position:absolute;top:${screenRect.top}px;left:${screenRect.left}px;width:${screenRect.width}px;height:${screenRect.height}px;overflow:hidden;`;
+      clonedScreen = this._freeze(screenEl);
+      screenWrap.appendChild(clonedScreen);
+      this.swipeQueenEl.appendChild(screenWrap);
+    }
+
+    document.body.appendChild(this.swipeQueenEl);
+    if (clonedScreen) clonedScreen.scrollTop = savedScrollTop;
+
+    if (this.swipeAceEl) this.swipeAceEl.style.transform = `translateX(-${this.ACE_PARALLAX}px)`;
+  }
+
+  swipeMove(dx) {
+    const clamp = Math.max(0, dx);
+    if (this.swipeQueenEl) this.swipeQueenEl.style.transform = `translateX(${clamp}px)`;
+    if (this.swipeAceEl) {
+      const ratio = Math.min(clamp / window.innerWidth, 1);
+      this.swipeAceEl.style.transform = `translateX(${-this.ACE_PARALLAX * (1 - ratio)}px)`;
+    }
+  }
+
+  swipeCommit(goBackFn) {
+    if (this.swipeQueenEl) {
+      this.swipeQueenEl.style.transition = "transform 268ms ease-out";
+      this.swipeQueenEl.style.transform = `translateX(${window.innerWidth}px)`;
+    }
+    if (this.swipeAceEl) {
+      this.swipeAceEl.style.transition = "transform 268ms ease-out";
+      this.swipeAceEl.style.transform = "translateX(0)";
+    }
+    setTimeout(() => {
+      goBackFn();
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          this._cleanupSwipe();
+        });
+      });
+    }, 268);
+  }
+
+  swipeCancel() {
+    if (this.swipeQueenEl) {
+      this.swipeQueenEl.style.transition = "transform 236ms ease-out";
+      this.swipeQueenEl.style.transform = "translateX(0)";
+    }
+    if (this.swipeAceEl) {
+      this.swipeAceEl.style.transition = "transform 236ms ease-out";
+      this.swipeAceEl.style.transform = `translateX(-${this.ACE_PARALLAX}px)`;
+    }
+    setTimeout(() => this._cleanupSwipe(), 236);
+  }
+
+  _cleanupSwipe() {
+    if (this.swipeQueenEl) { this.swipeQueenEl.remove(); this.swipeQueenEl = null; }
+    if (this.swipeAceEl) { this.swipeAceEl.remove(); this.swipeAceEl = null; }
+  }
+}
+
+const nav = new Nav();
 
 let activeScreenName = "home";
 let activeScreenEl = screens.home || view;
@@ -145,139 +602,15 @@ function setActiveScreen(name) {
   });
 }
 
-// Show the "ace" (previous screen) behind the view during a forward slide.
-function _showPeekBackdrop(html) {
-  if (!backPeekEl || !html) return;
-  backPeekEl.innerHTML = html;
-  backPeekEl.style.display = "block";
-}
-function _hidePeekBackdrop() {
-  if (!backPeekEl) return;
-  backPeekEl.style.display = "none";
-  backPeekEl.innerHTML = "";
-}
-
-// Capture nav state BEFORE mutating state vars for a forward navigation.
-// Call this before changing currentTab/drawerView/etc, then call render() + triggerForwardSlide().
+// Thin wrappers — all logic lives in the Nav class above.
 function captureNavState() {
-  prevNavState = {
+  nav.captureState({
     currentTab, drawerView, projectDetailScreen, releaseDetailId,
     selectedSongId, selectedVersionId, songsView, overlayView,
     songsBackTarget, headerTitle: headerTitle?.textContent || "RiffBank"
-  };
+  });
 }
-
-// Slide the new screen in from the right (call after render() for forward navigation).
-// Uses an opaque overlay snapshot of the new screen so the ace (previous screen) shows
-// cleanly on the left without any see-through bleed from transparent .screen elements.
-const ACE_PARALLAX = 30; // px the ace shifts left during transitions
-
-function triggerForwardSlide() {
-  const el = activeScreenEl;
-  const topbar = document.querySelector(".topbar");
-  if (!el) return;
-
-  // Push the "previous screen" HTML (and its topbar snapshot) onto the nav stacks
-  // so swipe-back can restore both the correct content and topbar title.
-  if (backPeekNode) navHistoryStack.push(backPeekNode);
-  navHistoryTopbarStack.push(prevTopbarHTML);
-  navScrollStack.push(prevAceScrollTop);
-  if (prevNavState) navStateStack.push(prevNavState);
-
-  // Shared measurements.
-  const bnEl = document.getElementById("bottomNav");
-  const bnRect = bnEl?.getBoundingClientRect();
-  const navBottomOffset = bnRect ? `${window.innerHeight - bnRect.top}px` : "0px";
-  const r = el.getBoundingClientRect();
-
-  // Build ace overlay (previous screen) — spans top:0 so it covers the full area
-  // including the topbar region. Contains a frozen topbar clone (prevTopbarHTML) showing
-  // the previous title, plus the screen content below it (prevAceViewTop).
-  let aceOverlay = null;
-  if (backPeekNode) {
-    const viewEl = document.getElementById("view");
-    const viewRect = viewEl?.getBoundingClientRect();
-    const aceLeft = viewRect ? viewRect.left : r.left;
-    const aceWidth = viewRect ? viewRect.width : r.width;
-    aceOverlay = document.createElement("div");
-    aceOverlay.style.cssText = `position:fixed;top:0;left:${aceLeft}px;width:${aceWidth}px;bottom:${navBottomOffset};z-index:499;overflow:hidden;pointer-events:none;background:var(--bg);`;
-    // Topbar clone — frozen at previous-screen state (correct title, back-button visibility)
-    if (prevTopbarHTML && prevTopbarRect) {
-      const tbWrap = document.createElement("div");
-      tbWrap.innerHTML = prevTopbarHTML;
-      const tbEl = tbWrap.firstElementChild;
-      if (tbEl) {
-        tbEl.style.cssText = `display:flex;position:absolute;top:${prevTopbarRect.top}px;left:0;width:100%;height:${prevTopbarRect.height}px;overflow:hidden;pointer-events:none;box-sizing:border-box;`;
-        aceOverlay.appendChild(tbEl);
-      }
-    }
-    // Screen content below the topbar — uses cloneNode to preserve decoded image data
-    // (innerHTML re-parses <img> tags causing flicker as images re-fetch/re-decode).
-    const aceContent = document.createElement("div");
-    aceContent.style.cssText = `position:absolute;top:${prevAceViewTop}px;left:0;width:100%;bottom:0;overflow:hidden;`;
-    const aceScreenClone = backPeekNode.cloneNode(true);
-    // Freeze padding inline so CSS class changes (e.g. body.isHome removal) don't shift content
-    aceScreenClone.style.padding = prevAcePadding;
-    aceContent.appendChild(aceScreenClone);
-    aceOverlay.appendChild(aceContent);
-    document.body.appendChild(aceOverlay);
-    // Set scroll position after DOM attachment (scrollTop only works on attached elements)
-    aceScreenClone.scrollTop = prevAceScrollTop;
-  }
-
-  // Build queen overlay (new screen) — covers full height from top:0 so the topbar
-  // is included and slides in as one unit. This prevents the ace from showing through
-  // above the screen area while the topbar animates in separately.
-  const overlay = document.createElement("div");
-  overlay.className = "viewSlideOverlay";
-  overlay.style.top = "0";
-  overlay.style.left = "0";
-  overlay.style.width = "100%";
-  overlay.style.bottom = navBottomOffset;
-  overlay.style.height = "";  // use bottom instead of explicit height
-  overlay.style.transform = "translateX(100%)";
-  overlay.style.transition = "none";
-
-  // Topbar clone — included in the queen so it slides in with the screen content.
-  if (topbar) {
-    const tbRect = topbar.getBoundingClientRect();
-    const tbClone = topbar.cloneNode(true);
-    tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${r.left}px;width:${r.width}px;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
-    overlay.appendChild(tbClone);
-  }
-
-  // Screen content clone — positioned below the topbar.
-  const screenWrap = document.createElement("div");
-  screenWrap.style.cssText = `position:absolute;top:${r.top}px;left:${r.left}px;width:${r.width}px;height:${r.height}px;overflow:hidden;`;
-  screenWrap.appendChild(el.cloneNode(true));
-  overlay.appendChild(screenWrap);
-
-  document.body.appendChild(overlay);
-
-  // Hide the actual screen + topbar so they don't flash before the overlay animation.
-  el.style.opacity = "0";
-  if (topbar) { topbar.style.opacity = "0"; }
-
-  // Force a synchronous reflow to commit translateX(100%) before animating.
-  // eslint-disable-next-line no-unused-expressions
-  overlay.offsetWidth;
-
-  overlay.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
-  overlay.style.transform = "";
-
-  // Parallax: ace drifts left as queen covers it (skip for home — keep it perfectly still)
-  if (aceOverlay) {
-    aceOverlay.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
-    aceOverlay.style.transform = `translateX(-${ACE_PARALLAX}px)`;
-  }
-
-  overlay.addEventListener("transitionend", () => {
-    overlay.remove();
-    if (aceOverlay) { aceOverlay.remove(); aceOverlay = null; }
-    el.style.opacity = "";
-    if (topbar) { topbar.style.opacity = ""; }
-  }, { once: true });
-}
+function triggerForwardSlide() { nav.forward(activeScreenEl); }
 
 const headerTitle = $("#headerTitle");
 const headerBackEl = document.getElementById("headerBack");
@@ -577,7 +910,7 @@ function wireNowPlayingEvents(overlay) {
       dragging = false;
       if (dy > 120) closeNowPlaying();
       else {
-        root.style.transition = "transform 160ms ease";
+        root.style.transition = "transform 171ms ease";
         root.style.transform = "translateY(0px)";
       }
     }, { passive: true });
@@ -858,10 +1191,10 @@ if (typeof isNowPlayingFullscreen !== "undefined" && isNowPlayingFullscreen) {
     if (swipeZone) swipeZone.appendChild(ghost);
 
     // Slide current out + ghost in
-    inner.style.transition = "transform 220ms ease";
+    inner.style.transition = "transform 236ms ease";
     inner.style.transform = `translateX(${flyTo})`;
     requestAnimationFrame(() => requestAnimationFrame(() => {
-      ghost.style.transition = "transform 220ms ease";
+      ghost.style.transition = "transform 236ms ease";
       ghost.style.transform = "translateX(0)";
     }));
 
@@ -1709,7 +2042,13 @@ function setDrawerView(v) {
 }
 
 function setHeader(t) {
+  // During back-nav, goBack() already set the header — skip redundant DOM churn
+  if (nav._isBackNav) return;
   if (headerTitle) headerTitle.textContent = t;
+  const appEl = document.querySelector(".app");
+  appEl?.classList.remove("pdActive", "pdScrolled");
+  // Restore screen padding when leaving project detail
+  document.querySelectorAll(".screen").forEach(s => s.style.paddingBottom = "");
 }
 
 // Show/hide the back button based on whether we're on a nested screen
@@ -1896,7 +2235,7 @@ document.querySelectorAll(".drawerItem").forEach((btn) => {
 });
 
 // Create button in bottom nav
-document.querySelector(".createNavBtn")?.addEventListener("click", () => openSheet("chooser"));
+document.querySelector(".createNavBtn")?.addEventListener("click", () => openCreateOverlay());
 
 // Sal mascot button — opens help sheet
 document.querySelector(".salNavBtn")?.addEventListener("click", () => openSalSheet());
@@ -1939,14 +2278,11 @@ document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
     const targetTab = btn.dataset.tab || "home";
 
-    // If already on home tab with nav depth, slide back to home root
-    if (targetTab === "home" && currentTab === "home" && navHistoryStack.length > 0) {
+    // If tapping home while deep in a home-originated nav stack, slide back to home root
+    if (targetTab === "home" && nav.depth > 0) {
       slideBackTransition(() => {
         songsBackTarget = null;
-        navHistoryStack = [];
-        navHistoryTopbarStack = [];
-        navScrollStack = [];
-        navStateStack = [];
+        nav.clearStacks();
         drawerView = null;
         overlayView = null;
         selectedSongId = null;
@@ -1968,10 +2304,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
     }
 
     songsBackTarget = null;
-    navHistoryStack = [];
-    navHistoryTopbarStack = [];
-    navScrollStack = [];
-    navStateStack = [];
+    nav.clearStacks();
 
     // Normal navigation
     drawerView = null;
@@ -2013,10 +2346,7 @@ headerTitle?.addEventListener("click", () => {
     songsView = "list";
     currentTab = "home";
     songsBackTarget = null;
-    navHistoryStack = [];
-    navHistoryTopbarStack = [];
-    navScrollStack = [];
-    navStateStack = [];
+    nav.clearStacks();
     if (screens.home) screens.home.scrollTop = 0;
     try { window.scrollTo(0, 0); } catch {}
     try { document.documentElement.scrollTop = 0; } catch {}
@@ -2027,7 +2357,7 @@ headerTitle?.addEventListener("click", () => {
   };
 
   // If on home tab with nav depth, slide back; otherwise snap
-  if (currentTab === "home" && navHistoryStack.length > 0) {
+  if (currentTab === "home" && nav.depth > 0) {
     slideBackTransition(resetToHome);
   } else {
     resetToHome();
@@ -2080,101 +2410,18 @@ audioPickerEl?.addEventListener("change", async (e) => {
 // iOS slide-back animation (back button)
 // ---------------------
 function slideBackTransition(renderUnderneath) {
-  if (!activeScreenEl) return renderUnderneath();
-
-  // Pop nav stack — animated back button pops here (swipe pops in touchend).
-  if (navHistoryStack.length > 0) navHistoryStack.pop();
-  if (navHistoryTopbarStack.length > 0) navHistoryTopbarStack.pop();
-  if (navScrollStack.length > 0) navScrollStack.pop();
-  _pendingBackState = navStateStack.length > 0 ? navStateStack.pop() : null;
-
-  const el = activeScreenEl;
-  const tb = document.querySelector(".topbar");
-
-  // Capture exact pixel rects BEFORE renderUnderneath() mutates the layout
-  // (renderUnderneath() may toggle body.isHome which hides the topbar and resizes #view).
-  const tbRect = tb ? tb.getBoundingClientRect() : null;
-  const viewRect = el.getBoundingClientRect();
-
-  // Build a fixed, full-viewport queen overlay that exactly replicates what is
-  // currently on screen (topbar + active screen at their actual pixel positions).
-  // Using position:fixed means the queen is immune to any layout shifts caused by
-  // renderUnderneath() — it always covers the full viewport at z-index 500.
-  const queenEl = document.createElement("div");
-  queenEl.style.cssText = "position:fixed;inset:0;z-index:500;overflow:hidden;pointer-events:none;background:var(--bg);";
-
-  if (tbRect && tb) {
-    const tbClone = tb.cloneNode(true);
-    // Force display:flex so body.isHome .topbar { display:none } cannot hide the clone
-    // mid-transition (which would make the songs queen appear to shift up).
-    tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${tbRect.left}px;width:${tbRect.width}px;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
-    queenEl.appendChild(tbClone);
-  }
-
-  const screenWrap = document.createElement("div");
-  screenWrap.style.cssText = `position:absolute;top:${viewRect.top}px;left:${viewRect.left}px;width:${viewRect.width}px;height:${viewRect.height}px;overflow:hidden;`;
-  const cloned = el.cloneNode(true);
-  screenWrap.appendChild(cloned);
-  cloned.scrollTop = el.scrollTop;
-  queenEl.appendChild(screenWrap);
-
-  document.body.appendChild(queenEl);
-
-  // Render destination NOW, beneath the opaque queen.
-  // If going to home this sets body.isHome, hides the topbar, and expands #view —
-  // all invisible under the queen so the ace is never seen to shift.
-  renderUnderneath();
-
-  // Kill any homeWrap height transition for one rAF so the home screen is fully
-  // settled at its correct size before the queen animation starts. Without this,
-  // the homeWrap can briefly animate to its final height while the queen slides off,
-  // causing a visible "stretched → snap" glitch on the home screen.
-  const homeWrapEl = document.querySelector(".homeWrap");
-  if (homeWrapEl) homeWrapEl.style.transition = "none";
-
-  // Parallax: ace starts shifted left, glides back to origin as queen slides off
-  const aceTarget = document.getElementById("view");
-  if (aceTarget) {
-    aceTarget.style.transform = `translateX(-${ACE_PARALLAX}px)`;
-    aceTarget.style.transition = "none";
-  }
-
-  requestAnimationFrame(() => {
-    if (homeWrapEl) homeWrapEl.style.transition = "";
-    requestAnimationFrame(() => {
-      queenEl.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
-      queenEl.style.transform = "translateX(100%)";
-
-      if (aceTarget) {
-        aceTarget.style.transition = "transform 0.28s cubic-bezier(.4,0,.2,1)";
-        aceTarget.style.transform = "";
-      }
-
-      queenEl.addEventListener("transitionend", () => {
-        queenEl.remove();
-        if (aceTarget) { aceTarget.style.transition = ""; aceTarget.style.transform = ""; }
-      }, { once: true });
-    });
-  });
+  nav.back(activeScreenEl, renderUnderneath);
 }
 
 function goBack({ animate = false } = {}) {
   const doRender = () => {
     if (drawerOpen) { closeDrawer(); return; }
 
-    // For non-animated backs, pop visual stacks here (animated pops happen in slideBackTransition).
-    if (!animate && navHistoryStack.length > 0) navHistoryStack.pop();
-    if (!animate && navHistoryTopbarStack.length > 0) navHistoryTopbarStack.pop();
-    if (!animate && navScrollStack.length > 0) navScrollStack.pop();
-
-    // Resolve the state to restore: animated backs already popped in slideBackTransition
-    // (_pendingBackState), non-animated backs pop here.
-    let restoreState = _pendingBackState;
-    _pendingBackState = null;
-    if (!animate && navStateStack.length > 0) restoreState = navStateStack.pop();
+    // Resolve the state to restore: animated backs already popped in nav.back()
+    // (pendingBackState), non-animated backs pop here.
+    let restoreState = animate ? nav.consumePendingState() : nav.popStacks();
 
     if (restoreState) {
-      // Restore the exact app state from when the user navigated forward
       currentTab = restoreState.currentTab;
       drawerView = restoreState.drawerView;
       projectDetailScreen = restoreState.projectDetailScreen;
@@ -2186,7 +2433,13 @@ function goBack({ animate = false } = {}) {
       songsBackTarget = restoreState.songsBackTarget;
       setHeader(restoreState.headerTitle);
       syncTabs();
+      nav._isBackNav = true;
       render();
+      nav._isBackNav = false;
+      // Restore scroll position (for non-animated / swipe-back path)
+      if (nav._restoredScrollTop && activeScreenEl) {
+        activeScreenEl.scrollTop = nav._restoredScrollTop;
+      }
       return;
     }
 
@@ -2197,10 +2450,7 @@ function goBack({ animate = false } = {}) {
       drawerView = null;
       selectedSongId = null;
       songsView = "list";
-      navHistoryStack = [];
-      navHistoryTopbarStack = [];
-      navScrollStack = [];
-      navStateStack = [];
+      nav.clearStacks();
       setHeader("RiffBank");
       syncTabs();
       render();
@@ -2215,10 +2465,7 @@ function goBack({ animate = false } = {}) {
       songsView = "list";
       selectedSongId = null;
       selectedVersionId = null;
-      navHistoryStack = [];
-      navHistoryTopbarStack = [];
-      navScrollStack = [];
-      navStateStack = [];
+      nav.clearStacks();
       setHeader("RiffBank");
       syncTabs();
       render();
@@ -2254,98 +2501,8 @@ if (!drawerOpen && t.clientX <= 24) {
   touchStartX = t.clientX;
   touchStartY = t.clientY;
 
-  // Pre-populate the peek layer so the previous screen is visible behind the swipe.
-  // Use navHistoryStack for accurate depth; fall back to backPeekNode.
   if (touchMode === "back") {
-    const peekNode = navHistoryStack.length > 0
-      ? navHistoryStack[navHistoryStack.length - 1]
-      : backPeekNode;
-
-    // Compute the bottom boundary: stop at nav bar top so bottomNav stays visible.
-    const bnEl = document.getElementById("bottomNav");
-    const bnRect = bnEl?.getBoundingClientRect();
-    const navBottomOffset = bnRect ? `${window.innerHeight - bnRect.top}px` : "0px";
-
-    // Constrain ace to #view bounds — this matches exactly where .screen elements render.
-    // Using .app would include its 16px horizontal padding, shifting home content to the left edge.
-    const viewEl = document.getElementById("view");
-    const viewRect = viewEl?.getBoundingClientRect();
-    const aceLeft = viewRect ? viewRect.left : 0;
-    const aceWidth = viewRect ? viewRect.width : window.innerWidth;
-
-    // ACE (z:499): previous screen snapshot, spans top:0 so it covers the topbar region too.
-    // Contains a frozen topbar clone (from navHistoryTopbarStack) + screen content below it.
-    const peekTopbarHTML = navHistoryTopbarStack.length > 0
-      ? navHistoryTopbarStack[navHistoryTopbarStack.length - 1]
-      : prevTopbarHTML;
-    const isHomeAce = peekNode && peekNode.querySelector(".homeWrap");
-    const swipeAceContentTop = isHomeAce ? 0 : (viewRect ? viewRect.top : 0);
-    swipeAceEl = document.createElement("div");
-    swipeAceEl.style.cssText = `position:fixed;top:0;left:${aceLeft}px;width:${aceWidth}px;bottom:${navBottomOffset};z-index:499;overflow:hidden;pointer-events:none;background:var(--bg);`;
-    // Topbar clone for the ace (frozen previous-screen state)
-    if (peekTopbarHTML) {
-      const swipeTbCur = document.querySelector(".topbar");
-      const swipeTbRect = swipeTbCur?.getBoundingClientRect();
-      if (swipeTbRect && swipeTbRect.height > 0) {
-        const tbWrap = document.createElement("div");
-        tbWrap.innerHTML = peekTopbarHTML;
-        const tbEl = tbWrap.firstElementChild;
-        if (tbEl) {
-          tbEl.style.cssText = `display:flex;position:absolute;top:${swipeTbRect.top}px;left:0;width:100%;height:${swipeTbRect.height}px;overflow:hidden;pointer-events:none;box-sizing:border-box;`;
-          swipeAceEl.appendChild(tbEl);
-        }
-      }
-    }
-    // Screen content below topbar — cloneNode preserves decoded images (no flicker).
-    const swipeAceContent = document.createElement("div");
-    swipeAceContent.style.cssText = `position:absolute;top:${swipeAceContentTop}px;left:0;width:100%;bottom:0;overflow:hidden;`;
-    const swipeAceScrollTop = navScrollStack.length > 0 ? navScrollStack[navScrollStack.length - 1] : prevAceScrollTop;
-    if (peekNode) {
-      const aceScreenClone = peekNode.cloneNode(true);
-      // Freeze padding so CSS class changes (body.isHome removal) don't shift content
-      if (isHomeAce) aceScreenClone.style.padding = "0";
-      swipeAceContent.appendChild(aceScreenClone);
-      swipeAceEl.appendChild(swipeAceContent);
-      document.body.appendChild(swipeAceEl);
-      aceScreenClone.scrollTop = swipeAceScrollTop;
-    } else {
-      swipeAceEl.appendChild(swipeAceContent);
-      document.body.appendChild(swipeAceEl);
-    }
-
-    // QUEEN (z:500): pixel-perfect snapshot of the current songs screen.
-    // Solid dark background (gradient removed). Stops at nav bar top.
-    swipeQueenEl = document.createElement("div");
-    swipeQueenEl.style.cssText = `position:fixed;top:0;left:0;right:0;bottom:${navBottomOffset};z-index:500;overflow:hidden;pointer-events:none;background:var(--bg);`;
-
-    const swipeTb = document.querySelector(".topbar");
-    if (swipeTb) {
-      const tbRect = swipeTb.getBoundingClientRect();
-      const tbClone = swipeTb.cloneNode(true);
-      // Force display:flex so body.isHome .topbar { display:none } can't hide the clone.
-      tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${tbRect.left}px;width:${tbRect.width}px;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
-      swipeQueenEl.appendChild(tbClone);
-    }
-
-    let clonedScreen = null;
-    const savedScrollTop = activeScreenEl ? activeScreenEl.scrollTop : 0;
-    if (activeScreenEl) {
-      const screenRect = activeScreenEl.getBoundingClientRect();
-      const screenWrap = document.createElement("div");
-      screenWrap.style.cssText = `position:absolute;top:${screenRect.top}px;left:${screenRect.left}px;width:${screenRect.width}px;height:${screenRect.height}px;overflow:hidden;`;
-      // cloneNode keeps the .screen wrapper (with its padding:10px) and avoids
-      // SVG re-parse flicker that innerHTML/outerHTML causes.
-      clonedScreen = activeScreenEl.cloneNode(true);
-      screenWrap.appendChild(clonedScreen);
-      swipeQueenEl.appendChild(screenWrap);
-    }
-
-    document.body.appendChild(swipeQueenEl);
-    // Set scrollTop AFTER DOM attachment — browsers ignore scrollTop on detached elements.
-    if (clonedScreen) clonedScreen.scrollTop = savedScrollTop;
-
-    // Parallax: ace starts shifted left (as if queen pushed it)
-    if (swipeAceEl) swipeAceEl.style.transform = `translateX(-${ACE_PARALLAX}px)`;
+    nav.swipeStart(activeScreenEl);
   }
   return;
 }
@@ -2376,14 +2533,7 @@ document.addEventListener("touchmove", (e) => {
   }
 
   if (touchMode === "back") {
-    // Translate the queen overlay; the actual screen is never touched.
-    const clamp = Math.max(0, dx);
-    if (swipeQueenEl) swipeQueenEl.style.transform = `translateX(${clamp}px)`;
-    // Parallax: ace drifts from -ACE_PARALLAX toward 0 as queen moves right
-    if (swipeAceEl) {
-      const ratio = Math.min(clamp / window.innerWidth, 1);
-      swipeAceEl.style.transform = `translateX(${-ACE_PARALLAX * (1 - ratio)}px)`;
-    }
+    nav.swipeMove(dx);
     return;
   }
 
@@ -2402,45 +2552,10 @@ document.addEventListener("touchend", (e) => {
     const dx = t ? t.clientX - touchStartX : 0;
     const threshold = window.innerWidth * 0.38;
 
-    const cleanupSwipe = () => {
-      if (swipeQueenEl) { swipeQueenEl.remove(); swipeQueenEl = null; }
-      if (swipeAceEl) { swipeAceEl.remove(); swipeAceEl = null; }
-    };
-
     if (dx >= threshold) {
-      // Commit: slide queen off to the right, then navigate back.
-      if (swipeQueenEl) {
-        swipeQueenEl.style.transition = "transform 0.25s ease-out";
-        swipeQueenEl.style.transform = `translateX(${window.innerWidth}px)`;
-      }
-      // Parallax: ace glides to origin
-      if (swipeAceEl) {
-        swipeAceEl.style.transition = "transform 0.25s ease-out";
-        swipeAceEl.style.transform = "translateX(0)";
-      }
-      setTimeout(() => {
-        // Render home while queen is off-screen (translateX = 100vw, invisible).
-        goBack({ animate: false });
-        // Wait 2 rAFs for body.isHome class + layout to fully settle before
-        // removing the ace, so there's no flash of an intermediate home state.
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
-            cleanupSwipe();
-          });
-        });
-      }, 250);
+      nav.swipeCommit(() => goBack({ animate: false }));
     } else {
-      // Cancel: snap queen back to its original position.
-      if (swipeQueenEl) {
-        swipeQueenEl.style.transition = "transform 0.22s ease-out";
-        swipeQueenEl.style.transform = "translateX(0)";
-      }
-      // Parallax: ace snaps back to shifted position
-      if (swipeAceEl) {
-        swipeAceEl.style.transition = "transform 0.22s ease-out";
-        swipeAceEl.style.transform = `translateX(-${ACE_PARALLAX}px)`;
-      }
-      setTimeout(cleanupSwipe, 220);
+      nav.swipeCancel();
     }
     touchTracking = false;
     touchMode = null;
@@ -2539,7 +2654,7 @@ function stopAndResetPlayback() {
       const goingNext = dx < 0;
       const canGo = goingNext
         ? ((state.player?.queue || []).length > 0 || !!state.player?.repeat)
-        : ((state.player?.playHistory || []).length > 0 || (globalAudio && globalAudio.currentTime > 3));
+        : ((state.player?.playHistory || []).length > 0);
       const effectiveDx = canGo ? dx : dx * 0.18;
       if (inner) { inner.style.transition = 'none'; inner.style.transform = `translateX(${effectiveDx}px)`; }
       miniPlayerEl.dataset.didDrag = "1";
@@ -2571,11 +2686,11 @@ function stopAndResetPlayback() {
         const goNext = dx < 0;
         // Dead swipe check
         const canGoForward = (state.player?.queue || []).length > 0 || !!state.player?.repeat;
-        const canGoBack = ((state.player?.playHistory || []).length > 0) || (globalAudio && globalAudio.currentTime > 3);
+        const canGoBack = ((state.player?.playHistory || []).length > 0);
         const isDead = goNext ? !canGoForward : !canGoBack;
         if (isDead) {
           // Rubber band spring back
-          if (inner) { inner.style.transition = 'transform 360ms cubic-bezier(.36,.07,.19,.97)'; inner.style.transform = 'translateX(0)'; }
+          if (inner) { inner.style.transition = 'transform 386ms cubic-bezier(.36,.07,.19,.97)'; inner.style.transform = 'translateX(0)'; }
           return;
         }
         const flyTo   = goNext ? '-110%' : '110%';
@@ -2587,12 +2702,8 @@ function stopAndResetPlayback() {
           const nextRef = (state.player?.queue || [])[0];
           if (nextRef) peekSong = getSong(nextRef.songId);
         } else {
-          if (globalAudio && globalAudio.currentTime > 3) {
-            peekSong = getSong(state.player?.nowPlaying?.songId); // restart — same song
-          } else {
-            const prevRef = (state.player?.playHistory || []).at?.(-1);
-            if (prevRef) peekSong = getSong(prevRef.songId);
-          }
+          const prevRef = (state.player?.playHistory || []).at?.(-1);
+          if (prevRef) peekSong = getSong(prevRef.songId);
         }
 
         // Build ghost card starting off-screen on the incoming side
@@ -2608,9 +2719,9 @@ function stopAndResetPlayback() {
         if (swipeZone) swipeZone.appendChild(ghost);
 
         // Slide current out and ghost in simultaneously (true carousel)
-        if (inner) { inner.style.transition = 'transform 220ms ease'; inner.style.transform = `translateX(${flyTo})`; }
+        if (inner) { inner.style.transition = 'transform 236ms ease'; inner.style.transform = `translateX(${flyTo})`; }
         requestAnimationFrame(() => requestAnimationFrame(() => {
-          ghost.style.transition = 'transform 220ms ease';
+          ghost.style.transition = 'transform 236ms ease';
           ghost.style.transform = 'translateX(0)';
         }));
 
@@ -2621,13 +2732,13 @@ function stopAndResetPlayback() {
           ghost.remove();
           if (inner) { inner.style.transition = 'none'; inner.style.transform = 'translateX(0)'; }
           syncMiniPlayerUI();
-        }, 240);
+        }, 257);
       } else {
-        if (inner) { inner.style.transition = 'transform 180ms ease'; inner.style.transform = 'translateX(0)'; }
+        if (inner) { inner.style.transition = 'transform 193ms ease'; inner.style.transform = 'translateX(0)'; }
       }
     } else {
       if (didDrag && dy > 12) { stopAndResetPlayback(); return; }
-      miniPlayerEl.style.transition = "transform 160ms ease";
+      miniPlayerEl.style.transition = "transform 171ms ease";
       miniPlayerEl.style.transform = "translateX(-50%) translateY(0px)";
     }
   }, { passive: true });
@@ -3229,6 +3340,338 @@ sheet?.addEventListener("touchend", (e) => {
 }, { passive: true });
 
 // ---------------------
+// Full-screen Create Overlay
+// ---------------------
+const GENRE_LIST = [
+  "Acoustic","Alternative","Ambient","Anime","Blues","Bluegrass","Bounce","Britpop",
+  "Celtic","Chillwave","Classical","Country","Cyberpunk","Dance","Darkwave",
+  "Deathcore","Disco","Doom Metal","Downtempo","Dream Pop","Drum & Bass","Dub",
+  "Dubstep","EDM","Electro","Electronic","Emo","Experimental","Folk","Funk",
+  "Future Bass","Garage Rock","Glitch","Gospel","Goth","Grindcore","Grunge",
+  "Hard Rock","Hardcore","Heavy Metal","Hip Hop","House","Hyperpop","Indie",
+  "Indie Pop","Indie Rock","Industrial","J-Pop","J-Rock","Jazz","K-Pop","Latin",
+  "Lo-Fi","Lounge","Math Rock","Melodic Hardcore","Metal","Metalcore","Midwest Emo",
+  "Minimal","Motown","Neo-Soul","New Wave","Noise","Nu Metal","Opera","Orchestral",
+  "Pop","Pop Punk","Pop Rock","Post-Hardcore","Post-Metal","Post-Punk","Post-Rock",
+  "Power Metal","Progressive","Progressive Metal","Progressive Rock","Psych Rock",
+  "Punk","R&B","Rap","Reggae","Reggaeton","Rock","Screamo","Shoegaze","Singer-Songwriter",
+  "Ska","Slowcore","Soul","Stoner Rock","Surf Rock","Synth Pop","Synthwave","Tech House",
+  "Techno","Thrash Metal","Trap","Trip Hop","Vaporwave","World"
+];
+
+let createOverlayEl = null;
+let createTab = "song"; // "song" | "idea" | "lyrics"
+let createGenreSearch = "";
+let createSelectedGenres = [];
+let createSelectedProject = "";
+let createGenreDropdownOpen = false;
+
+function openCreateOverlay() {
+  if (createOverlayEl) return;
+
+  createTab = "song";
+  createGenreSearch = "";
+  createSelectedGenres = [];
+  createSelectedProject = "";
+  createGenreDropdownOpen = false;
+
+  createOverlayEl = document.createElement("div");
+  createOverlayEl.id = "createOverlay";
+  createOverlayEl.className = "createOverlay";
+  document.body.appendChild(createOverlayEl);
+
+  requestAnimationFrame(() => {
+    createOverlayEl?.classList.add("open");
+  });
+
+  renderCreateOverlay();
+}
+
+function closeCreateOverlay() {
+  if (!createOverlayEl) return;
+  createOverlayEl.classList.remove("open");
+  createOverlayEl.addEventListener("transitionend", () => {
+    createOverlayEl?.remove();
+    createOverlayEl = null;
+  }, { once: true });
+  // Fallback if no transition fires
+  setTimeout(() => { if (createOverlayEl) { createOverlayEl.remove(); createOverlayEl = null; } }, 350);
+}
+
+function getProjectGenreDefault(projectName) {
+  if (!projectName) return [];
+  const projSongs = state.songs.filter(s => (s.project || "").trim() === projectName);
+  if (!projSongs.length) return [];
+
+  const genreCount = {};
+  projSongs.forEach(s => {
+    const genres = (s.genre || "").split(",").map(g => g.trim()).filter(Boolean);
+    genres.forEach(g => { genreCount[g] = (genreCount[g] || 0) + 1; });
+  });
+
+  // Sort by frequency descending
+  return Object.entries(genreCount)
+    .sort((a, b) => b[1] - a[1])
+    .map(e => e[0]);
+}
+
+function getProjectCoverArt(projectName) {
+  // Find most recent song in project that has cover art
+  const projSongs = state.songs
+    .filter(s => (s.project || "").trim() === projectName)
+    .sort((a, b) => (b.updatedAt || b.createdAt || "").localeCompare(a.updatedAt || a.createdAt || ""));
+
+  for (const s of projSongs) {
+    if (s.coverImageUrl) {
+      return `<img src="${escapeHtml(s.coverImageUrl)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit">`;
+    }
+  }
+
+  // Fallback: use coverSvg from first song
+  if (projSongs.length) {
+    try { return coverSvg(projSongs[0], { lite: true }); } catch {}
+  }
+
+  return `<div style="width:100%;height:100%;background:linear-gradient(135deg,#2a2a3e,#1a1a2e);border-radius:inherit;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.3);font-size:20px">+</div>`;
+}
+
+function renderCreateOverlay() {
+  if (!createOverlayEl) return;
+
+  const existingProjects = [...new Set(
+    state.songs.map(s => (s.project || "").trim()).filter(Boolean)
+  )].sort();
+
+  const tabItems = [
+    { key: "song", label: "Song" },
+    { key: "idea", label: "Idea" },
+    { key: "lyrics", label: "Lyrics" },
+  ];
+
+  const tabsHTML = tabItems.map(t =>
+    `<button class="coTab${createTab === t.key ? " active" : ""}" data-cotab="${t.key}">${t.label}</button>`
+  ).join("");
+
+  let contentHTML = "";
+
+  if (createTab === "song") {
+    // Project cards
+    const projCardsHTML = existingProjects.map(p => {
+      const isSelected = createSelectedProject === p;
+      const songCount = state.songs.filter(s => (s.project || "").trim() === p).length;
+      return `
+        <button class="coProjCard${isSelected ? " selected" : ""}" data-proj="${escapeHtml(p)}">
+          <div class="coProjArt">${getProjectCoverArt(p)}</div>
+          <div class="coProjName">${escapeHtml(p)}</div>
+          <div class="coProjCount">${songCount} song${songCount !== 1 ? "s" : ""}</div>
+        </button>`;
+    }).join("");
+
+    const newProjSelected = createSelectedProject === "__new__";
+
+    // Genre chips
+    const genreChipsHTML = createSelectedGenres.map(g =>
+      `<span class="coGenreChip">${escapeHtml(g)}<button class="coGenreChipX" data-genre="${escapeHtml(g)}">&times;</button></span>`
+    ).join("");
+
+    // Genre dropdown items (filtered)
+    const searchLower = createGenreSearch.toLowerCase();
+    const filteredGenres = GENRE_LIST.filter(g =>
+      g.toLowerCase().includes(searchLower) && !createSelectedGenres.includes(g)
+    );
+    const genreDropdownHTML = createGenreDropdownOpen && filteredGenres.length
+      ? `<div class="coGenreDropdown">${filteredGenres.slice(0, 12).map(g =>
+          `<button class="coGenreOption" data-genre="${escapeHtml(g)}">${escapeHtml(g)}</button>`
+        ).join("")}</div>`
+      : "";
+
+    contentHTML = `
+      <div class="coField">
+        <label class="coLabel">Title</label>
+        <input id="coTitle" class="coInput" type="text" placeholder="e.g. Dinosaur Uprising" autocomplete="off" />
+      </div>
+
+      <div class="coField">
+        <label class="coLabel">Project</label>
+        <div class="coProjScroll">
+          ${projCardsHTML}
+          <button class="coProjCard coProjNew${newProjSelected ? " selected" : ""}" data-proj="__new__">
+            <div class="coProjArt"><div style="width:100%;height:100%;background:rgba(255,255,255,.06);border-radius:inherit;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.4);font-size:24px;font-weight:300">+</div></div>
+            <div class="coProjName">New Project</div>
+            <div class="coProjCount">Create new</div>
+          </button>
+        </div>
+        ${newProjSelected ? `<input id="coNewProject" class="coInput" type="text" placeholder="Project name" style="margin-top:10px" />` : ""}
+      </div>
+
+      <div class="coField">
+        <label class="coLabel">Genre</label>
+        <div class="coGenreChips">${genreChipsHTML}</div>
+        <div class="coGenreWrap">
+          <input id="coGenreSearch" class="coInput" type="text" placeholder="Search genres..." value="${escapeHtml(createGenreSearch)}" autocomplete="off" />
+          ${genreDropdownHTML}
+        </div>
+      </div>
+
+      <button class="coCreateBtn" id="coCreateSong">Create Song</button>
+    `;
+  } else {
+    contentHTML = `
+      <div class="coPlaceholder">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,.25)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+        </svg>
+        <div class="coPlaceholderText">Under Construction</div>
+        <div class="coPlaceholderSub">This tab is coming soon</div>
+      </div>
+    `;
+  }
+
+  createOverlayEl.innerHTML = `
+    <div class="coHeader">
+      <div class="coTabs">${tabsHTML}</div>
+      <button class="coClose" id="coCloseBtn">&times;</button>
+    </div>
+    <div class="coBody">${contentHTML}</div>
+  `;
+
+  // Wire events
+  createOverlayEl.querySelector("#coCloseBtn")?.addEventListener("click", closeCreateOverlay);
+
+  createOverlayEl.querySelectorAll(".coTab").forEach(btn => {
+    btn.addEventListener("click", () => {
+      createTab = btn.dataset.cotab;
+      renderCreateOverlay();
+    });
+  });
+
+  if (createTab === "song") {
+    // Project selection
+    createOverlayEl.querySelectorAll(".coProjCard").forEach(card => {
+      card.addEventListener("click", () => {
+        const proj = card.dataset.proj;
+        createSelectedProject = proj;
+
+        // Auto-populate genre from project
+        if (proj !== "__new__") {
+          const defaultGenres = getProjectGenreDefault(proj);
+          createSelectedGenres = [...defaultGenres];
+        } else {
+          createSelectedGenres = [];
+        }
+
+        renderCreateOverlay();
+
+        if (proj === "__new__") {
+          setTimeout(() => createOverlayEl?.querySelector("#coNewProject")?.focus(), 0);
+        }
+      });
+    });
+
+    // Genre search
+    const genreInput = createOverlayEl.querySelector("#coGenreSearch");
+    genreInput?.addEventListener("input", (e) => {
+      createGenreSearch = e.target.value;
+      createGenreDropdownOpen = true;
+      renderCreateOverlay();
+      // Re-focus and restore cursor
+      const newInput = createOverlayEl?.querySelector("#coGenreSearch");
+      if (newInput) {
+        newInput.focus();
+        newInput.selectionStart = newInput.selectionEnd = newInput.value.length;
+      }
+    });
+    genreInput?.addEventListener("focus", () => {
+      createGenreDropdownOpen = true;
+      renderCreateOverlay();
+      const newInput = createOverlayEl?.querySelector("#coGenreSearch");
+      if (newInput) {
+        newInput.focus();
+        newInput.selectionStart = newInput.selectionEnd = newInput.value.length;
+      }
+    });
+
+    // Genre option select
+    createOverlayEl.querySelectorAll(".coGenreOption").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const g = btn.dataset.genre;
+        if (!createSelectedGenres.includes(g)) createSelectedGenres.push(g);
+        createGenreSearch = "";
+        createGenreDropdownOpen = false;
+        renderCreateOverlay();
+      });
+    });
+
+    // Genre chip remove
+    createOverlayEl.querySelectorAll(".coGenreChipX").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const g = btn.dataset.genre;
+        createSelectedGenres = createSelectedGenres.filter(x => x !== g);
+        renderCreateOverlay();
+      });
+    });
+
+    // Close genre dropdown on outside click
+    createOverlayEl.querySelector(".coBody")?.addEventListener("click", (e) => {
+      if (!e.target.closest(".coGenreWrap") && !e.target.closest(".coGenreChipX")) {
+        if (createGenreDropdownOpen) {
+          createGenreDropdownOpen = false;
+          renderCreateOverlay();
+        }
+      }
+    });
+
+    // Create button
+    createOverlayEl.querySelector("#coCreateSong")?.addEventListener("click", () => {
+      const title = (createOverlayEl?.querySelector("#coTitle")?.value || "").trim();
+      if (!title) return toast("Give it a title");
+
+      let project = createSelectedProject;
+      if (project === "__new__") {
+        project = (createOverlayEl?.querySelector("#coNewProject")?.value || "").trim();
+        if (!project) return toast("Enter a project name");
+      }
+      if (!project) return toast("Pick a project");
+
+      const song = {
+        id: uid(),
+        title,
+        project,
+        genre: createSelectedGenres.join(", "),
+        sprint: state.settings.defaultSprint || "Unsorted",
+        instrumentation: "",
+        collaborators: "",
+        status: "Idea",
+        stuckState: "Active",
+        nextAction: "",
+        vibes: "",
+        lyrics: "",
+        notes: "",
+        versions: [],
+        createdAt: nowStamp(),
+        updatedAt: nowStamp(),
+      };
+
+      state.songs.unshift(song);
+      saveState();
+      toast("Created");
+
+      closeCreateOverlay();
+      currentTab = "songs";
+      songsView = "list";
+      selectedSongId = song.id;
+      setHeader("Song");
+      syncTabs();
+      render();
+    });
+
+    // Focus title
+    setTimeout(() => createOverlayEl?.querySelector("#coTitle")?.focus(), 100);
+  }
+}
+
+// ---------------------
 // Export / Import
 // ---------------------
 $("#exportBtn")?.addEventListener("click", async () => {
@@ -3281,22 +3724,8 @@ $("#importFile")?.addEventListener("change", async (e) => {
 // Render router
 // ---------------------
 function render() {
-  // Snapshot current screen content so back-swipe peek can show it behind the next screen
-  if (activeScreenEl?.innerHTML) {
-    backPeekNode = activeScreenEl.cloneNode(true);
-    prevAceViewTop = activeScreenEl.getBoundingClientRect().top || 0;
-    prevAceScrollTop = activeScreenEl.scrollTop || 0;
-    prevAcePadding = getComputedStyle(activeScreenEl).padding;
-    // Note: prevNavState is captured by captureNavState() BEFORE state changes,
-    // not here, because state vars are already mutated before render() is called.
-    // Capture topbar state BEFORE setHeader/syncBackButton change it, so the ace overlay
-    // can show the correct previous-screen title and back-button state during the slide.
-    const _tb = document.querySelector(".topbar");
-    const _tbRect = _tb?.getBoundingClientRect();
-    const _tbVisible = _tbRect && _tbRect.height > 0;
-    prevTopbarHTML = _tbVisible ? (_tb?.outerHTML || "") : "";
-    prevTopbarRect = _tbVisible ? { top: _tbRect.top, height: _tbRect.height } : null;
-  }
+  // Snapshot current screen so nav.forward()/nav.back() can show it as the ace
+  nav.snapshot(activeScreenEl);
 
   if (!view) return;
 
@@ -3321,19 +3750,23 @@ function render() {
     drawerView === "collabs"
   );
 
+  // On forward navigation, reset scroll so screens always start at the top
+  const _isBack = nav._isBackNav;
+
   // Drawer screens
-  if (drawerView === "projects") { setActiveScreen("drawer"); return projectDetailScreen ? renderProjectSongs(projectDetailScreen) : renderProjects(); }
-  if (drawerView === "releases") { setActiveScreen("drawer"); return releaseDetailId ? renderReleaseDetail(releaseDetailId) : renderReleases(); }
-  if (drawerView === "eps") { setActiveScreen("drawer"); return renderEPs(); }
-  if (drawerView === "collabs") { setActiveScreen("drawer"); return renderCollaborators(); }
-  if (drawerView === "importExport") { setActiveScreen("drawer"); return renderImportExport(); }
-  if (drawerView === "about") { setActiveScreen("drawer"); return renderAbout(); }
-  if (drawerView === "globalSearch") { setActiveScreen("drawer"); return renderGlobalSearch(); }
+  if (drawerView === "projects") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return projectDetailScreen ? renderProjectSongs(projectDetailScreen) : renderProjects(); }
+  if (drawerView === "releases") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return releaseDetailId ? renderReleaseDetail(releaseDetailId) : renderReleases(); }
+  if (drawerView === "eps") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderEPs(); }
+  if (drawerView === "collabs") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderCollaborators(); }
+  if (drawerView === "importExport") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderImportExport(); }
+  if (drawerView === "about") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderAbout(); }
+  if (drawerView === "globalSearch") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderGlobalSearch(); }
 
   // Normal screens
-  if (currentTab === "home") { setActiveScreen("home"); return renderHome(); }
+  if (currentTab === "home") { setActiveScreen("home"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderHome(); }
   if (currentTab === "songs") {
     setActiveScreen("songs");
+    if (!_isBack) activeScreenEl.scrollTop = 0;
     if (selectedSongId && selectedVersionId) return renderVersionDetail(selectedSongId, selectedVersionId);
     if (selectedSongId) return renderSongDetail(selectedSongId);
     if (songsView === "create") return renderSongCreate();
@@ -3518,31 +3951,38 @@ function renderProjects() {
 
   let projQuery = "";
 
-  const buildRows = (q) => projects
+  const buildCards = (q) => projects
     .filter(p => !q || p.toLowerCase().includes(q.toLowerCase()))
-    .map(p => {
+    .map((p, i) => {
       const projSongs = state.songs.filter(s => (s.project || "").trim() === p);
       const count = projSongs.length;
       const isDefault = (state.settings.defaultProject || "").trim() === p;
-      // Use the most recently updated song for album art
       const repSong = projSongs.slice().sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))[0]
         || { id: p, title: p, project: p, genre: "" };
+      // Build mini song list for sleeve reveal (up to 4 songs)
+      const sleeveItems = projSongs.slice(0, 4).map(s =>
+        `<div class="pSleeveSong">${escapeHtml(s.title || "Untitled")}</div>`
+      ).join("") + (projSongs.length > 4 ? `<div class="pSleeveSong pSleeveMore">+${projSongs.length - 4} more</div>` : "");
+
       return `
-        <div class="songRow" data-open-proj="${escapeHtml(p)}">
-          <div class="songThumb" data-proj-thumb="${escapeHtml(p)}" aria-hidden="true">
-            ${coverSvg(repSong, { lite: true })}
-          </div>
-          <div class="songMain">
-            <div class="songTop">
-              <div class="songTitleRow">
-                <div class="songTitle">${escapeHtml(p)}</div>
-                <div class="songPills">
-                  ${isDefault ? `<span class="pill good">Default</span>` : ""}
-                </div>
+        <div class="pCard${nav._isBackNav ? " noAnim" : ""}" data-open-proj="${escapeHtml(p)}" style="${nav._isBackNav ? "" : `animation-delay:${i * 60}ms`}">
+          <div class="pCardInner">
+            <div class="pSleeve">
+              <div class="pSleeveContent">
+                ${sleeveItems || `<div class="pSleeveSong" style="opacity:.4">No songs yet</div>`}
               </div>
-              <button class="songMore" data-proj-more="${escapeHtml(p)}" aria-label="Project menu">⋯</button>
             </div>
-            <div class="songSub">${count} song${count === 1 ? "" : "s"}</div>
+            <div class="pArt">
+              ${coverSvg(repSong, { lite: true })}
+              <div class="pShimmer"></div>
+            </div>
+            <div class="pInfo">
+              <div class="pName">${escapeHtml(p)}</div>
+              <div class="pMeta">
+                <span>${count} song${count === 1 ? "" : "s"}</span>
+                ${isDefault ? `<span class="pill good">Default</span>` : ""}
+              </div>
+            </div>
           </div>
         </div>
       `;
@@ -3554,30 +3994,124 @@ function renderProjects() {
         <input id="projSearch" type="text" placeholder="Search projects..." />
       </div>
     </div>
-    <div id="projList" class="songsList">
-      ${buildRows("") || `<div class="small">No projects yet.</div>`}
+    <div id="projList" class="pGrid">
+      ${buildCards("") || `<div class="small" style="grid-column:1/-1">No projects yet.</div>`}
     </div>
   `;
 
   const projListEl = $("#projList");
 
+  /* ── Touch tilt / lift interaction ── */
+  function attachCardPhysics(card) {
+    const inner = card.querySelector(".pCardInner");
+    const art = card.querySelector(".pArt");
+    let rect, startX, startY, sleeveRevealed = false, isSwiping = false;
+    let longPressTimer = null, longPressFired = false;
+
+    card.addEventListener("touchstart", (e) => {
+      rect = card.getBoundingClientRect();
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      isSwiping = false;
+      sleeveRevealed = false;
+      longPressFired = false;
+      longPressTimer = setTimeout(() => {
+        longPressFired = true;
+        card._longPressFired = true;
+        if (navigator.vibrate) navigator.vibrate(30);
+        resetCard();
+        const projName = card.getAttribute("data-open-proj");
+        if (projName) openProjectMenu(projName);
+      }, 500);
+      inner.style.transition = "transform .15s ease-out, box-shadow .15s ease-out";
+      inner.style.transform = "scale(1.03) translateY(-3px)";
+      inner.style.boxShadow = "0 12px 32px rgba(0,0,0,.45), 0 0 0 1px rgba(255,255,255,.08)";
+      card.classList.add("pCardActive");
+    }, { passive: true });
+
+    card.addEventListener("touchmove", (e) => {
+      if (!rect) return;
+      const dx = e.touches[0].clientX - startX;
+      const dy = e.touches[0].clientY - startY;
+      if (Math.abs(dx) > 10 || Math.abs(dy) > 10) { clearTimeout(longPressTimer); longPressTimer = null; }
+      // Detect horizontal swipe for sleeve reveal
+      if (Math.abs(dx) > 12 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+        isSwiping = true;
+        const slide = Math.max(-60, Math.min(0, dx));
+        art.style.transition = "none";
+        art.style.transform = `translateX(${slide}px)`;
+        if (slide < -30) sleeveRevealed = true;
+        e.preventDefault();
+        return;
+      }
+      // Tilt toward finger
+      const cx = (e.touches[0].clientX - rect.left) / rect.width - 0.5;
+      const cy = (e.touches[0].clientY - rect.top) / rect.height - 0.5;
+      const rotY = cx * 8;
+      const rotX = -cy * 6;
+      inner.style.transition = "none";
+      inner.style.transform = `scale(1.03) translateY(-3px) perspective(400px) rotateX(${rotX}deg) rotateY(${rotY}deg)`;
+    }, { passive: false });
+
+    const resetCard = () => {
+      clearTimeout(longPressTimer); longPressTimer = null;
+      inner.style.transition = "transform .35s cubic-bezier(.25,.46,.45,.94), box-shadow .35s ease";
+      inner.style.transform = "";
+      inner.style.boxShadow = "";
+      card.classList.remove("pCardActive");
+      if (isSwiping) {
+        art.style.transition = "transform .35s cubic-bezier(.25,.46,.45,.94)";
+        art.style.transform = "";
+      }
+      rect = null;
+    };
+
+    card.addEventListener("touchend", resetCard, { passive: true });
+    card.addEventListener("touchcancel", resetCard, { passive: true });
+  }
+
+  /* ── Card-expand tap transition ── */
+  function openProject(card, projName) {
+    const rect = card.getBoundingClientRect();
+    const clone = card.cloneNode(true);
+    clone.className = "pCardExpanding";
+    clone.style.cssText = `
+      position:fixed; z-index:9999;
+      left:${rect.left}px; top:${rect.top}px;
+      width:${rect.width}px; height:${rect.height}px;
+      transition: all .3s cubic-bezier(.25,.46,.45,.94);
+      pointer-events:none;
+    `;
+    document.body.appendChild(clone);
+    requestAnimationFrame(() => {
+      clone.style.left = "0";
+      clone.style.top = "0";
+      clone.style.width = "100vw";
+      clone.style.height = "100vh";
+      clone.style.borderRadius = "0";
+      clone.style.opacity = "0";
+    });
+    setTimeout(() => {
+      clone.remove();
+    }, 320);
+    // Navigate after short delay so animation is visible
+    setTimeout(() => {
+      captureNavState();
+      projectDetailScreen = projName;
+      render();
+      triggerForwardSlide();
+    }, 120);
+  }
+
   const applyProjFilter = () => {
     projQuery = ($("#projSearch")?.value || "");
-    const html = buildRows(projQuery);
-    projListEl.innerHTML = html || `<div class="small">No matches.</div>`;
-    projListEl.querySelectorAll("[data-open-proj]").forEach(row => {
-      row.addEventListener("click", (e) => {
-        if (e.target.closest("[data-proj-more]")) return;
-        captureNavState();
-        projectDetailScreen = row.getAttribute("data-open-proj");
-        render();
-        triggerForwardSlide();
-      });
-    });
-    projListEl.querySelectorAll("[data-proj-more]").forEach(btn => {
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        openProjectMenu(btn.getAttribute("data-proj-more"));
+    const html = buildCards(projQuery);
+    projListEl.innerHTML = html || `<div class="small" style="grid-column:1/-1">No matches.</div>`;
+    projListEl.querySelectorAll(".pCard").forEach(card => {
+      attachCardPhysics(card);
+      card.addEventListener("click", (e) => {
+        if (card._longPressFired) { card._longPressFired = false; return; }
+        openProject(card, card.getAttribute("data-open-proj"));
       });
     });
   };
@@ -3588,8 +4122,20 @@ function renderProjects() {
 
 function renderProjectSongs(projectName) {
   setHeader(projectName);
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("pdActive");
+  appEl?.classList.remove("pdScrolled");
+  // Kill screen bottom padding so sticky panel can't scroll past top
+  activeScreenEl.style.paddingBottom = "0px";
+  // Measure topbar height so sticky panel sits below it
+  const topbarEl = document.querySelector(".topbar");
+  const topbarH = topbarEl ? topbarEl.offsetHeight : 0;
+  activeScreenEl.style.setProperty("--pd-topbar-h", topbarH + "px");
 
-  if (activeScreenEl) activeScreenEl.scrollTop = 0;
+  if (activeScreenEl) {
+    activeScreenEl.scrollTop = 0;
+    activeScreenEl.style.overflowY = "scroll";
+  }
 
   const songs = state.songs.filter(s => (s.project || "").trim() === projectName);
 
@@ -3600,12 +4146,15 @@ function renderProjectSongs(projectName) {
       return { songId: s.id, versionId: vv.id };
     });
 
-  const fakeSong = { id: projectName, title: projectName, project: projectName, genre: "" };
-  const heroCover = coverSvg(fakeSong);
+  // Use the most recently updated song for album art (matches Projects grid)
+  const repSong = songs.slice().sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))[0]
+    || { id: projectName, title: projectName, project: projectName, genre: "" };
+  const heroCover = coverSvg(repSong);
 
-  const rows = songs.map(s => {
+  const songRows = songs.map((s, i) => {
     return `
-      <div class="songRow" data-open-song="${s.id}">
+      <div class="pdSongRow" data-open-song="${s.id}">
+        <span class="pdSongNum">${i + 1}</span>
         <div class="songThumb" aria-hidden="true">
           ${coverSvg(s, { lite: true })}
         </div>
@@ -3614,90 +4163,159 @@ function renderProjectSongs(projectName) {
             <div class="songTitleRow">
               <div class="songTitle">${escapeHtml(s.title || "Untitled")}</div>
             </div>
-            <button class="songMore" data-proj-song-more="${s.id}" aria-label="Song menu">⋯</button>
+            <button class="songMore" data-proj-song-more="${s.id}" aria-label="Song menu">&#x22EF;</button>
           </div>
-          <div class="songSub">${escapeHtml(s.genre || s.project || "—")}</div>
+          <div class="songSub">${escapeHtml(s.genre || "—")}</div>
         </div>
       </div>
     `;
   }).join("");
 
   activeScreenEl.innerHTML = `
-    <div class="albumHero">
-      <div class="albumBg" aria-hidden="true">
-        ${heroCover}
-      </div>
-
-      <div class="albumTop">
-        <div class="albumArt" aria-hidden="true">
-          ${heroCover}
-        </div>
-        <div class="albumText">
-          <div class="albumTitle">${escapeHtml(projectName)}</div>
-          <div class="albumMeta">${songs.length} song${songs.length === 1 ? "" : "s"}</div>
-        </div>
-      </div>
-
-      <div class="albumActions">
-        <button class="songHeroPlay" id="projPlayAll" ${!items.length ? "disabled" : ""}>▶ Play All</button>
-        <button class="songHeroQueue" id="projShuffle" ${!items.length ? "disabled" : ""}>⇄ Shuffle</button>
+    <div class="pdHero">
+      <div class="pdHeroBg" aria-hidden="true">${heroCover}</div>
+      <div class="pdHeroContent">
+        <div class="pdHeroTitle">${escapeHtml(projectName)}</div>
+        <div class="pdHeroMeta">${songs.length} song${songs.length === 1 ? "" : "s"}</div>
       </div>
     </div>
 
-    <div class="versionsWrap">
-      <div class="versionsHeader">
-        <div class="versionsTitle">Songs</div>
+    <div class="pdActions">
+      <button class="pdPlayBtn" id="projPlayAll" ${!items.length ? "disabled" : ""}>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+      </button>
+      <button class="pdShuffleBtn" id="projShuffle" ${!items.length ? "disabled" : ""}>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+      </button>
+      <button class="pdMoreBtn" id="projMoreMenu" aria-label="Project menu">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
+      </button>
+    </div>
+
+    <div class="pdSticky">
+      <div class="pdTabs">
+        <button class="pdTab pdTabActive" data-pd-tab="songs">Songs</button>
+        <button class="pdTab" data-pd-tab="versions">Versions</button>
+        <button class="pdTab" data-pd-tab="releases">Releases</button>
       </div>
-      <div id="projSongList" class="versionsRows songsList">
-        ${rows || `<div class="small" style="padding:12px 2px">No songs in this project yet.</div>`}
+      <div class="pdTabBody" id="pdTabBody">
+        <div class="pdSongList">
+          ${songRows || `<div class="small" style="padding:24px 0; text-align:center">No songs in this project yet.</div>`}
+        </div>
       </div>
     </div>
   `;
 
+  /* ── Tab switching ── */
+  const tabBody = $("#pdTabBody");
+  activeScreenEl.querySelectorAll(".pdTab").forEach(tab => {
+    tab.addEventListener("click", () => {
+      activeScreenEl.querySelectorAll(".pdTab").forEach(t => t.classList.remove("pdTabActive"));
+      tab.classList.add("pdTabActive");
+      const which = tab.getAttribute("data-pd-tab");
+      if (which === "songs") {
+        tabBody.innerHTML = `<div class="pdSongList">${songRows || `<div class="small" style="padding:24px 0; text-align:center">No songs yet.</div>`}</div>`;
+        attachSongListeners();
+      } else if (which === "versions") {
+        tabBody.innerHTML = `<div class="pdPlaceholder"><div class="pdPlaceholderIcon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,.3)" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="3"/><line x1="9" y1="3" x2="9" y2="21"/></svg></div><div class="pdPlaceholderTitle">Versions</div><div class="pdPlaceholderSub">Coming soon</div></div>`;
+      } else {
+        tabBody.innerHTML = `<div class="pdPlaceholder"><div class="pdPlaceholderIcon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,.3)" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div><div class="pdPlaceholderTitle">Releases</div><div class="pdPlaceholderSub">Coming soon</div></div>`;
+      }
+    });
+  });
+
+  /* ── Play / Shuffle ── */
   $("#projPlayAll")?.addEventListener("click", async () => {
-    if (!items.length) return toast("No playable songs 😅");
+    if (!items.length) return toast("No playable songs");
     const all = [...items];
     state.player.nowPlaying = all[0];
     state.player.queue = all.slice(1);
     state.player.repeatQueue = all;
     saveState();
     await playNowPlaying({ autoplay: true });
-    toast("Playing ▶️");
   });
 
   $("#projShuffle")?.addEventListener("click", async () => {
-    if (!items.length) return toast("No playable songs 😅");
+    if (!items.length) return toast("No playable songs");
     const all = shuffleArray([...items]);
     state.player.nowPlaying = all[0];
     state.player.queue = all.slice(1);
     state.player.repeatQueue = all;
     saveState();
     await playNowPlaying({ autoplay: true });
-    toast("Shuffled ▶️");
   });
 
-  activeScreenEl.querySelectorAll("[data-open-song]").forEach(row => {
-    row.addEventListener("click", (e) => {
-      if (e.target.closest("[data-proj-song-more]")) return;
-      captureNavState();
-      const sid = row.getAttribute("data-open-song");
-      projectDetailScreen = null;
-      drawerView = null;
-      currentTab = "songs";
-      songsView = "detail";
-      selectedSongId = sid;
-      selectedVersionId = null;
-      render();
-      triggerForwardSlide();
-    });
+  $("#projMoreMenu")?.addEventListener("click", () => {
+    openProjectMenu(projectName);
   });
 
-  activeScreenEl.querySelectorAll("[data-proj-song-more]").forEach(btn => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      openSongMenu(btn.getAttribute("data-proj-song-more"));
+  /* ── Song row listeners ── */
+  function attachSongListeners() {
+    activeScreenEl.querySelectorAll("[data-open-song]").forEach(row => {
+      row.addEventListener("click", (e) => {
+        if (e.target.closest("[data-proj-song-more]")) return;
+        captureNavState();
+        const sid = row.getAttribute("data-open-song");
+        projectDetailScreen = null;
+        drawerView = null;
+        currentTab = "songs";
+        songsView = "detail";
+        selectedSongId = sid;
+        selectedVersionId = null;
+        render();
+        triggerForwardSlide();
+      });
     });
-  });
+
+    activeScreenEl.querySelectorAll("[data-proj-song-more]").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openSongMenu(btn.getAttribute("data-proj-song-more"));
+      });
+    });
+  }
+
+  attachSongListeners();
+
+  /* ── Fade hero + actions to black, solid topbar as user scrolls ── */
+  const heroEl = activeScreenEl.querySelector(".pdHero");
+  const heroBgEl = heroEl?.querySelector(".pdHeroBg");
+  const heroContentEl = heroEl?.querySelector(".pdHeroContent");
+  const actionsEl = activeScreenEl.querySelector(".pdActions");
+  const stickyEl = activeScreenEl.querySelector(".pdSticky");
+  if (stickyEl && heroEl) {
+    let maxScroll = 0;
+    const FADE_PX = 200;
+    requestAnimationFrame(() => {
+      maxScroll = activeScreenEl.scrollHeight - activeScreenEl.clientHeight;
+      // Force pdTabBody content to overflow so iOS elastic scroll works
+      const tb = activeScreenEl.querySelector(".pdTabBody");
+      const sl = tb?.querySelector(".pdSongList, .pdPlaceholder");
+      if (tb && sl) sl.style.minHeight = (tb.clientHeight + 1) + "px";
+    });
+
+    activeScreenEl.addEventListener("scroll", () => {
+      const scrolled = activeScreenEl.scrollTop;
+      // Fade hero content + art + actions to black as they scroll away
+      if (maxScroll > 0) {
+        const remaining = maxScroll - scrolled;
+        const opacity = remaining < FADE_PX ? Math.max(0, remaining / FADE_PX) : 1;
+        if (heroBgEl) heroBgEl.style.opacity = opacity;
+        if (heroContentEl) heroContentEl.style.opacity = opacity;
+        if (actionsEl) actionsEl.querySelectorAll("button").forEach(b => b.style.opacity = opacity);
+      }
+      // Show/hide solid topbar
+      if (appEl) {
+        const heroBottom = heroEl.getBoundingClientRect().bottom;
+        const screenTop = activeScreenEl.getBoundingClientRect().top;
+        if (heroBottom - screenTop < 60) {
+          appEl.classList.add("pdScrolled");
+        } else {
+          appEl.classList.remove("pdScrolled");
+        }
+      }
+    }, { passive: true });
+  }
 }
 
 function renderReleases() {
@@ -4006,6 +4624,10 @@ function resetSongsFilters({ keepSort = true } = {}) {
 // ---------------------
 
 function renderHome() {
+  // Cleanup previous particle system if re-rendering
+  const prevGrid = activeScreenEl.querySelector(".homeGrid");
+  if (prevGrid && prevGrid._cleanupHome) prevGrid._cleanupHome();
+
   overlayView = null;
   currentTab = "home";
   setHeader("RiffBank");
@@ -4042,49 +4664,69 @@ function renderHome() {
         <div class="homeGrid">
 
           <!-- Songs — tall left card, spans 2 rows -->
-          <button class="hCard hSongs" data-home="songs" aria-label="Songs">
+          <div class="hCard hSongs" role="button" tabindex="0" data-home="songs" aria-label="Songs">
             <div class="hArt"><img src="./songs-card.jpg" style="width:100%;height:100%;object-fit:cover;object-position:35% center;display:block;"></div>
+            <canvas class="hWarp"></canvas>
+            <canvas class="hParticles"></canvas>
+            <div class="hShimmer"></div>
             <div class="hGrad"></div>
+            <div class="hDarken"></div>
             <div class="hBody">
               <div class="hLabel">Songs</div>
             </div>
-          </button>
+          </div>
 
           <!-- Projects — small, right column top -->
-          <button class="hCard hProjects" data-home="projects" aria-label="Projects">
+          <div class="hCard hProjects" role="button" tabindex="0" data-home="projects" aria-label="Projects">
             <div class="hArt"><img src="./projects-card.jpg" style="width:100%;height:100%;object-fit:cover;object-position:center 22%;display:block;"></div>
+            <canvas class="hWarp"></canvas>
+            <canvas class="hParticles"></canvas>
+            <div class="hShimmer"></div>
             <div class="hGrad"></div>
+            <div class="hDarken"></div>
             <div class="hBody">
               <div class="hLabel">Projects</div>
             </div>
-          </button>
+          </div>
 
           <!-- Releases — small, right column bottom -->
-          <button class="hCard hPlayer" data-home="releases" aria-label="Releases">
+          <div class="hCard hPlayer" role="button" tabindex="0" data-home="releases" aria-label="Releases">
             <div class="hArt"><img src="./releases-card.jpg" style="width:100%;height:100%;object-fit:cover;object-position:center 45%;display:block;"></div>
+            <canvas class="hWarp"></canvas>
+            <canvas class="hParticles"></canvas>
+            <div class="hShimmer"></div>
             <div class="hGrad"></div>
+            <div class="hDarken"></div>
             <div class="hBody">
               <div class="hLabel">Releases</div>
             </div>
-          </button>
+          </div>
 
           <!-- Lyrics — full width -->
-          <button class="hCard hLyrics hWide" data-home="lyrics" aria-label="Lyrics">
+          <div class="hCard hLyrics hWide" role="button" tabindex="0" data-home="lyrics" aria-label="Lyrics">
             <div class="hArt"><img src="./lyrics-card.jpg" style="width:100%;height:150%;object-fit:cover;transform:scale(1.1);display:block;"></div>
+            <canvas class="hWarp"></canvas>
+            <canvas class="hParticles"></canvas>
+            <div class="hShimmer"></div>
             <div class="hGrad"></div>
+            <div class="hDarken"></div>
             <div class="hBody">
               <div class="hLabel">Lyrics</div>
             </div>
-          </button>
+          </div>
 
           <!-- Actions — full width -->
-          <button class="hCard hNext hWide" data-home="next" aria-label="Actions">
+          <div class="hCard hNext hWide" role="button" tabindex="0" data-home="next" aria-label="Actions">
             <div class="hArt"><img src="./actions-card.jpg" style="width:100%;height:100%;object-fit:cover;transform:scale(1.1);display:block;"></div>
+            <canvas class="hWarp"></canvas>
+            <canvas class="hParticles"></canvas>
+            <div class="hShimmer"></div>
             <div class="hGrad"></div>
+            <div class="hDarken"></div>
             <div class="hBody">
               <div class="hLabel">Actions</div>
             </div>
-          </button>
+          </div>
 
         </div>
       </div>
@@ -4131,60 +4773,522 @@ function renderHome() {
     });
   });
 
-  // Card elastic stretch effect — cards stretch subtly in the swipe direction
+  // === Portal energy system: particles + magnetic touch ===
   const homeGrid = activeScreenEl.querySelector(".homeGrid");
   if (homeGrid) {
     const cards = [...homeGrid.querySelectorAll(".hCard")];
+
+    // Stranger Things upside-down particle palettes per card
+    const particlePalettes = {
+      hSongs:    { core: [220,38,38],  mid: [239,68,68],  hi: [252,165,165], dim: [153,27,27]  },  // Red
+      hProjects: { core: [147,51,234], mid: [168,85,247], hi: [216,180,254], dim: [88,28,135]  },  // Purple
+      hPlayer:   { core: [37,99,235],  mid: [59,130,246], hi: [147,197,253], dim: [30,64,175]  },  // Blue
+      hLyrics:   { core: [234,179,8],  mid: [250,204,21], hi: [254,240,138], dim: [161,98,7]   },  // Gold
+      hNext:     { core: [234,88,12],  mid: [249,115,22], hi: [253,186,116], dim: [154,52,18]  },  // Orange
+    };
+
+    function getPalette(card) {
+      for (const cls of Object.keys(particlePalettes)) {
+        if (card.classList.contains(cls)) return particlePalettes[cls];
+      }
+      return { core: [255,255,255], mid: [200,200,200], hi: [255,255,255], dim: [120,120,120] };
+    }
+
+    // Per-card personality — each card has its own river speed/direction/touch feel
+    const cardPersonality = {
+      hSongs:    { flowAngle: -80, flowSpeed: 0.35, wobble: 0.5, touchRadius: 55, touchStrength: 0.12 },
+      hProjects: { flowAngle: -95, flowSpeed: 0.25, wobble: 0.6, touchRadius: 50, touchStrength: 0.10 },
+      hPlayer:   { flowAngle: -70, flowSpeed: 0.30, wobble: 0.45, touchRadius: 60, touchStrength: 0.14 },
+      hLyrics:   { flowAngle: -110, flowSpeed: 0.20, wobble: 0.7, touchRadius: 45, touchStrength: 0.09 },
+      hNext:     { flowAngle: -85, flowSpeed: 0.40, wobble: 0.4, touchRadius: 55, touchStrength: 0.13 },
+    };
+
+    function getPersonality(card) {
+      for (const cls of Object.keys(cardPersonality)) {
+        if (card.classList.contains(cls)) return cardPersonality[cls];
+      }
+      return { flowAngle: -90, flowSpeed: 0.3, wobble: 0.5, touchRadius: 50, touchStrength: 0.11 };
+    }
+
+    // Per-card particle systems
+    const cardSystems = cards.map(card => {
+      const canvas = card.querySelector(".hParticles");
+      const ctx = canvas.getContext("2d");
+      const pal = getPalette(card);
+      const persona = getPersonality(card);
+      const particles = [];
+      const COUNT = 75;
+      let w = 0, h = 0;
+      let touchX = -1, touchY = -1, isTouched = false;
+      let warpIntensity = 0; // 0→1 ramp over ~1.2s
+
+      // Convert flow angle to velocity components
+      const flowRad = persona.flowAngle * Math.PI / 180;
+      const baseFlowVx = Math.cos(flowRad) * persona.flowSpeed;
+      const baseFlowVy = Math.sin(flowRad) * persona.flowSpeed;
+
+      function rgba([r,g,b], a) { return `rgba(${r},${g},${b},${a})`; }
+
+      // === Mesh warp system ===
+      const warpCanvas = card.querySelector(".hWarp");
+      const warpCtx = warpCanvas.getContext("2d");
+      const imgEl = card.querySelector(".hArt img");
+      let warpReady = false;
+      let warpSrc = null; // offscreen canvas with the visible image portion
+      const WARP_COLS = 14, WARP_ROWS = 18;
+      const WARP_STRENGTH = 0.07;
+
+      function initWarp() {
+        if (!imgEl || !imgEl.naturalWidth || !w || !h) return;
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        warpCanvas.width = w * dpr;
+        warpCanvas.height = h * dpr;
+        warpCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        // Compute the visible source rect (object-fit:cover math)
+        const artEl = card.querySelector(".hArt");
+        const cardRect = card.getBoundingClientRect();
+        const artRect = artEl.getBoundingClientRect();
+        const imgW = imgEl.naturalWidth, imgH = imgEl.naturalHeight;
+        const artW = artRect.width, artH = artRect.height;
+
+        // Parse object-position
+        const style = imgEl.getAttribute("style") || "";
+        let posX = 0.5, posY = 0.5;
+        const posMatch = style.match(/object-position:\s*([^\s;]+)\s+([^\s;]+)/);
+        if (posMatch) {
+          posX = posMatch[1] === "center" ? 0.5 : parseFloat(posMatch[1]) / 100;
+          posY = posMatch[2] === "center" ? 0.5 : parseFloat(posMatch[2]) / 100;
+        }
+
+        // How img covers the art element
+        const imgAspect = imgW / imgH, artAspect = artW / artH;
+        let cropSx, cropSy, cropSw, cropSh;
+        if (imgAspect > artAspect) {
+          cropSh = imgH; cropSw = imgH * artAspect;
+          cropSx = (imgW - cropSw) * posX; cropSy = 0;
+        } else {
+          cropSw = imgW; cropSh = imgW / artAspect;
+          cropSx = 0; cropSy = (imgH - cropSh) * posY;
+        }
+
+        // Offset for card viewport within the larger art
+        const offX = cardRect.left - artRect.left;
+        const offY = cardRect.top - artRect.top;
+        const scaleX = cropSw / artW, scaleY = cropSh / artH;
+
+        // Pre-render the visible portion to an offscreen canvas
+        const off = document.createElement("canvas");
+        off.width = w * dpr; off.height = h * dpr;
+        const offCtx = off.getContext("2d");
+        offCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        offCtx.drawImage(imgEl,
+          cropSx + offX * scaleX, cropSy + offY * scaleY,
+          cardRect.width * scaleX, cardRect.height * scaleY,
+          0, 0, w, h
+        );
+        warpSrc = off;
+        warpReady = true;
+      }
+
+      // Wait for image load then init warp
+      if (imgEl) {
+        if (imgEl.complete && imgEl.naturalWidth) setTimeout(initWarp, 50);
+        else imgEl.addEventListener("load", () => setTimeout(initWarp, 50), { once: true });
+      }
+
+      function drawWarp(tx, ty) {
+        if (!warpReady) return;
+        // Ramp intensity up over ~1.2s (~72 frames at 60fps)
+        warpIntensity = Math.min(1, warpIntensity + 1 / 72);
+        const intensity = warpIntensity;
+
+        const cellW = w / WARP_COLS, cellH = h / WARP_ROWS;
+        const srcCW = warpSrc.width / WARP_COLS, srcCH = warpSrc.height / WARP_ROWS;
+        const radius = Math.min(w, h) * 0.7;
+        // Overlap margin to eliminate grid seams
+        const m = 2;
+
+        warpCtx.clearRect(0, 0, w, h);
+        for (let row = 0; row < WARP_ROWS; row++) {
+          for (let col = 0; col < WARP_COLS; col++) {
+            const destX = col * cellW, destY = row * cellH;
+            const cenX = destX + cellW / 2, cenY = destY + cellH / 2;
+            const dx = tx - cenX, dy = ty - cenY;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+
+            let offX = 0, offY = 0;
+            if (dist < radius && dist > 0.5) {
+              const t = 1 - dist / radius;
+              const pull = t * t * WARP_STRENGTH * intensity;
+              offX = -dx * pull;
+              offY = -dy * pull;
+            }
+
+            warpCtx.drawImage(warpSrc,
+              col * srcCW - m, row * srcCH - m, srcCW + m * 2, srcCH + m * 2,
+              destX + offX - m, destY + offY - m, cellW + m * 2, cellH + m * 2
+            );
+          }
+        }
+      }
+
+      function clearWarp() {
+        warpCtx.clearRect(0, 0, w, h);
+      }
+
+      function resize() {
+        const rect = card.getBoundingClientRect();
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        w = rect.width; h = rect.height;
+        canvas.width = w * dpr;
+        canvas.height = h * dpr;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        // Re-init warp source on resize
+        warpReady = false;
+        initWarp();
+      }
+
+      function makeParticle(respawnEdge) {
+        const roll = Math.random();
+        let r, spdMult, baseAlpha, type;
+        if (roll < 0.50) {
+          type = "dust";
+          r = Math.random() * 1.2 + 0.3;
+          spdMult = 0.6 + Math.random() * 0.8;
+          baseAlpha = Math.random() * 0.35 + 0.12;
+        } else if (roll < 0.85) {
+          type = "ember";
+          r = Math.random() * 2 + 0.8;
+          spdMult = 0.8 + Math.random() * 0.6;
+          baseAlpha = Math.random() * 0.5 + 0.18;
+        } else {
+          type = "orb";
+          r = Math.random() * 3.5 + 2;
+          spdMult = 0.3 + Math.random() * 0.3;
+          baseAlpha = Math.random() * 0.25 + 0.08;
+        }
+
+        const colors = type === "orb" ? [pal.core, pal.mid] :
+                       type === "ember" ? [pal.core, pal.mid, pal.hi] :
+                       [pal.mid, pal.hi, pal.dim];
+        const color = colors[Math.floor(Math.random() * colors.length)];
+
+        // River flow + individual variance
+        const vx = baseFlowVx * spdMult + (Math.random() - 0.5) * 0.1;
+        const vy = baseFlowVy * spdMult + (Math.random() - 0.5) * 0.1;
+
+        // Spawn position: either random (init) or from the bottom/side edge (respawn)
+        let x, y;
+        if (respawnEdge) {
+          // Respawn from the downstream edge so the river keeps flowing
+          x = Math.random() * (w || 200);
+          y = (h || 300) + Math.random() * 30;
+        } else {
+          x = Math.random() * (w || 200);
+          y = Math.random() * (h || 300);
+        }
+
+        return {
+          x, y, vx, vy, r, color, baseAlpha, type,
+          // Store base velocity for restoring after touch
+          bvx: vx, bvy: vy,
+          phase: Math.random() * Math.PI * 2,
+          flicker: type === "ember" ? 0.002 + Math.random() * 0.003 : 0.0008 + Math.random() * 0.0006,
+          wobAmp: persona.wobble * (type === "orb" ? 1.4 : type === "ember" ? 0.8 : 0.5) + Math.random() * 0.3,
+          // Absorption state: when a particle reaches the finger it fades and respawns
+          absorb: 0, // 0 = normal, ramps to 1 = fully absorbed
+        };
+      }
+
+      function initParticles() {
+        resize();
+        particles.length = 0;
+        for (let i = 0; i < COUNT; i++) particles.push(makeParticle(false));
+      }
+
+      function draw(time) {
+        // Draw localized mesh warp when touched — ramps in with intensity
+        if (isTouched && touchX >= 0 && warpReady) {
+          drawWarp(touchX, touchY);
+          // Fade warp canvas in and original img out in sync with intensity
+          warpCanvas.style.opacity = warpIntensity;
+          if (imgEl) imgEl.style.opacity = 1 - warpIntensity;
+        }
+
+        ctx.clearRect(0, 0, w, h);
+        for (let i = 0; i < particles.length; i++) {
+          const p = particles[i];
+
+          // Move along river flow
+          p.x += p.vx;
+          p.y += p.vy;
+
+          // Off-screen? Respawn from downstream edge
+          if (p.y < -15 || p.y > h + 20 || p.x < -15 || p.x > w + 20) {
+            particles[i] = makeParticle(true);
+            continue;
+          }
+
+          // If fully absorbed, respawn
+          if (p.absorb >= 1) {
+            particles[i] = makeParticle(true);
+            continue;
+          }
+
+          // Sine wobble
+          const wobX = Math.sin(time * 0.0005 + p.phase) * p.wobAmp;
+          const wobY = Math.cos(time * 0.00045 + p.phase * 1.3) * p.wobAmp * 0.8;
+
+          let drawX = p.x + wobX;
+          let drawY = p.y + wobY;
+          let drawR = p.r;
+
+          // Flicker/breathe
+          const breathe = 0.5 + 0.5 * Math.sin(time * p.flicker + p.phase);
+          let alpha = p.baseAlpha * (0.4 + 0.6 * breathe);
+
+          // Touch interaction — nearby fish drift toward finger, absorb on arrival
+          if (isTouched && touchX >= 0) {
+            const dx = touchX - drawX;
+            const dy = touchY - drawY;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+
+            if (dist < persona.touchRadius) {
+              // Nearby particle: gently steer toward finger
+              const t = 1 - dist / persona.touchRadius; // 0 at edge, 1 at finger
+              p.vx += (dx / (dist + 10)) * persona.touchStrength;
+              p.vy += (dy / (dist + 10)) * persona.touchStrength;
+              // Dampen slightly so approach is smooth, not jittery
+              p.vx *= 0.96;
+              p.vy *= 0.96;
+              // Brighten as it approaches
+              alpha = Math.min(1, alpha + t * 0.3);
+              drawR *= 1 + t * 0.6;
+
+              // Very close to finger — start absorbing (fade out)
+              if (dist < 14) {
+                p.absorb += 0.06;
+                alpha *= (1 - p.absorb);
+                drawR *= (1 - p.absorb * 0.5);
+              }
+            } else {
+              // Far away fish — keep swimming, don't care about finger
+              // Gently restore to base river velocity
+              p.vx += (p.bvx - p.vx) * 0.02;
+              p.vy += (p.bvy - p.vy) * 0.02;
+            }
+          } else {
+            // No touch — restore to river flow
+            p.vx += (p.bvx - p.vx) * 0.03;
+            p.vy += (p.bvy - p.vy) * 0.03;
+            // Reset any partial absorption
+            if (p.absorb > 0) p.absorb = Math.max(0, p.absorb - 0.04);
+          }
+
+          if (alpha <= 0.01) continue;
+
+          // Draw particle
+          ctx.beginPath();
+          ctx.arc(drawX, drawY, drawR, 0, Math.PI * 2);
+          ctx.fillStyle = rgba(p.color, alpha);
+          ctx.fill();
+
+          // Glow halo
+          const glowMult = p.type === "orb" ? 4.5 : p.type === "ember" ? 3 : 2;
+          const glowAlpha = p.type === "orb" ? alpha * 0.12 : alpha * 0.1;
+          if (drawR > 0.5) {
+            ctx.beginPath();
+            ctx.arc(drawX, drawY, drawR * glowMult, 0, Math.PI * 2);
+            ctx.fillStyle = rgba(p.color, glowAlpha);
+            ctx.fill();
+          }
+        }
+      }
+
+      // Darken overlay — animated manually in rAF, not CSS
+      const darkenEl = card.querySelector(".hDarken");
+      let darkenOpacity = 0;
+      const DARKEN_MAX = 0.10;      // noticeable but not heavy
+      const DARKEN_RATE = 0.0005;   // per-frame increment (~3.3s to reach max at 60fps)
+      const DARKEN_FADE = 0.002;    // fade-out ~1s
+
+      function updateDarken() {
+        if (isTouched) {
+          darkenOpacity = Math.min(DARKEN_MAX, darkenOpacity + DARKEN_RATE);
+        } else if (darkenOpacity > 0) {
+          darkenOpacity = Math.max(0, darkenOpacity - DARKEN_FADE);
+        }
+        if (darkenEl) darkenEl.style.opacity = darkenOpacity;
+      }
+
+      initParticles();
+      return { card, canvas, ctx, draw, resize, particles, initParticles, updateDarken,
+        clearWarp() { clearWarp(); warpIntensity = 0; warpCanvas.style.opacity = 0; if (imgEl) imgEl.style.opacity = ""; },
+        setTouch(x, y) { if (!isTouched) warpIntensity = 0; touchX = x; touchY = y; isTouched = true; },
+        clearTouch() { touchX = -1; touchY = -1; isTouched = false; },
+        get warpIntensity() { return warpIntensity; }
+      };
+    });
+
+    // Animation loop — single rAF for all cards
+    let homeAnimId = null;
+    function animLoop(time) {
+      for (const sys of cardSystems) { sys.draw(time); sys.updateDarken(); }
+      homeAnimId = requestAnimationFrame(animLoop);
+    }
+
+    // Observe visibility to pause when off-screen
+    const observer = new IntersectionObserver(entries => {
+      const visible = entries.some(e => e.isIntersecting);
+      if (visible && !homeAnimId) homeAnimId = requestAnimationFrame(animLoop);
+      if (!visible && homeAnimId) { cancelAnimationFrame(homeAnimId); homeAnimId = null; }
+    }, { threshold: 0.1 });
+    observer.observe(homeGrid);
+    homeAnimId = requestAnimationFrame(animLoop);
+
+    // Resize handler
+    let resizeTimer;
+    const onResize = () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => cardSystems.forEach(s => s.resize()), 150);
+    };
+    window.addEventListener("resize", onResize);
+
+    // === Magnetic touch interaction ===
     let hgStartX = 0, hgStartY = 0, hgDragged = false;
+    let activeCard = null;
+
+    // Smooth interpolation — art/card position eases toward target each frame
+    const smoothEase = "transform 0.15s cubic-bezier(.25,.46,.45,.94)";
 
     homeGrid.addEventListener("touchstart", (e) => {
       if (e.touches.length !== 1) return;
       hgStartX = e.touches[0].clientX;
       hgStartY = e.touches[0].clientY;
       hgDragged = false;
-      cards.forEach(c => { c.style.transition = "none"; });
+
+      // Find which card was touched
+      const touch = e.touches[0];
+      activeCard = null;
+      for (const sys of cardSystems) {
+        const rect = sys.card.getBoundingClientRect();
+        if (touch.clientX >= rect.left && touch.clientX <= rect.right &&
+            touch.clientY >= rect.top && touch.clientY <= rect.bottom) {
+          activeCard = sys;
+          const lx = touch.clientX - rect.left;
+          const ly = touch.clientY - rect.top;
+          sys.setTouch(lx, ly);
+          sys.card.classList.add("is-touched");
+
+          // Subtle global tilt transition
+          const art = sys.card.querySelector(".hArt");
+          if (art) art.style.transition = "transform 0.6s cubic-bezier(.25,.46,.45,.94), scale 8s cubic-bezier(.25,.46,.45,.94)";
+          const pCanvas = sys.card.querySelector(".hParticles");
+          if (pCanvas) pCanvas.style.transition = smoothEase;
+
+          // Shimmer: shift toward touch point (portal energy drawn to finger)
+          const shimmer = sys.card.querySelector(".hShimmer");
+          if (shimmer) {
+            const cx = rect.width / 2, cy = rect.height / 2;
+            const sNormX = (lx - cx) / cx;
+            const sNormY = (ly - cy) / cy;
+            shimmer.style.transform = `translate(${sNormX * 15}%, ${sNormY * 15}%) scale(1.10)`;
+          }
+          break;
+        }
+      }
     }, { passive: true });
 
     homeGrid.addEventListener("touchmove", (e) => {
       if (e.touches.length !== 1) return;
       const dx = e.touches[0].clientX - hgStartX;
       const dy = e.touches[0].clientY - hgStartY;
-      // Mark as a drag once movement exceeds tap threshold
       if (!hgDragged && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
         hgDragged = true;
         homeGrid.classList.add("is-dragging");
       }
-      const MAX = 0.038;
-      const fy = Math.tanh(Math.abs(dy) / 110) * MAX;
-      const fx = Math.tanh(Math.abs(dx) / 160) * MAX * 0.55;
-      const originY = dy >= 0 ? "top" : "bottom";
-      const originX = dx >= 0 ? "left" : "right";
-      cards.forEach(c => {
-        c.style.transformOrigin = `${originX} ${originY}`;
-        c.style.transform = `scaleX(${1 + fx}) scaleY(${1 + fy})`;
-      });
+
+      if (activeCard) {
+        const rect = activeCard.card.getBoundingClientRect();
+        const lx = e.touches[0].clientX - rect.left;
+        const ly = e.touches[0].clientY - rect.top;
+        activeCard.setTouch(lx, ly);
+
+        const cx = rect.width / 2, cy = rect.height / 2;
+        const normX = (lx - cx) / cx; // -1 to 1
+        const normY = (ly - cy) / cy; // -1 to 1
+
+        // Localized warp is handled by canvas in the draw loop (reads touchX/Y)
+        // Subtle global tilt + parallax — scaled by warp ramp so nothing moves instantly
+        const wi = activeCard.warpIntensity;
+        const art = activeCard.card.querySelector(".hArt");
+        if (art) art.style.transform = `perspective(1400px) rotateX(${-normY * 1.5 * wi}deg) rotateY(${normX * 2 * wi}deg) translate(${normX * 2 * wi}px, ${normY * 2 * wi}px)`;
+
+        const pCanvas = activeCard.card.querySelector(".hParticles");
+        if (pCanvas) pCanvas.style.transform = `translate(${normX * 2 * wi}px, ${normY * 2 * wi}px)`;
+
+        // Shimmer: energy drawn toward finger
+        const shimmer = activeCard.card.querySelector(".hShimmer");
+        if (shimmer) shimmer.style.transform = `translate(${normX * 18 * wi}%, ${normY * 18 * wi}%) scale(${1 + 0.12 * wi})`;
+      }
     }, { passive: true });
 
-    const snapBack = () => {
+    const releaseCard = () => {
       homeGrid.classList.remove("is-dragging");
-      // If a drag occurred, intercept the upcoming synthetic click so cards don't navigate
       if (hgDragged) {
         homeGrid.addEventListener("click", e => { e.stopPropagation(); e.preventDefault(); }, { once: true, capture: true });
       }
-      cards.forEach(c => {
-        c.style.transition = "transform 0.5s cubic-bezier(.34,1.56,.64,1)";
-        c.style.transform = "";
-        c.addEventListener("transitionend", () => {
-          c.style.transition = "";
-          c.style.transformOrigin = "";
-        }, { once: true });
-      });
+      if (activeCard) {
+        activeCard.clearTouch();
+        activeCard.clearWarp();
+        activeCard.card.classList.remove("is-touched");
+
+        const ease = "transform 0.5s cubic-bezier(.22,1,.36,1)";
+
+        // Spring art tilt back
+        const art = activeCard.card.querySelector(".hArt");
+        if (art) {
+          art.style.transition = ease + ", scale 4s cubic-bezier(.25,.46,.45,.94)";
+          art.style.transform = "";
+        }
+
+        // Spring particles canvas back
+        const pCanvas = activeCard.card.querySelector(".hParticles");
+        if (pCanvas) {
+          pCanvas.style.transition = ease;
+          pCanvas.style.transform = "";
+        }
+
+        // Spring shimmer back to center (CSS animation resumes via removing .is-touched)
+        const shimmer = activeCard.card.querySelector(".hShimmer");
+        if (shimmer) {
+          shimmer.style.transition = "transform 0.6s cubic-bezier(.22,1,.36,1), opacity 0.5s ease, filter 0.5s ease";
+          shimmer.style.transform = "";
+        }
+
+        // Clean up inline transitions after spring completes
+        const artRef = art, pRef = pCanvas, shimRef = shimmer;
+        const onEnd = () => {
+          if (artRef) artRef.style.transition = "";
+          if (pRef) pRef.style.transition = "";
+          if (shimRef) shimRef.style.transition = "";
+        };
+        (art || pCanvas)?.addEventListener("transitionend", onEnd, { once: true });
+        activeCard = null;
+      }
     };
-    homeGrid.addEventListener("touchend", snapBack, { passive: true });
-    homeGrid.addEventListener("touchcancel", () => {
-      homeGrid.classList.remove("is-dragging");
-      cards.forEach(c => { c.style.transition = ""; c.style.transform = ""; c.style.transformOrigin = ""; });
-    }, { passive: true });
+
+    homeGrid.addEventListener("touchend", releaseCard, { passive: true });
+    homeGrid.addEventListener("touchcancel", releaseCard, { passive: true });
+
+    // Cleanup when navigating away
+    const cleanupHome = () => {
+      if (homeAnimId) { cancelAnimationFrame(homeAnimId); homeAnimId = null; }
+      observer.disconnect();
+      window.removeEventListener("resize", onResize);
+    };
+    homeGrid._cleanupHome = cleanupHome;
   }
 }
 
@@ -6308,7 +7412,7 @@ function renderNowPlaying() {
       _fp.style.transform = "translateY(100%)";
       _fp.style.transition = "none";
       requestAnimationFrame(() => requestAnimationFrame(() => {
-        _fp.style.transition = "transform 0.44s cubic-bezier(.22,.9,.24,1)";
+        _fp.style.transition = "transform 471ms cubic-bezier(.22,.9,.24,1)";
         _fp.style.transform = "translateY(0)";
         _fp.addEventListener("transitionend", () => {
           _fp.style.transition = "";
@@ -6444,7 +7548,7 @@ function renderNowPlaying() {
       if (lastDy > 80) {
         // Commit close: slide player off-screen, then remove
         cleanup();
-        fp.style.transition = "transform 280ms cubic-bezier(.32,0,.6,1), opacity 200ms ease";
+        fp.style.transition = "transform 300ms cubic-bezier(.32,0,.6,1), opacity 214ms ease";
         fp.style.transform = "translateY(100%)";
         fp.style.opacity = "0";
         fp.addEventListener("transitionend", () => fp.remove(), { once: true });
@@ -6462,7 +7566,7 @@ function renderNowPlaying() {
       }
       _peekReady = false;
     } else {
-      fp.style.transition = "transform 180ms ease, opacity 180ms ease";
+      fp.style.transition = "transform 193ms ease, opacity 180ms ease";
       fp.style.transform = "translateY(0px)";
       fp.style.opacity = "1";
     }
