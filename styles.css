@@ -2935,3 +2935,200 @@ body {
   transform: translateX(100%);
   opacity: 0;
 }
+
+/* ─── Evolution View ─── */
+
+.evoToggle {
+  display: flex;
+  background: rgba(255,255,255,.06);
+  border-radius: 10px;
+  padding: 3px;
+  gap: 2px;
+}
+
+.evoToggle button {
+  flex: 1;
+  padding: 6px 12px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all .2s;
+}
+
+.evoToggle button.is-active {
+  background: rgba(255,255,255,.12);
+  color: var(--text);
+}
+
+.evoCanvas {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  max-height: 420px;
+  border-radius: 16px;
+  overflow: hidden;
+  background: radial-gradient(ellipse at 50% 40%, #0e1225 0%, #08090e 70%, #050507 100%);
+  touch-action: none;
+  user-select: none;
+}
+
+.evoCanvas canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.evoCanvas svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* constellation lines */
+.evoLine {
+  stroke: rgba(140,160,255,.18);
+  stroke-width: 1.2;
+  stroke-linecap: round;
+}
+
+.evoCanvas.stage-nebula .evoLine {
+  stroke: rgba(140,160,255,.30);
+  stroke-width: 1.5;
+}
+
+.evoCanvas.stage-complete .evoLine {
+  stroke: rgba(180,200,255,.45);
+  stroke-width: 2;
+  filter: drop-shadow(0 0 3px rgba(140,160,255,.4));
+}
+
+/* nodes */
+.evoNode {
+  cursor: pointer;
+  transition: transform .25s ease;
+}
+
+.evoNode:active {
+  transform: scale(1.25);
+}
+
+.evoNodeGlow {
+  fill: rgba(140,170,255,.08);
+  transition: r .3s ease;
+}
+
+.evoNode:hover .evoNodeGlow,
+.evoNode.is-active .evoNodeGlow {
+  fill: rgba(140,170,255,.18);
+}
+
+.evoNodeCore {
+  transition: r .2s ease;
+}
+
+.evoNode.is-active .evoNodeCore {
+  filter: drop-shadow(0 0 6px rgba(140,180,255,.7));
+}
+
+.evoNodeLabel {
+  fill: rgba(255,255,255,.7);
+  font-size: 11px;
+  font-weight: 600;
+  text-anchor: middle;
+  pointer-events: none;
+}
+
+.evoNode.is-active .evoNodeLabel {
+  fill: rgba(255,255,255,.95);
+}
+
+/* node entrance animation */
+@keyframes evoNodeIn {
+  0% { opacity: 0; transform: scale(0); }
+  60% { opacity: 1; transform: scale(1.15); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+.evoNode {
+  animation: evoNodeIn .5s ease both;
+}
+
+/* stagger via inline --delay */
+
+/* nebula glow overlay */
+.evoNebula {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .8s ease;
+}
+
+.evoCanvas.stage-nebula .evoNebula,
+.evoCanvas.stage-complete .evoNebula {
+  opacity: 1;
+}
+
+/* node pulse for active */
+@keyframes evoPulse {
+  0%, 100% { r: 6; opacity: .3; }
+  50% { r: 10; opacity: .08; }
+}
+
+.evoNodePulse {
+  animation: evoPulse 2.5s ease-in-out infinite;
+}
+
+/* empty state */
+.evoEmpty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 13px;
+  font-style: italic;
+}
+
+/* long press menu */
+.evoActionMenu {
+  position: absolute;
+  z-index: 10;
+  background: rgba(20,22,30,.95);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 14px;
+  padding: 6px;
+  min-width: 160px;
+  box-shadow: 0 8px 32px rgba(0,0,0,.6);
+  animation: evoMenuIn .2s ease;
+}
+
+@keyframes evoMenuIn {
+  from { opacity: 0; transform: scale(.9) translateY(-4px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.evoActionMenu button {
+  display: block;
+  width: 100%;
+  padding: 10px 14px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  text-align: left;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.evoActionMenu button:hover {
+  background: rgba(255,255,255,.08);
+}

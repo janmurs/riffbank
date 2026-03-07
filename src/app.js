@@ -1939,6 +1939,34 @@ document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
     const targetTab = btn.dataset.tab || "home";
 
+    // If already on home tab with nav depth, slide back to home root
+    if (targetTab === "home" && currentTab === "home" && navHistoryStack.length > 0) {
+      slideBackTransition(() => {
+        songsBackTarget = null;
+        navHistoryStack = [];
+        navHistoryTopbarStack = [];
+        navScrollStack = [];
+        navStateStack = [];
+        drawerView = null;
+        overlayView = null;
+        selectedSongId = null;
+        selectedVersionId = null;
+        projectDetailScreen = null;
+        releaseDetailId = null;
+        songsView = "list";
+        songsListScrollTop = 0;
+        currentTab = "home";
+        if (screens.home) screens.home.scrollTop = 0;
+        try { window.scrollTo(0, 0); } catch {}
+        try { document.documentElement.scrollTop = 0; } catch {}
+        try { document.body.scrollTop = 0; } catch {}
+        syncTabs();
+        setHeader("RiffBank");
+        render();
+      });
+      return;
+    }
+
     songsBackTarget = null;
     navHistoryStack = [];
     navHistoryTopbarStack = [];
@@ -1975,29 +2003,35 @@ document.querySelectorAll(".tab").forEach((btn) => {
 
 // Tap header to go Home (feels app-y)
 headerTitle?.addEventListener("click", () => {
-  drawerView = null;
-  overlayView = null;
-  selectedSongId = null;
-  selectedVersionId = null;
-  projectDetailScreen = null;
-  releaseDetailId = null;
-  songsView = "list";
-  currentTab = "home";
-  songsBackTarget = null;
-  navHistoryStack = [];
-  navHistoryTopbarStack = [];
-  navScrollStack = [];
-  navStateStack = [];
+  const resetToHome = () => {
+    drawerView = null;
+    overlayView = null;
+    selectedSongId = null;
+    selectedVersionId = null;
+    projectDetailScreen = null;
+    releaseDetailId = null;
+    songsView = "list";
+    currentTab = "home";
+    songsBackTarget = null;
+    navHistoryStack = [];
+    navHistoryTopbarStack = [];
+    navScrollStack = [];
+    navStateStack = [];
+    if (screens.home) screens.home.scrollTop = 0;
+    try { window.scrollTo(0, 0); } catch {}
+    try { document.documentElement.scrollTop = 0; } catch {}
+    try { document.body.scrollTop = 0; } catch {}
+    syncTabs();
+    setHeader("RiffBank");
+    render();
+  };
 
-  // ✅ Fix: header-tap Home should also reset ALL scroll positions.
-  if (screens.home) screens.home.scrollTop = 0;
-  try { window.scrollTo(0, 0); } catch {}
-  try { document.documentElement.scrollTop = 0; } catch {}
-  try { document.body.scrollTop = 0; } catch {}
-
-  syncTabs();
-  setHeader("RiffBank");
-  render();
+  // If on home tab with nav depth, slide back; otherwise snap
+  if (currentTab === "home" && navHistoryStack.length > 0) {
+    slideBackTransition(resetToHome);
+  } else {
+    resetToHome();
+  }
 });
 
 // ---------------------
@@ -5141,11 +5175,16 @@ activeScreenEl.innerHTML = `
     <div class="versionsHeader">
       <div class="versionsTitle">Versions</div>
       <div class="versionsHeaderRight">
+        <div class="evoToggle">
+          <button id="evoToggleList" class="is-active">List</button>
+          <button id="evoToggleEvo">Evolution</button>
+        </div>
         <button class="btn" id="addVersionJump">Add version</button>
       </div>
     </div>
 
     <div id="versionsRows" class="versionsRows"></div>
+    <div id="evolutionView" style="display:none"></div>
   </div>
 `;
 
@@ -5288,6 +5327,265 @@ $("#addVersionJump")?.addEventListener("click", () => {
       const vid = btn.getAttribute("data-vmore");
       openVersionMenu(song.id, vid);
     });
+  });
+
+  // ── Evolution View toggle ──
+  const evoViewEl = $("#evolutionView");
+  const listBtn = $("#evoToggleList");
+  const evoBtn  = $("#evoToggleEvo");
+
+  listBtn.addEventListener("click", () => {
+    listBtn.classList.add("is-active");
+    evoBtn.classList.remove("is-active");
+    rowsEl.style.display = "";
+    evoViewEl.style.display = "none";
+  });
+
+  evoBtn.addEventListener("click", () => {
+    evoBtn.classList.add("is-active");
+    listBtn.classList.remove("is-active");
+    rowsEl.style.display = "none";
+    evoViewEl.style.display = "";
+    renderEvolutionView(evoViewEl, song);
+  });
+}
+
+// ── Evolution View — constellation visualization ──
+
+function renderEvolutionView(container, song) {
+  const versions = (song.versions || []).slice();
+  const n = versions.length;
+
+  if (!n) {
+    container.innerHTML = `<div class="evoCanvas"><div class="evoEmpty">No versions yet</div></div>`;
+    return;
+  }
+
+  // Determine visual stage
+  let stage = "dark";        // 1 version
+  if (n >= 7)      stage = "complete";
+  else if (n >= 4) stage = "nebula";
+  else if (n >= 2) stage = "constellation";
+
+  const W = 400, H = 400;
+
+  // Layout: simple force-directed positioning
+  const nodes = versions.map((v, i) => ({
+    id: v.id,
+    label: v.label || `v${i + 1}`,
+    isActive: !!v.isActive,
+    x: W / 2 + (Math.cos(i * 2.4 + 0.5) * (60 + i * 28)),
+    y: H / 2 + (Math.sin(i * 2.4 + 0.5) * (60 + i * 28)),
+    vx: 0, vy: 0,
+  }));
+
+  // Edges: chain sequential + connect to parent if exists
+  const edges = [];
+  for (let i = 1; i < nodes.length; i++) {
+    edges.push([i - 1, i]);
+  }
+
+  // Simple force simulation (run synchronously, ~60 iterations)
+  for (let iter = 0; iter < 60; iter++) {
+    // Repulsion between all pairs
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        let dx = nodes[j].x - nodes[i].x;
+        let dy = nodes[j].y - nodes[i].y;
+        let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        let force = 1200 / (dist * dist);
+        let fx = (dx / dist) * force;
+        let fy = (dy / dist) * force;
+        nodes[i].vx -= fx; nodes[i].vy -= fy;
+        nodes[j].vx += fx; nodes[j].vy += fy;
+      }
+    }
+
+    // Attraction along edges
+    for (const [a, b] of edges) {
+      let dx = nodes[b].x - nodes[a].x;
+      let dy = nodes[b].y - nodes[a].y;
+      let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      let force = (dist - 80) * 0.04;
+      let fx = (dx / dist) * force;
+      let fy = (dy / dist) * force;
+      nodes[a].vx += fx; nodes[a].vy += fy;
+      nodes[b].vx -= fx; nodes[b].vy -= fy;
+    }
+
+    // Center gravity
+    for (const nd of nodes) {
+      nd.vx += (W / 2 - nd.x) * 0.01;
+      nd.vy += (H / 2 - nd.y) * 0.01;
+      nd.x += nd.vx * 0.4;
+      nd.y += nd.vy * 0.4;
+      nd.vx *= 0.7;
+      nd.vy *= 0.7;
+      // Clamp to bounds
+      nd.x = Math.max(40, Math.min(W - 40, nd.x));
+      nd.y = Math.max(40, Math.min(H - 40, nd.y));
+    }
+  }
+
+  // Generate background stars
+  let starsHtml = "";
+  const starCount = stage === "dark" ? 30 : stage === "constellation" ? 60 : 120;
+  for (let i = 0; i < starCount; i++) {
+    const sx = Math.random() * W;
+    const sy = Math.random() * H;
+    const sr = 0.3 + Math.random() * 1;
+    const so = 0.15 + Math.random() * 0.5;
+    starsHtml += `<circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="${sr.toFixed(1)}" fill="white" opacity="${so.toFixed(2)}"/>`;
+  }
+
+  // Generate edges SVG
+  let edgesHtml = "";
+  if (n >= 2) {
+    for (const [a, b] of edges) {
+      edgesHtml += `<line class="evoLine" x1="${nodes[a].x.toFixed(1)}" y1="${nodes[a].y.toFixed(1)}" x2="${nodes[b].x.toFixed(1)}" y2="${nodes[b].y.toFixed(1)}"/>`;
+    }
+  }
+
+  // Generate nodes SVG
+  let nodesHtml = "";
+  const coreR = n === 1 ? 7 : 5;
+  const glowR = n === 1 ? 20 : 14;
+
+  for (let i = 0; i < nodes.length; i++) {
+    const nd = nodes[i];
+    const delay = i * 0.12;
+    const activeClass = nd.isActive ? " is-active" : "";
+    const nodeColor = nd.isActive ? "#7cacff" : "#a0b8e8";
+    const truncLabel = nd.label.length > 14 ? nd.label.slice(0, 12) + ".." : nd.label;
+
+    nodesHtml += `
+      <g class="evoNode${activeClass}" data-evo-node="${nd.id}" style="animation-delay:${delay}s" transform="translate(${nd.x.toFixed(1)},${nd.y.toFixed(1)})">
+        ${nd.isActive ? `<circle class="evoNodePulse" r="${glowR}" fill="${nodeColor}" opacity=".2"/>` : ""}
+        <circle class="evoNodeGlow" r="${glowR}" fill="rgba(140,170,255,.06)"/>
+        <circle class="evoNodeCore" r="${coreR}" fill="${nodeColor}" opacity=".9"/>
+        <text class="evoNodeLabel" dy="${coreR + 16}">${escapeHtml(truncLabel)}</text>
+      </g>`;
+  }
+
+  // Nebula gradient overlay (canvas-drawn radial blobs)
+  let nebulaHtml = "";
+  if (stage === "nebula" || stage === "complete") {
+    const nebulaOpacity = stage === "complete" ? 0.25 : 0.12;
+    nebulaHtml = `<div class="evoNebula" style="opacity:${nebulaOpacity};background:
+      radial-gradient(ellipse at 30% 35%, rgba(90,60,180,${nebulaOpacity}) 0%, transparent 60%),
+      radial-gradient(ellipse at 70% 60%, rgba(50,100,200,${nebulaOpacity}) 0%, transparent 55%),
+      radial-gradient(ellipse at 55% 80%, rgba(120,50,160,${nebulaOpacity * 0.7}) 0%, transparent 50%)
+    "></div>`;
+  }
+
+  container.innerHTML = `
+    <div class="evoCanvas stage-${stage}">
+      ${nebulaHtml}
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
+        ${starsHtml}
+        ${edgesHtml}
+        ${nodesHtml}
+      </svg>
+    </div>`;
+
+  // ── Node interactions ──
+  let longPressTimer = null;
+  let didLongPress = false;
+
+  container.querySelectorAll("[data-evo-node]").forEach((nodeEl) => {
+    const vid = nodeEl.getAttribute("data-evo-node");
+
+    // Tap → play that version
+    nodeEl.addEventListener("click", (e) => {
+      if (didLongPress) { didLongPress = false; return; }
+      e.stopPropagation();
+      const v = song.versions.find(vv => vv.id === vid);
+      if (!v || !isPlayable(v)) return toast("No audio for this version");
+      state.player.nowPlaying = { songId: song.id, versionId: vid };
+      state.player.queue = [];
+      state.player.repeatQueue = [{ songId: song.id, versionId: vid }];
+      saveState();
+      unlockAudioOnce();
+      playNowPlaying({ autoplay: true }).then(() => syncMiniPlayerUI());
+    });
+
+    // Long press → action menu
+    const startPress = (e) => {
+      didLongPress = false;
+      longPressTimer = setTimeout(() => {
+        didLongPress = true;
+        showEvoActionMenu(container, nodeEl, song, vid);
+      }, 500);
+    };
+    const cancelPress = () => { clearTimeout(longPressTimer); };
+
+    nodeEl.addEventListener("pointerdown", startPress);
+    nodeEl.addEventListener("pointerup", cancelPress);
+    nodeEl.addEventListener("pointerleave", cancelPress);
+    nodeEl.addEventListener("pointercancel", cancelPress);
+  });
+
+  // Dismiss action menu on background tap
+  container.querySelector(".evoCanvas").addEventListener("click", () => {
+    const menu = container.querySelector(".evoActionMenu");
+    if (menu) menu.remove();
+  });
+}
+
+function showEvoActionMenu(container, nodeEl, song, versionId) {
+  // Remove any existing menu
+  container.querySelector(".evoActionMenu")?.remove();
+
+  const rect = nodeEl.getBoundingClientRect();
+  const containerRect = container.querySelector(".evoCanvas").getBoundingClientRect();
+  let left = rect.left - containerRect.left + rect.width / 2;
+  let top = rect.top - containerRect.top + rect.height + 8;
+
+  // Clamp to container bounds
+  left = Math.max(10, Math.min(containerRect.width - 170, left - 80));
+  if (top + 180 > containerRect.height) top = rect.top - containerRect.top - 180;
+
+  const menu = document.createElement("div");
+  menu.className = "evoActionMenu";
+  menu.style.left = left + "px";
+  menu.style.top = top + "px";
+  menu.innerHTML = `
+    <button data-evo-action="play">Play</button>
+    <button data-evo-action="addVersion">Add new version</button>
+    <button data-evo-action="rename">Rename version</button>
+    <button data-evo-action="notes">Add notes</button>
+  `;
+
+  container.querySelector(".evoCanvas").appendChild(menu);
+
+  menu.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const action = e.target.getAttribute("data-evo-action");
+    menu.remove();
+
+    if (action === "play") {
+      const v = song.versions.find(vv => vv.id === versionId);
+      if (!v || !isPlayable(v)) return toast("No audio for this version");
+      state.player.nowPlaying = { songId: song.id, versionId };
+      state.player.queue = [];
+      state.player.repeatQueue = [{ songId: song.id, versionId }];
+      saveState();
+      unlockAudioOnce();
+      playNowPlaying({ autoplay: true }).then(() => syncMiniPlayerUI());
+    } else if (action === "addVersion") {
+      const newV = createVersion(song);
+      if (!newV) return toast("Couldn't create version");
+      selectedVersionId = newV.id;
+      render();
+    } else if (action === "rename") {
+      selectedVersionId = versionId;
+      render();
+      triggerForwardSlide();
+    } else if (action === "notes") {
+      selectedVersionId = versionId;
+      render();
+      triggerForwardSlide();
+    }
   });
 }
 
