@@ -2344,6 +2344,7 @@ headerTitle?.addEventListener("click", () => {
     projectDetailScreen = null;
     releaseDetailId = null;
     songsView = "list";
+    songsListScrollTop = 0;
     currentTab = "home";
     songsBackTarget = null;
     nav.clearStacks();
@@ -2431,6 +2432,8 @@ function goBack({ animate = false } = {}) {
       songsView = restoreState.songsView;
       overlayView = restoreState.overlayView;
       songsBackTarget = restoreState.songsBackTarget;
+      // Going back to home resets songs scroll so next visit starts fresh
+      if (restoreState.currentTab === "home" && !restoreState.drawerView) songsListScrollTop = 0;
       setHeader(restoreState.headerTitle);
       syncTabs();
       nav._isBackNav = true;
@@ -2450,6 +2453,7 @@ function goBack({ animate = false } = {}) {
       drawerView = null;
       selectedSongId = null;
       songsView = "list";
+      songsListScrollTop = 0;
       nav.clearStacks();
       setHeader("RiffBank");
       syncTabs();
@@ -2463,6 +2467,7 @@ function goBack({ animate = false } = {}) {
       projectDetailScreen = null;
       releaseDetailId = null;
       songsView = "list";
+      songsListScrollTop = 0;
       selectedSongId = null;
       selectedVersionId = null;
       nav.clearStacks();
@@ -4757,6 +4762,7 @@ function renderHome() {
       if (target === "songs") {
         resetSongsFilters({ keepSort: true });
         songsBackTarget = null;
+        songsListScrollTop = 0;
         currentTab = "songs";
         songsView = "list";
         selectedSongId = null;
