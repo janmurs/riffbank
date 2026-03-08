@@ -47,7 +47,7 @@ let splashAlreadyRan = false;
 // ---------------------
 // Player view state
 // ---------------------
-let playerFilter = "all"; // all | fav
+let playerFilter = "all"; // all | playlists | projects | releases
 let playerSort = "recent"; // recent | title
 let playerQueue = []; // array of { songId, versionId }
 let sheetState = null; // { songId, versionId }
@@ -434,6 +434,48 @@ class Nav {
           queenEl.remove();
           if (aceOverlay) aceOverlay.remove();
         }, { once: true });
+      });
+    });
+  }
+
+  // "Life jacket" transition: queen slides off to reveal freshly-rendered Home.
+  // No ace overlay — Home renders live underneath the queen.
+  jumpHome(screenEl, renderHome) {
+    if (!screenEl) { renderHome(); return; }
+
+    const tb = document.querySelector(".topbar");
+    const tbRect = tb ? tb.getBoundingClientRect() : null;
+    const viewRect = screenEl.getBoundingClientRect();
+
+    // --- Queen overlay (frozen current screen) ---
+    const queenEl = document.createElement("div");
+    queenEl.style.cssText = "position:fixed;inset:0;z-index:500;overflow:hidden;pointer-events:none;background:var(--bg);";
+
+    if (tbRect && tb) {
+      const tbClone = tb.cloneNode(true);
+      tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${tbRect.left}px;width:${tbRect.width}px;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
+      queenEl.appendChild(tbClone);
+    }
+
+    const screenWrap = document.createElement("div");
+    screenWrap.style.cssText = `position:absolute;top:${viewRect.top}px;left:${viewRect.left}px;width:${viewRect.width}px;height:${viewRect.height}px;overflow:hidden;`;
+    const queenClone = this._freeze(screenEl);
+    queenClone.scrollTop = screenEl.scrollTop;
+    screenWrap.appendChild(queenClone);
+    queenEl.appendChild(screenWrap);
+
+    document.body.appendChild(queenEl);
+
+    // Clear all stacks and render Home live underneath
+    this.clearStacks();
+    renderHome();
+
+    // Slide queen off to the right
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        queenEl.style.transition = "transform 0.3s cubic-bezier(.4,0,.2,1)";
+        queenEl.style.transform = "translateX(100%)";
+        queenEl.addEventListener("transitionend", () => queenEl.remove(), { once: true });
       });
     });
   }
@@ -1908,6 +1950,7 @@ function playerItems(data) {
       versionId: v.id,
       songName: s.title || "Untitled",
       artistName: s.artist || "You",
+      project: s.project || "",
       coverUrl: pickCoverUrl(s, v),
       favorite: !!v.favorite,
       updatedAt: v.updatedAt || v.stamp || s.updatedAt || "",
@@ -1917,7 +1960,9 @@ function playerItems(data) {
 
   // filter
   let out = items;
-  if (playerFilter === "fav") out = out.filter(x => x.favorite);
+  if (playerFilter === "projects") out = out.filter(x => x.project);
+  // "playlists" and "releases" are future — show all for now
+  // "all" = Riffs (default) — shows everything
 
   // sort
   if (playerSort === "title") {
@@ -2278,11 +2323,10 @@ document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
     const targetTab = btn.dataset.tab || "home";
 
-    // If tapping home while deep in a home-originated nav stack, slide back to home root
+    // If tapping home while deep in a nav stack, jump straight to home
     if (targetTab === "home" && nav.depth > 0) {
-      slideBackTransition(() => {
+      nav.jumpHome(activeScreenEl, () => {
         songsBackTarget = null;
-        nav.clearStacks();
         drawerView = null;
         overlayView = null;
         selectedSongId = null;
@@ -2344,6 +2388,7 @@ headerTitle?.addEventListener("click", () => {
     projectDetailScreen = null;
     releaseDetailId = null;
     songsView = "list";
+    songsListScrollTop = 0;
     currentTab = "home";
     songsBackTarget = null;
     nav.clearStacks();
@@ -2356,9 +2401,9 @@ headerTitle?.addEventListener("click", () => {
     render();
   };
 
-  // If on home tab with nav depth, slide back; otherwise snap
+  // If on home tab with nav depth, jump straight to home; otherwise snap
   if (currentTab === "home" && nav.depth > 0) {
-    slideBackTransition(resetToHome);
+    nav.jumpHome(activeScreenEl, resetToHome);
   } else {
     resetToHome();
   }
@@ -2431,6 +2476,8 @@ function goBack({ animate = false } = {}) {
       songsView = restoreState.songsView;
       overlayView = restoreState.overlayView;
       songsBackTarget = restoreState.songsBackTarget;
+      // Going back to home resets songs scroll so next visit starts fresh
+      if (restoreState.currentTab === "home" && !restoreState.drawerView) songsListScrollTop = 0;
       setHeader(restoreState.headerTitle);
       syncTabs();
       nav._isBackNav = true;
@@ -2450,6 +2497,7 @@ function goBack({ animate = false } = {}) {
       drawerView = null;
       selectedSongId = null;
       songsView = "list";
+      songsListScrollTop = 0;
       nav.clearStacks();
       setHeader("RiffBank");
       syncTabs();
@@ -2463,6 +2511,7 @@ function goBack({ animate = false } = {}) {
       projectDetailScreen = null;
       releaseDetailId = null;
       songsView = "list";
+      songsListScrollTop = 0;
       selectedSongId = null;
       selectedVersionId = null;
       nav.clearStacks();
@@ -2729,6 +2778,7 @@ function stopAndResetPlayback() {
         setTimeout(() => {
           if (goNext) advanceToNextTrack({ render: false });
           else        advanceToPrevTrack({ render: false });
+          _miniCarouselDir = 0; // swipe already animated — suppress duplicate carousel in syncMiniPlayerUI
           ghost.remove();
           if (inner) { inner.style.transition = 'none'; inner.style.transform = 'translateX(0)'; }
           syncMiniPlayerUI();
@@ -4757,6 +4807,7 @@ function renderHome() {
       if (target === "songs") {
         resetSongsFilters({ keepSort: true });
         songsBackTarget = null;
+        songsListScrollTop = 0;
         currentTab = "songs";
         songsView = "list";
         selectedSongId = null;
@@ -6012,7 +6063,7 @@ function coverSvg(song, { lite = false } = {}) {
 // Songs list + create
 // ---------------------
 function renderSongsList() {
-  setHeader("Songs");
+  setHeader("");
 
   const songs = [...state.songs];
   const projects = Array.from(
@@ -6023,6 +6074,7 @@ function renderSongsList() {
   ).sort((a, b) => a.localeCompare(b));
 
   activeScreenEl.innerHTML = `
+    <div class="songsPageTitle">Songs</div>
     <div class="songsHead">
       <div class="songsBar">
         <input
@@ -6997,12 +7049,6 @@ function renderPlayer() {
   // Build playlist rows (one row per version where playerYes === true)
   const items = playerItems(state); // uses playerFilter/playerSort globals
 
-  const now = state.player?.nowPlaying || null;
-
-  function isNowPlayingRow(songId, versionId) {
-    return !!(now && now.songId === songId && now.versionId === versionId);
-  }
-
   function openPlayerActionSheet(item) {
     // Remove any existing sheet
     document.querySelectorAll(".actionSheetBackdrop, .actionSheet").forEach(el => el.remove());
@@ -7105,7 +7151,7 @@ function renderPlayer() {
     document.body.appendChild(sheet);
   }
 
-  // Actions (above chips, Spotify-style) + chips + list
+  // ── Layout: Actions → Filters → List ──
   activeScreenEl.innerHTML = `
     <div class="playerActions">
       <button class="playerShuffleBtn ${state.player?.shuffle ? "is-active" : ""}" id="playerShuffle" aria-label="Shuffle">
@@ -7120,13 +7166,10 @@ function renderPlayer() {
     </div>
 
     <div class="chipsRow" aria-label="Player filters">
-      <button class="chip ${playerFilter === "all" ? "active" : ""}" data-pf="all">All</button>
-      <button class="chip ${playerFilter === "fav" ? "active" : ""}" data-pf="fav">Favorites</button>
-
-      <span style="width:10px; flex:0 0 auto;"></span>
-
-      <button class="chip ${playerSort === "recent" ? "active" : ""}" data-ps="recent">Recent</button>
-      <button class="chip ${playerSort === "title" ? "active" : ""}" data-ps="title">Title</button>
+      <button class="chip ${playerFilter === "all" ? "active" : ""}" data-pf="all">Riffs</button>
+      <button class="chip ${playerFilter === "playlists" ? "active" : ""}" data-pf="playlists">Playlists</button>
+      <button class="chip ${playerFilter === "projects" ? "active" : ""}" data-pf="projects">Projects</button>
+      <button class="chip ${playerFilter === "releases" ? "active" : ""}" data-pf="releases">Releases</button>
     </div>
 
     <div class="playerList">
@@ -7135,15 +7178,17 @@ function renderPlayer() {
           ? items.map((it) => {
               const s = getSong(it.songId);
 
-              // Fallback if missing
               const title = it.songName || s?.title || "Untitled";
               const meta = s?.project || "—";
               const fav = !!it.favorite;
 
               const cover = s ? coverSvg(s, { lite: true }) : "";
 
+              const np = state.player?.nowPlaying;
+              const isPlaying = np && np.songId === it.songId && np.versionId === it.versionId;
+
               return `
-                <div class="playerRow ${isNowPlayingRow(it.songId, it.versionId) ? "playing" : ""}"
+                <div class="playerRow${isPlaying ? " playing" : ""}"
                      data-pr-song="${it.songId}"
                      data-pr-ver="${it.versionId}">
                   <div class="playerCover" aria-hidden="true">${cover}</div>
@@ -7153,15 +7198,8 @@ function renderPlayer() {
                     <div class="playerMeta">
                       <span>${escapeHtml(meta)}</span>
                       ${fav ? `<span class="playerBadge fav">♥</span>` : ``}
-                      ${
-                        isNowPlayingRow(it.songId, it.versionId)
-                          ? `<span class="playerBadge">Now</span>`
-                          : ``
-                      }
                     </div>
                   </div>
-
-                  <button class="playerMore" data-pr-more="1" aria-label="More">⋯</button>
                 </div>
               `;
             }).join("")
@@ -7171,16 +7209,10 @@ function renderPlayer() {
     </div>
   `;
 
-  // Filter chips
+  // Filter chips (single-select mode filters)
   activeScreenEl.querySelectorAll("[data-pf]").forEach(btn => {
     btn.addEventListener("click", () => {
       playerFilter = btn.getAttribute("data-pf") || "all";
-      renderPlayer();
-    });
-  });
-  activeScreenEl.querySelectorAll("[data-ps]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      playerSort = btn.getAttribute("data-ps") || "recent";
       renderPlayer();
     });
   });
@@ -7213,22 +7245,33 @@ function renderPlayer() {
     renderPlayer();
   });
 
-  // Row interactions
+  // Row interactions: tap to play, long-press for action sheet
   activeScreenEl.querySelectorAll(".playerRow").forEach(row => {
+    let lpTimer = null;
+    let didLongPress = false;
+
+    row.addEventListener("touchstart", (e) => {
+      didLongPress = false;
+      lpTimer = setTimeout(() => {
+        didLongPress = true;
+        const songId = row.getAttribute("data-pr-song");
+        const versionId = row.getAttribute("data-pr-ver");
+        if (!songId || !versionId) return;
+        const item = items.find(x => x.songId === songId && x.versionId === versionId);
+        if (item) openPlayerActionSheet(item);
+      }, 500);
+    }, { passive: true });
+
+    row.addEventListener("touchend", () => { clearTimeout(lpTimer); });
+    row.addEventListener("touchmove", () => { clearTimeout(lpTimer); });
+    row.addEventListener("touchcancel", () => { clearTimeout(lpTimer); });
+
     row.addEventListener("click", async (e) => {
-      const isMore = e.target.closest(".playerMore");
+      if (didLongPress) return;
+
       const songId = row.getAttribute("data-pr-song");
       const versionId = row.getAttribute("data-pr-ver");
       if (!songId || !versionId) return;
-
-      const item = items.find(x => x.songId === songId && x.versionId === versionId);
-      if (!item) return;
-
-      if (isMore) {
-        e.stopPropagation();
-        openPlayerActionSheet(item);
-        return;
-      }
 
       // Tap row = play immediately; reset shuffle since user picked a specific track
       state.player.nowPlaying = { songId, versionId };

@@ -50,7 +50,7 @@ html,body{
 body{
   margin:0;
   color: var(--text);
-  font-family: "Inter", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+  font-family: "Montserrat", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
   -webkit-user-select: none;
   user-select: none;
   -webkit-text-size-adjust: 100%;
@@ -97,8 +97,8 @@ input, textarea { -webkit-user-select: text; user-select: text; }
 /* Back button — absolute-positioned over the left side of the topbar */
 .headerBack{
   position: absolute;
-  left: 4px;
-  top: calc(env(safe-area-inset-top, 0px) + 26px);
+  left: 0px;
+  top: calc(env(safe-area-inset-top, 0px) + 4px);
   background: none;
   border: none;
   color: #fff;
@@ -447,8 +447,7 @@ textarea{ min-height:100px; resize:vertical; }
 }
 
 .playerRow.playing{
-  background: rgba(255,255,255,.08);
-  border: 1px solid rgba(255,255,255,.14);
+  background: none;
 }
 
 .miniTop{
@@ -943,9 +942,8 @@ textarea{ min-height:100px; resize:vertical; }
   font-size: 15px;
   font-weight: 700;
   color: #fff;
-  letter-spacing: 0.7px;
+  letter-spacing: 0.3px;
   line-height: 1.1;
-  text-transform: uppercase;
 }
 
 .hSub{
@@ -1244,6 +1242,13 @@ textarea{ min-height:100px; resize:vertical; }
 /* =========================
    Songs list (kept)
    ========================= */
+.songsPageTitle{
+  font-size:34px;
+  font-weight:700;
+  letter-spacing:-.2px;
+  color:rgba(255,255,255,.85);
+  padding:24px 2px 0;
+}
 .songsHead{
   padding: 8px 0 12px;
   display:flex;
@@ -1416,7 +1421,7 @@ textarea{ min-height:100px; resize:vertical; }
   white-space:nowrap;
   overflow:hidden;
   text-overflow:ellipsis;
-  margin-top:1px;
+  margin-top:2px;
 }
 .songCardMore{
   position:absolute;
@@ -2304,40 +2309,45 @@ body.splashing .app{
 
 .playerList{
   padding: 8px 12px 8px; /* .screen handles bottom clearance via --dock-h */
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .playerRow{
-  display:grid;
-  grid-template-columns: 52px 1fr 34px;
-  gap: 12px;
-  align-items:center;
-  padding: 10px 10px;
-  border-radius: 14px;
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 14px;
+  align-items: center;
+  padding: 14px;
+  border-radius: 16px;
   cursor: pointer;
-}
-.playerRow:hover{
-  background: rgba(255,255,255,.04);
+  background: none;
+  border: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 .playerRow:active{
-  background: rgba(255,255,255,.06);
+  opacity: .7;
 }
 
 .playerCover{
-  width: 52px;
-  height: 52px;
-  border-radius: 10px;
+  width: 72px;
+  height: 72px;
+  border-radius: 12px;
   background: rgba(255,255,255,.08);
   border: 1px solid rgba(255,255,255,.10);
-  overflow:hidden;
-  display:flex;
-  align-items:center;
-  justify-content:center;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
 }
 .playerCover img{
   width: 100%;
   height: 100%;
   object-fit: cover;
-  display:block;
+  display: block;
 }
 
 .playerMain{
@@ -2345,21 +2355,21 @@ body.splashing .app{
 }
 .playerName{
   font-weight: 750;
-  font-size: 15px;
-  line-height: 1.2;
+  font-size: 16px;
+  line-height: 1.3;
   color: var(--text);
-  overflow:hidden;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .playerMeta{
-  margin-top: 4px;
-  display:flex;
+  margin-top: 5px;
+  display: flex;
   gap: 10px;
-  align-items:center;
+  align-items: center;
   color: var(--muted);
-  font-size: 12.5px;
-  overflow:hidden;
+  font-size: 13px;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2377,21 +2387,7 @@ body.splashing .app{
   color: rgba(255,255,255,.9);
 }
 
-.playerMore{
-  width: 34px;
-  height: 34px;
-  border-radius: 999px;
-  border: 1px solid transparent;
-  background: transparent;
-  color: rgba(255,255,255,.75);
-  cursor:pointer;
-}
-.playerMore:hover{
-  background: rgba(255,255,255,.06);
-  border-color: rgba(255,255,255,.08);
-}
-
-/* Action sheet (three dot menu) */
+/* Action sheet (long-press menu) */
 .actionSheetBackdrop{
   position: fixed;
   inset: 0;
