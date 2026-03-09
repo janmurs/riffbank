@@ -381,20 +381,207 @@ textarea{ min-height:100px; resize:vertical; }
 }
 
 /* Sal mascot nav button */
-.salNavImg{
-  width: 26px;
-  height: 26px;
-  object-fit: contain;
-  display: block;
-  border-radius: 50%;
-  filter: drop-shadow(0 1px 4px rgba(0,0,0,0.5));
-  opacity: 0.55;
-  transition: opacity 0.15s, filter 0.15s;
+.salNavIcon{
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
-.salNavBtn:active .salNavImg,
-.salNavBtn.active .salNavImg{
+.salNavIcon svg{
+  width: 26px;
+  height: auto;
+  display: block;
+  opacity: 0.55;
+  transition: opacity 0.15s;
+}
+.salNavBtn:active .salNavIcon svg,
+.salNavBtn.active .salNavIcon svg{
   opacity: 1;
-  filter: drop-shadow(0 0 6px rgba(255,255,255,.25)) drop-shadow(0 1px 4px rgba(0,0,0,0.5));
+}
+
+/* ── Sal SVG Animations ─────────────────────────────────── */
+.salSvg{
+  filter: drop-shadow(0 4px 16px rgba(0,0,0,0.5));
+}
+
+/* Idle float (gentle bob up and down) */
+.salAnim{
+  animation: salFloat 3s ease-in-out infinite;
+}
+@keyframes salFloat{
+  0%,100%{ transform: translateY(0); }
+  50%{ transform: translateY(-6px); }
+}
+
+/* Shadow pulse synced with float */
+.salAnim .salShadow{
+  animation: salShadowPulse 3s ease-in-out infinite;
+}
+@keyframes salShadowPulse{
+  0%,100%{ rx: 28; opacity: 0.25; }
+  50%{ rx: 24; opacity: 0.15; }
+}
+
+/* Blink every ~4s */
+.salAnim .salBlink{
+  animation: salBlink 4s ease-in-out infinite;
+}
+@keyframes salBlink{
+  0%,90%,100%{ opacity: 0; }
+  94%,96%{ opacity: 1; }
+}
+
+/* Wave arm swing */
+.salAnim .salWaveArm{
+  transform-origin: 76px 58px;
+  animation: salWave 1.2s ease-in-out infinite;
+}
+@keyframes salWave{
+  0%,100%{ transform: translate(76px,48px) rotate(0deg); }
+  25%{ transform: translate(76px,48px) rotate(-15deg); }
+  50%{ transform: translate(76px,48px) rotate(10deg); }
+  75%{ transform: translate(76px,48px) rotate(-10deg); }
+}
+
+/* ── Sal Dance Animation ─────────────────────────────────── */
+.salDance{
+  animation: salDanceBounce 0.6s ease-in-out infinite;
+}
+.salDance .salBlink{
+  animation: salBlink 3s ease-in-out infinite;
+}
+@keyframes salDanceBounce{
+  0%,100%{ transform: translateY(0) rotate(0deg); }
+  25%{ transform: translateY(-10px) rotate(-4deg); }
+  50%{ transform: translateY(0) rotate(0deg); }
+  75%{ transform: translateY(-10px) rotate(4deg); }
+}
+.salDance .salDanceArmR{
+  animation: salDanceArmR 0.6s ease-in-out infinite;
+}
+.salDance .salDanceArmL{
+  animation: salDanceArmL 0.6s ease-in-out infinite;
+}
+@keyframes salDanceArmR{
+  0%,100%{ transform: translate(76px,46px) rotate(0deg); }
+  25%{ transform: translate(76px,38px) rotate(-12deg); }
+  50%{ transform: translate(76px,46px) rotate(0deg); }
+  75%{ transform: translate(76px,40px) rotate(8deg); }
+}
+@keyframes salDanceArmL{
+  0%,100%{ transform: translate(24px,46px) rotate(0deg); }
+  25%{ transform: translate(24px,40px) rotate(8deg); }
+  50%{ transform: translate(24px,46px) rotate(0deg); }
+  75%{ transform: translate(24px,38px) rotate(-12deg); }
+}
+.salDance .salFeet{
+  animation: salDanceFeet 0.6s ease-in-out infinite;
+}
+@keyframes salDanceFeet{
+  0%,50%,100%{ transform: translateY(0); }
+  25%{ transform: translateY(-3px); }
+  75%{ transform: translateY(-3px); }
+}
+.salDance .salShadow{
+  animation: salDanceShadow 0.6s ease-in-out infinite;
+}
+@keyframes salDanceShadow{
+  0%,50%,100%{ rx: 28; opacity: 0.25; }
+  25%,75%{ rx: 22; opacity: 0.12; }
+}
+
+/* ── Welcome Screen ──────────────────────────────────────── */
+.welcomeScreen{
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(180deg, #0d0e12 0%, #1a0a2e 50%, #0d0e12 100%);
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+.welcomeScreen.welcomeIn{
+  opacity: 1;
+}
+.welcomeScreen.welcomeOut{
+  animation: welcomeFadeOut 0.4s ease forwards;
+}
+@keyframes welcomeFadeOut{
+  to{ opacity: 0; }
+}
+
+.welcomeSalWrap{
+  margin-bottom: 32px;
+  filter: drop-shadow(0 8px 32px rgba(168,85,247,0.3));
+}
+
+.welcomeTitle{
+  font-size: 42px;
+  font-weight: 900;
+  letter-spacing: -1px;
+  color: #fff;
+  background: linear-gradient(135deg, #a855f7, #ec4899, #a855f7);
+  background-size: 200% 200%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: welcomeTitleShimmer 3s ease infinite;
+  margin-bottom: 8px;
+}
+@keyframes welcomeTitleShimmer{
+  0%,100%{ background-position: 0% 50%; }
+  50%{ background-position: 100% 50%; }
+}
+
+.welcomeSub{
+  font-size: 16px;
+  color: rgba(255,255,255,0.45);
+  letter-spacing: 0.5px;
+  margin-bottom: 0;
+}
+
+.welcomeBtns{
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 0 20px calc(env(safe-area-inset-bottom, 12px) + 16px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.welcomeBtn{
+  width: 100%;
+  padding: 18px 24px;
+  border-radius: 16px;
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  border: none;
+  cursor: pointer;
+  transition: transform 0.12s, opacity 0.12s;
+  -webkit-tap-highlight-color: transparent;
+}
+.welcomeBtn:active{
+  transform: scale(0.97);
+  opacity: 0.85;
+}
+
+.welcomeBtnPrimary{
+  background: linear-gradient(135deg, #a855f7, #7c3aed);
+  color: #fff;
+  box-shadow: 0 4px 24px rgba(168,85,247,0.4);
+}
+
+.welcomeBtnSecondary{
+  background: transparent;
+  color: rgba(255,255,255,0.45);
+  border: 1.5px solid rgba(255,255,255,0.12);
+  box-shadow: none;
 }
 
 .navIcon{
@@ -3888,3 +4075,18 @@ body {
   font-size: 13px;
   color: rgba(255,255,255,.2);
 }
+
+/* ── Sync debug dots ── */
+.syncDot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-right: 4px;
+  vertical-align: middle;
+  box-shadow: 0 0 4px currentColor;
+}
+.syncDot--green  { background: #4ade80; color: #4ade80; }
+.syncDot--yellow { background: #facc15; color: #facc15; }
+.syncDot--red    { background: #f87171; color: #f87171; }

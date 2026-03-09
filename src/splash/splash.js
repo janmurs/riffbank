@@ -13,31 +13,7 @@ export async function runSplashSequence() {
 
   if (title) title.classList.add("shimmer");
 
-  const lines = [
-    "Indexing your universe",
-    "Syncing sessions",
-    "Entering RiffBank",
-  ];
-
-  const HOLD_1 = 2400;
-  const HOLD_2 = 2400;
-  const HOLD_3 = 900;
-
-  const cssJump = (() => {
-    try {
-      const raw = getComputedStyle(document.documentElement)
-        .getPropertyValue("--splash-jump-ms")
-        .trim();
-      const n = parseInt(raw, 10);
-      return Number.isFinite(n) ? n : 520;
-    } catch {
-      return 520;
-    }
-  })();
-
-  const JUMP_MS = cssJump;
-
-  if (subText) subText.textContent = lines[0];
+  if (subText) subText.textContent = "Indexing your universe";
 
   if (subWrap) subWrap.classList.remove("show", "churn", "jumpIn", "jumpOut", "static");
 
@@ -50,34 +26,7 @@ export async function runSplashSequence() {
 
   if (subWrap) subWrap.classList.add("show", "churn", "static");
 
-  await sleep(550);
-
-  async function jumpSwap(nextText) {
-    if (!subWrap || !subText) return;
-
-    subWrap.classList.remove("static");
-
-    subWrap.classList.remove("jumpIn", "jumpOut");
-    void subWrap.offsetHeight;
-    subWrap.classList.add("jumpOut");
-    await sleep(JUMP_MS);
-
-    subWrap.classList.remove("jumpOut");
-    void subWrap.offsetHeight;
-    subText.textContent = nextText;
-
-    subWrap.classList.add("jumpIn");
-    await sleep(JUMP_MS);
-
-    subWrap.classList.remove("jumpIn");
-    subWrap.classList.add("static");
-  }
-
-  await sleep(HOLD_1);
-  await jumpSwap(lines[1]);
-  await sleep(HOLD_2);
-  await jumpSwap(lines[2]);
-  await sleep(HOLD_3);
+  await sleep(2400);
 
   splash.classList.add("hide");
   splash.setAttribute("aria-hidden", "true");
@@ -85,4 +34,27 @@ export async function runSplashSequence() {
   splash.remove();
 
   document.body.classList.remove("splashing");
+}
+
+/** Re-inject splash DOM and replay the sequence (used after wipe). */
+export async function replaySplash() {
+  // Remove any leftover splash
+  document.getElementById("splash")?.remove();
+
+  const splashEl = document.createElement("div");
+  splashEl.id = "splash";
+  splashEl.setAttribute("aria-hidden", "false");
+  splashEl.innerHTML = `
+    <div class="splashInner">
+      <div id="splashTitle">RiffBank</div>
+      <div id="splashSub" class="splashSub">
+        <span id="splashSubText" class="splashSubText">Indexing your universe</span>
+        <span class="splashEllipsis" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </span>
+      </div>
+    </div>`;
+  document.body.prepend(splashEl);
+
+  await runSplashSequence();
 }

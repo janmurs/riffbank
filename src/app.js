@@ -9,14 +9,24 @@
 
 window.onerror = (m, src, line, col) => alert(`JS ERROR:\n${m}\n${line}:${col}`);
 
-// Dev toggle: skip splash animation
+// Dev toggles: skip splash / welcome screen
  const DISABLE_SPLASH = true;
+ const DISABLE_WELCOME = false;
+
+// Debug toggle: highlight sync status on song cards
+// Toggle via console: toggleSyncDebug()
+window.RIFFBANK_DEBUG_SYNC = false;
+window.toggleSyncDebug = () => {
+  window.RIFFBANK_DEBUG_SYNC = !window.RIFFBANK_DEBUG_SYNC;
+  console.log(`[RiffBank] Sync debug ${window.RIFFBANK_DEBUG_SYNC ? "ON" : "OFF"}`);
+  render();
+};
 
 // console.log("RIFFBANK APP.JS LOADED ✅", new Date().toISOString());
 // alert("RIFFBANK APP.JS LOADED ✅ " + new Date().toISOString());
 
 import { $ } from "./ui/dom.js";
-import { runSplashSequence } from "./splash/splash.js";
+import { runSplashSequence, replaySplash } from "./splash/splash.js";
 import {
   gdriveLoadGIS,
   gdriveIsConnected,
@@ -1910,6 +1920,137 @@ async function getPlayableUrlForVersion(songId, versionId) {
   return null;
 }
 
+// In-memory set of driveFileIds known to be cached in IndexedDB
+const _cachedDriveIds = new Set();
+
+// Cache all Drive-only audio blobs into IndexedDB so they play offline forever.
+// Called automatically after pull/rebuild. Shows progress toasts.
+async function cacheAllDriveAudio() {
+  const driveVersions = [];
+  for (const song of (state.songs || [])) {
+    for (const v of (song.versions || [])) {
+      if (!v.driveFileId) continue;
+      // Skip if already cached locally
+      if (v.fileId || v.localAudioId) continue;
+      if (_cachedDriveIds.has(v.driveFileId)) continue;
+      try {
+        const existing = await audioGet(`gdrive:${v.driveFileId}`);
+        if (existing?.blob) { _cachedDriveIds.add(v.driveFileId); continue; }
+      } catch {}
+      driveVersions.push({ song, v });
+    }
+  }
+
+  if (!driveVersions.length) {
+    toast("All audio already cached locally ✅");
+    return;
+  }
+
+  let done = 0;
+  let failed = 0;
+  toast(`Caching audio: 0/${driveVersions.length}…`);
+
+  for (const { song, v } of driveVersions) {
+    try {
+      const blob = await gdriveFetchBlob(v.driveFileId);
+      if (blob) {
+        await audioPut({
+          id: `gdrive:${v.driveFileId}`,
+          blob,
+          name: v.fileName || v.label || "audio",
+          type: v.fileType || blob.type || "audio/*",
+          size: blob.size,
+        });
+        _cachedDriveIds.add(v.driveFileId);
+        done++;
+      } else {
+        failed++;
+      }
+    } catch {
+      failed++;
+    }
+    toast(`Caching audio: ${done + failed}/${driveVersions.length}…`);
+  }
+
+  const msg = failed
+    ? `Cached ${done}/${driveVersions.length} (${failed} failed)`
+    : `All ${done} tracks cached locally ✅`;
+  toast(msg);
+}
+
+// Sync debug: check each version's audio availability (sync, not async — metadata only)
+// Returns "green" (has local blob), "yellow" (Drive-only, needs network), "red" (no source)
+function getVersionSyncColor(v) {
+  if (!v) return "red";
+  if (v.fileId || v.localAudioId) return "green";
+  if (v.driveFileId) {
+    if (_cachedDriveIds.has(v.driveFileId)) return "green";
+    return "yellow";
+  }
+  if (v.link) return "green";
+  return "red";
+}
+
+// Returns worst-case sync color across all versions of a song
+function getSongSyncColor(song) {
+  if (!song?.versions?.length) return "red";
+  let worst = "green"; // green > yellow > red
+  for (const v of song.versions) {
+    const c = getVersionSyncColor(v);
+    if (c === "red") return "red";
+    if (c === "yellow") worst = "yellow";
+  }
+  return worst;
+}
+
+// Returns an HTML dot string for debug overlay (empty string if debug off)
+function syncDot(song) {
+  if (!window.RIFFBANK_DEBUG_SYNC) return "";
+  const color = getSongSyncColor(song);
+  const label = color === "green" ? "Local" : color === "yellow" ? "Drive-only" : "No audio";
+  return `<span class="syncDot syncDot--${color}" title="${label}"></span>`;
+}
+
+// Deep async audit: checks IndexedDB for actual blobs, logs a table to console
+window.auditSync = async () => {
+  const results = [];
+  for (const song of (state.songs || [])) {
+    for (const v of (song.versions || [])) {
+      const row = {
+        song: song.title,
+        version: v.label || v.id,
+        fileId: v.fileId ? "yes" : "",
+        localAudioId: v.localAudioId ? "yes" : "",
+        driveFileId: v.driveFileId ? "yes" : "",
+        link: v.link ? "yes" : "",
+        localBlobOk: "",
+        driveCacheOk: "",
+        status: getVersionSyncColor(v),
+      };
+      // Check if local blob actually exists in IndexedDB
+      if (v.fileId) {
+        try { const r = await audioGet(v.fileId); row.localBlobOk = r?.blob ? "yes" : "MISSING"; } catch { row.localBlobOk = "ERROR"; }
+        if (row.localBlobOk === "MISSING") row.status = "red";
+      }
+      if (v.localAudioId) {
+        try { const r = await getAudioBlob(v.localAudioId); row.localBlobOk = r?.blob ? "yes" : "MISSING"; } catch { row.localBlobOk = "ERROR"; }
+        if (row.localBlobOk === "MISSING" && !v.fileId) row.status = v.driveFileId ? "yellow" : "red";
+      }
+      // Check if Drive blob is cached locally
+      if (v.driveFileId) {
+        try { const r = await audioGet(`gdrive:${v.driveFileId}`); row.driveCacheOk = r?.blob ? "yes" : "no"; } catch { row.driveCacheOk = "no"; }
+      }
+      results.push(row);
+    }
+  }
+  console.table(results);
+  const reds = results.filter(r => r.status === "red");
+  const yellows = results.filter(r => r.status === "yellow");
+  console.log(`[RiffBank Sync Audit] ${results.length} versions: ${reds.length} broken, ${yellows.length} Drive-only, ${results.length - reds.length - yellows.length} local`);
+  if (reds.length) console.warn("Broken versions (no playable audio):", reds.map(r => `${r.song} / ${r.version}`));
+  return results;
+};
+
 function getSongById(data, songId) {
   return (data.songs || []).find(s => s.id === songId);
 }
@@ -2282,8 +2423,55 @@ document.querySelectorAll(".drawerItem").forEach((btn) => {
 // Create button in bottom nav
 document.querySelector(".createNavBtn")?.addEventListener("click", () => openCreateOverlay());
 
+// ── Sal SVG mascot ──────────────────────────────────────────────────
+// Auto-traced from sal.png using vtracer. Transparent background.
+// Returns an <img> tag pointing to the SVG file.
+function salSvg(size = 140) {
+  return `<img src="./sal.svg" alt="Sal" width="${size}" style="height:auto;">`;
+}
+
+// ── Welcome screen (Duolingo-style landing after splash) ────────────
+// Returns a promise that resolves when user taps a button.
+// result: "getStarted" or "hasAccount"
+function showWelcomeScreen() {
+  return new Promise(resolve => {
+    const el = document.createElement("div");
+    el.id = "welcomeScreen";
+    el.className = "welcomeScreen";
+    el.innerHTML = `
+      <div class="welcomeSalWrap">
+        ${salSvg(140)}
+      </div>
+      <div class="welcomeTitle">RiffBank</div>
+      <div class="welcomeSub">Your music. Everywhere.</div>
+      <div class="welcomeBtns">
+        <button class="welcomeBtn welcomeBtnPrimary" data-action="getStarted">GET STARTED</button>
+        <button class="welcomeBtn welcomeBtnSecondary" data-action="hasAccount">I ALREADY HAVE AN ACCOUNT</button>
+      </div>
+    `;
+
+    el.addEventListener("click", e => {
+      const btn = e.target.closest("[data-action]");
+      if (!btn) return;
+      const action = btn.dataset.action;
+      el.classList.add("welcomeOut");
+      el.addEventListener("animationend", () => {
+        el.remove();
+        resolve(action);
+      }, { once: true });
+    });
+
+    document.body.appendChild(el);
+    // Trigger entrance animation on next frame
+    requestAnimationFrame(() => el.classList.add("welcomeIn"));
+  });
+}
+
 // Sal mascot button — opens help sheet
 document.querySelector(".salNavBtn")?.addEventListener("click", () => openSalSheet());
+// Inject Sal PNG into nav icon
+{ const navIcon = document.querySelector(".salNavIcon");
+  if (navIcon) navIcon.innerHTML = salSvg(26); }
 
 function openSalSheet() {
   // Remove any existing Sal sheet
@@ -2300,7 +2488,7 @@ function openSalSheet() {
   sheet.style.cssText = "padding: 0; overflow: hidden; border-radius: 22px;";
   sheet.innerHTML = `
     <div style="display:flex;flex-direction:column;align-items:center;padding:28px 24px 12px;gap:12px;">
-      <img src="./sal.png" alt="Sal" style="width:80px;height:80px;object-fit:contain;filter:drop-shadow(0 4px 16px rgba(0,0,0,0.6));">
+      ${salSvg(80)}
       <div style="font-size:22px;font-weight:900;color:#fff;letter-spacing:-0.4px;">Hey, I'm Sal!</div>
       <div style="font-size:14px;color:rgba(255,255,255,.55);text-align:center;line-height:1.6;max-width:280px;">
         Your RiffBank guide. I'll help you manage songs, projects, versions, and everything in between.
@@ -2313,6 +2501,68 @@ function openSalSheet() {
   function close() { backdrop.remove(); sheet.remove(); }
   backdrop.addEventListener("click", close);
   sheet.querySelector("#salClose")?.addEventListener("click", close);
+
+  document.body.appendChild(backdrop);
+  document.body.appendChild(sheet);
+}
+
+// Sal first-time onboarding — auto-opens once for new users
+function openSalOnboarding() {
+  if (localStorage.getItem("salOnboardingDone")) return;
+  if (state.songs?.length) { localStorage.setItem("salOnboardingDone", "1"); return; }
+
+  // Remove any existing Sal sheet
+  document.getElementById("salSheetBackdrop")?.remove();
+  document.getElementById("salSheet")?.remove();
+
+  const backdrop = document.createElement("div");
+  backdrop.id = "salSheetBackdrop";
+  backdrop.className = "actionSheetBackdrop";
+
+  const sheet = document.createElement("div");
+  sheet.id = "salSheet";
+  sheet.className = "actionSheet";
+  sheet.style.cssText = "padding: 0; overflow: hidden; border-radius: 22px;";
+  sheet.innerHTML = `
+    <div style="display:flex;flex-direction:column;align-items:center;padding:32px 24px 20px;gap:14px;">
+      ${salSvg(96)}
+      <div style="font-size:24px;font-weight:900;color:#fff;letter-spacing:-0.4px;">Welcome to RiffBank!</div>
+      <div style="font-size:15px;color:rgba(255,255,255,.55);text-align:center;line-height:1.7;max-width:290px;">
+        Hey, I'm <strong style="color:#fff;">Sal</strong>! I'll be your guide around here.<br><br>
+        RiffBank keeps all your songs, versions, and projects safe in <strong style="color:#fff;">Google Drive</strong> — record on any device and access your music anywhere.
+      </div>
+    </div>
+    <div style="height:1px;background:rgba(255,255,255,.08);margin:0 16px;"></div>
+    <div style="padding:8px 0 6px;display:flex;flex-direction:column;">
+      <button class="actionSheetBtn" id="salConnectDrive" style="font-weight:700;">Hi Sal! Yes, connect my Google Drive!</button>
+      <button class="actionSheetBtn" id="salDismiss" style="color:rgba(255,255,255,.4);font-size:13px;">Hi Sal! I don't need you, I can do this MYSELF</button>
+    </div>
+  `;
+
+  function close() { backdrop.remove(); sheet.remove(); localStorage.setItem("salOnboardingDone", "1"); }
+
+  backdrop.addEventListener("click", close);
+
+  sheet.querySelector("#salConnectDrive")?.addEventListener("click", async () => {
+    toast("Connecting to Google Drive…");
+    const result = await gdriveConnect();
+    if (result.success) {
+      state.settings.driveRoot = result.homeFolderName || "RiffBank";
+      saveState();
+      toast("Connected to Google Drive! Sal approves.");
+      close();
+      // Kick off sync now that we're connected
+      incrementalSyncFromDrive().then(() => {
+        render();
+        syncMiniPlayerUI();
+        preFetchDriveAudio().catch(console.warn);
+      }).catch(console.warn);
+    } else {
+      toast(result.error || "Connection failed — try again!");
+    }
+  });
+
+  sheet.querySelector("#salDismiss")?.addEventListener("click", close);
 
   document.body.appendChild(backdrop);
   document.body.appendChild(sheet);
@@ -3843,9 +4093,10 @@ async function preFetchDriveAudio() {
       if (!v.driveFileId || v.fileId) continue; // no Drive file, or local copy already exists
       const dbKey = `gdrive:${v.driveFileId}`;
       const existing = await audioGet(dbKey);
-      if (existing?.blob) continue; // already cached
+      if (existing?.blob) { _cachedDriveIds.add(v.driveFileId); continue; }
       const blob = await gdriveFetchBlob(v.driveFileId);
       if (blob) {
+        _cachedDriveIds.add(v.driveFileId);
         await putAudioBlob({
           id: dbKey,
           blob,
@@ -3867,12 +4118,27 @@ async function init() {
     await new Promise(r => requestAnimationFrame(r));
   }
 
-  // Auto-seed disabled — use Drive sync or manual import instead
-  // const seeded = await seedDefaultLibraryIfNeeded({ force: false });
-  // if (seeded) toast("Seeded library 🎧");
-
-  // Load Google Identity Services (non-blocking, for Drive integration)
-  gdriveLoadGIS();
+  // Welcome screen (after splash, before app loads)
+  if (!DISABLE_WELCOME) {
+    const action = await showWelcomeScreen();
+    localStorage.setItem("salOnboardingDone", "1");
+    if (action === "hasAccount") {
+      // User has an account — connect Google Drive immediately
+      gdriveLoadGIS();
+      toast("Connecting to Google Drive…");
+      const result = await gdriveConnect();
+      if (result.success) {
+        state.settings.driveRoot = result.homeFolderName || "RiffBank";
+        saveState();
+        toast("Connected! Syncing your library…");
+      }
+    } else {
+      gdriveLoadGIS();
+    }
+  } else {
+    // Load Google Identity Services (non-blocking, for Drive integration)
+    gdriveLoadGIS();
+  }
 
   // Incremental sync runs in background after render (see below)
 
@@ -3896,10 +4162,23 @@ async function init() {
   // Restore cover art from IndexedDB cache (instant, no auth needed)
   await restoreCoverUrlsFromCache();
 
+  // Scan which Drive audio blobs are already cached locally (for sync debug dots)
+  for (const song of (state.songs || [])) {
+    for (const v of (song.versions || [])) {
+      if (!v.driveFileId || v.fileId || v.localAudioId) continue;
+      try {
+        const rec = await audioGet(`gdrive:${v.driveFileId}`);
+        if (rec?.blob) _cachedDriveIds.add(v.driveFileId);
+      } catch {}
+    }
+  }
+
   setHeader("RiffBank");
   syncTabs();
   render();
   syncMiniPlayerUI();
+
+  // Sal onboarding now handled by welcome screen before init loads
 
   // Background: incremental sync + pre-fetch (non-blocking)
   if (gdriveIsConnected()) {
@@ -4211,6 +4490,7 @@ function renderProjectSongs(projectName) {
         <div class="songMain">
           <div class="songTop">
             <div class="songTitleRow">
+              ${syncDot(s)}
               <div class="songTitle">${escapeHtml(s.title || "Untitled")}</div>
             </div>
             <button class="songMore" data-proj-song-more="${s.id}" aria-label="Song menu">&#x22EF;</button>
@@ -6146,6 +6426,7 @@ function renderSongsList() {
               </div>
             </div>
             <div class="songCardInfo">
+              ${syncDot(s)}
               <div class="songCardTitle">${escapeHtml(s.title)}</div>
               <div class="songCardSub">${vCount} ver${vCount !== 1 ? "s" : ""}</div>
             </div>
@@ -6446,6 +6727,7 @@ $("#addVersionJump")?.addEventListener("click", () => {
 
             <div class="vMain">
               <div class="vTop">
+                ${window.RIFFBANK_DEBUG_SYNC ? `<span class="syncDot syncDot--${getVersionSyncColor(v)}" title="${getVersionSyncColor(v) === "green" ? "Local" : getVersionSyncColor(v) === "yellow" ? "Drive-only" : "No audio"}"></span>` : ""}
                 <div class="vTitle">${escapeHtml(v.label || "Version")}</div>
               </div>
               <div class="vSub">${sub}</div>
@@ -7836,6 +8118,19 @@ function renderSettings() {
       </div>
 
       <div class="hr"></div>
+      <h2>Debug Tools</h2>
+      <div class="row" style="gap:10px; align-items:center">
+        <button id="toggleSyncDebug" class="btn" style="flex:1; ${window.RIFFBANK_DEBUG_SYNC ? "background:rgba(78,205,196,.12); border-color:rgba(78,205,196,.3); color:#4ecdc4" : ""}">${window.RIFFBANK_DEBUG_SYNC ? "Sync Debug: ON" : "Sync Debug: OFF"}</button>
+        <button id="runSyncAudit" class="btn" style="flex:1">Run Sync Audit</button>
+      </div>
+      <div class="small" style="margin-top:4px">
+        Sync Debug shows colored dots on song cards:
+        <span style="color:#4ade80">●</span> local audio
+        <span style="color:#facc15">●</span> Drive-only
+        <span style="color:#f87171">●</span> no audio
+      </div>
+
+      <div class="hr"></div>
       <h2>Danger zone</h2>
       <button id="wipe" class="btn">Wipe local data</button>
       <div class="small">This only affects this device/browser. Export first if you care.</div>
@@ -7911,8 +8206,9 @@ function renderSettings() {
       state = driveState;
       normalizeState();
       localStorage.setItem(LS_KEY, JSON.stringify(state));
-      toast("Synced from Drive ✅ ☁️");
+      toast("Synced from Drive — caching audio…");
       render();
+      await cacheAllDriveAudio();
     } else {
       toast("No state found on Drive (or token expired) 😅");
     }
@@ -7968,8 +8264,9 @@ function renderSettings() {
     state.songs = songs;
     normalizeState();
     saveState();
-    toast(`Rebuilt ${songs.length} songs from Drive ✅ 🔄`);
+    toast(`Rebuilt ${songs.length} songs — caching audio…`);
     render();
+    await cacheAllDriveAudio();
   });
 
   // Existing settings
@@ -7998,26 +8295,48 @@ function renderSettings() {
   $("#genMissingArt")?.addEventListener("click", () => startBulkGenArt(true));
   $("#regenAllArt")?.addEventListener("click", () => startBulkGenArt(false));
 
+  $("#toggleSyncDebug")?.addEventListener("click", () => {
+    window.RIFFBANK_DEBUG_SYNC = !window.RIFFBANK_DEBUG_SYNC;
+    toast(`Sync debug ${window.RIFFBANK_DEBUG_SYNC ? "ON" : "OFF"}`);
+    renderSettings();
+  });
+
+  $("#runSyncAudit")?.addEventListener("click", async () => {
+    toast("Running sync audit…");
+    const results = await window.auditSync();
+    const reds = results.filter(r => r.status === "red");
+    const yellows = results.filter(r => r.status === "yellow");
+    const greens = results.length - reds.length - yellows.length;
+    let msg = `${results.length} versions: ${greens} local, ${yellows.length} Drive-only, ${reds.length} broken`;
+    if (reds.length) msg += `\n\nBroken:\n${reds.map(r => `• ${r.song} / ${r.version}`).join("\n")}`;
+    alert(msg);
+  });
+
   $("#wipe").addEventListener("click", async () => {
     if (!confirm("Wipe all local RiffBank data on this browser?")) return;
 
     localStorage.removeItem(LS_KEY);
+    localStorage.removeItem("salOnboardingDone");
     state = loadState();
     normalizeState();
     // Save locally only — do NOT sync empty state to Drive
     localStorage.setItem(LS_KEY, JSON.stringify(state));
 
-    toast("Wiped 🧼 (Drive state untouched)");
     currentTab = "home";
+    drawerView = null;
+    overlayView = null;
     setHeader("RiffBank");
 
     if (screens.home) screens.home.scrollTop = 0;
     try { window.scrollTo(0, 0); } catch {}
     try { document.documentElement.scrollTop = 0; } catch {}
     try { document.body.scrollTop = 0; } catch {}
-    requestAnimationFrame(() => { if (activeScreenEl) activeScreenEl.scrollTop = 0; });
 
     render();
+
+    // Replay splash like a fresh start, then show Sal onboarding
+    await replaySplash();
+    openSalOnboarding();
   });
 }
 
