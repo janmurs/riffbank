@@ -1708,12 +1708,17 @@ body.splashing #toast {
   font-size: 52px;
   line-height: 1.02;
   letter-spacing: -1.1px;
-  color: rgba(255,255,255,.95);
+  color: #fff;
+  background: linear-gradient(135deg, #a855f7, #ec4899, #a855f7);
+  background-size: 200% 200%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 
   transform: translateY(26px);
   animation:
     splashTitleSettle var(--splash-title-settle-ms) cubic-bezier(.2,.9,.2,1) forwards,
-    splashGlowBreathe var(--splash-glow-ms) ease-in-out infinite;
+    welcomeTitleShimmer 3s ease infinite;
 }
 
 /* Subtext: JS controls show + jump */
@@ -1728,7 +1733,7 @@ body.splashing #toast {
   font-size: 14px;
   font-weight: 800;
   letter-spacing: .2px;
-  color: rgba(255,255,255,.68);
+  color: rgba(255,255,255,0.45);
 
   opacity: 0;
   transform: translateY(10px);
@@ -1906,7 +1911,7 @@ body.splashing #toast {
 /* Rainbow ring removed — each card now has its own solid accent border */
 
 .splashSubText.pulse{
-  color: rgba(255,255,255,.82);
+  color: rgba(255,255,255,0.45);
 }
 
 .splashSubText.pulse::after{

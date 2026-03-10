@@ -374,9 +374,9 @@ class Nav {
 
     // Render live DOM invisibly underneath the queen overlay.
     // This removes pdActive, restores normal .view dimensions, etc.
-    this._isBackNav = true;
+    // Note: do NOT set _isBackNav here — goBack's doRender() manages
+    // that flag so setHeader(restoreState.headerTitle) isn't skipped.
     renderUnderneath();
-    this._isBackNav = false;
 
     // Restore scroll position on the newly-rendered screen
     if (aceScrollTop && activeScreenEl) activeScreenEl.scrollTop = aceScrollTop;
@@ -2435,6 +2435,7 @@ function salSvg(size = 140) {
 // result: "getStarted" or "hasAccount"
 function showWelcomeScreen() {
   return new Promise(resolve => {
+    document.body.classList.add("welcoming");
     const el = document.createElement("div");
     el.id = "welcomeScreen";
     el.className = "welcomeScreen";
@@ -2457,6 +2458,7 @@ function showWelcomeScreen() {
       el.classList.add("welcomeOut");
       el.addEventListener("animationend", () => {
         el.remove();
+        document.body.classList.remove("welcoming");
         resolve(action);
       }, { once: true });
     });
@@ -4140,8 +4142,6 @@ async function init() {
     gdriveLoadGIS();
   }
 
-  // Incremental sync runs in background after render (see below)
-
   // Seed example release if none exist yet
   if (!state.releases.length) {
     const jmSongs = state.songs.filter(s => /jonathan/i.test(s.project || ""));
@@ -4159,28 +4159,27 @@ async function init() {
     }
   }
 
-  // Restore cover art from IndexedDB cache (instant, no auth needed)
-  await restoreCoverUrlsFromCache();
-
-  // Scan which Drive audio blobs are already cached locally (for sync debug dots)
-  for (const song of (state.songs || [])) {
-    for (const v of (song.versions || [])) {
-      if (!v.driveFileId || v.fileId || v.localAudioId) continue;
-      try {
-        const rec = await audioGet(`gdrive:${v.driveFileId}`);
-        if (rec?.blob) _cachedDriveIds.add(v.driveFileId);
-      } catch {}
-    }
-  }
-
+  // Render immediately so user sees the home screen right after welcome
   setHeader("RiffBank");
   syncTabs();
   render();
   syncMiniPlayerUI();
 
-  // Sal onboarding now handled by welcome screen before init loads
+  // Background: restore cover art, scan cached blobs, sync Drive (non-blocking)
+  restoreCoverUrlsFromCache().then(() => render()).catch(() => {});
 
-  // Background: incremental sync + pre-fetch (non-blocking)
+  (async () => {
+    for (const song of (state.songs || [])) {
+      for (const v of (song.versions || [])) {
+        if (!v.driveFileId || v.fileId || v.localAudioId) continue;
+        try {
+          const rec = await audioGet(`gdrive:${v.driveFileId}`);
+          if (rec?.blob) _cachedDriveIds.add(v.driveFileId);
+        } catch {}
+      }
+    }
+  })();
+
   if (gdriveIsConnected()) {
     incrementalSyncFromDrive().then(() => {
       preFetchDriveAudio().catch(console.warn);

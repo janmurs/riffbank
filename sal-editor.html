@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Sal SVG Path Editor</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; color: #fff; font-family: system-ui, sans-serif; display: flex; height: 100vh; }
+
+  #svgWrap { flex: 1; display: flex; align-items: center; justify-content: center; position: relative; overflow: hidden; }
+  #svgWrap svg { width: 80vh; height: 80vh; }
+  #svgWrap svg path, #svgWrap svg ellipse { transition: opacity 0.1s; }
+  #svgWrap svg .hovered { stroke: red; stroke-width: 3; stroke-opacity: 0.8; }
+  #svgWrap svg .selected { opacity: 0.15; }
+
+  /* Brush cursor */
+  #brushCursor {
+    position: fixed; pointer-events: none; border: 2px solid rgba(168,85,247,0.8);
+    border-radius: 50%; display: none; z-index: 9999;
+    box-shadow: 0 0 8px rgba(168,85,247,0.4);
+  }
+  #brushCursor.painting { border-color: #fff; box-shadow: 0 0 12px rgba(255,255,255,0.5); }
+
+  #sidebar { width: 360px; background: #16213e; padding: 20px; overflow-y: auto; border-left: 1px solid #333; }
+  h2 { font-size: 18px; margin-bottom: 12px; color: #a855f7; }
+  h3 { font-size: 14px; margin-bottom: 8px; color: #c084fc; }
+  p { font-size: 13px; color: #aaa; margin-bottom: 16px; line-height: 1.5; }
+
+  #info { background: #0f3460; border-radius: 8px; padding: 12px; margin-bottom: 16px; font-size: 12px; min-height: 80px; }
+  #info .label { color: #888; }
+  #info .value { color: #fff; font-family: monospace; }
+
+  #selectedList { margin-bottom: 16px; }
+  .selectedItem { display: flex; align-items: center; justify-content: space-between; background: #1a1a3e; padding: 6px 10px; border-radius: 4px; margin-bottom: 4px; font-size: 12px; font-family: monospace; }
+  .selectedItem .remove { cursor: pointer; color: #f44; font-weight: bold; }
+
+  button { padding: 10px 20px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; width: 100%; margin-bottom: 8px; }
+  .btnPrimary { background: linear-gradient(135deg, #a855f7, #7c3aed); color: #fff; }
+  .btnSecondary { background: #333; color: #fff; }
+  .btnDanger { background: #c0392b; color: #fff; }
+  .btnActive { background: linear-gradient(135deg, #a855f7, #7c3aed); color: #fff; }
+
+  #output { background: #000; padding: 10px; border-radius: 8px; font-family: monospace; font-size: 11px; color: #0f0; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; display: none; margin-top: 12px; }
+
+  .counter { font-size: 28px; font-weight: 900; color: #a855f7; }
+  .zoom-hint { position: absolute; bottom: 12px; left: 12px; font-size: 11px; color: #555; }
+
+  .row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .row > * { flex: 1; }
+  .swatch { display: inline-block; width: 24px; height: 24px; border: 2px solid #fff; border-radius: 4px; cursor: pointer; flex: none; }
+  .swatch.active { outline: 2px solid #a855f7; outline-offset: 2px; }
+
+  input[type=range] { width: 100%; accent-color: #a855f7; }
+  .slider-label { font-size: 11px; color: #888; display: flex; justify-content: space-between; }
+
+  .section { background: #0d1b3e; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+
+  .filter-swatch { display: inline-block; width: 16px; height: 16px; border: 1px solid #fff; border-radius: 3px; vertical-align: middle; margin-right: 4px; cursor: pointer; }
+  .filter-swatch.active { outline: 2px solid #a855f7; outline-offset: 1px; }
+</style>
+</head>
+<body>
+
+<div id="brushCursor"></div>
+
+<div id="svgWrap">
+  <div class="zoom-hint">Scroll to zoom · Alt+drag to pan</div>
+</div>
+
+<div id="sidebar">
+  <h2>Sal Path Editor</h2>
+
+  <div id="info">
+    <div><span class="label">Hover over a path...</span></div>
+  </div>
+
+  <!-- Brush Paint Mode -->
+  <div class="section">
+    <h2 style="margin-bottom:8px;">Brush Paint</h2>
+    <p style="margin-bottom:8px;font-size:11px;">Click+drag to paint. Eyedrop to pick colors. Filter locks the brush to only recolor matching paths.</p>
+
+    <div class="row">
+      <button id="paintToggle" class="btnSecondary" onclick="togglePaint()" style="margin:0;">Paint: Off</button>
+      <button id="eyedropBtn" class="btnSecondary" onclick="toggleEyedrop()" style="margin:0;">Eyedrop</button>
+    </div>
+
+    <!-- Brush color -->
+    <h3>Brush color</h3>
+    <div class="row" style="margin-bottom:12px;">
+      <span id="brushSwatch" class="swatch" style="background:#C4A26E;" onclick="toggleEyedrop()"></span>
+      <span id="brushHex" style="font-family:monospace;font-size:13px;">#C4A26E</span>
+    </div>
+
+    <!-- Brush size -->
+    <h3>Brush size</h3>
+    <input type="range" id="brushSize" min="5" max="120" value="30" oninput="updateBrushSize()">
+    <div class="slider-label"><span>5px</span><span id="brushSizeLabel">30px</span><span>120px</span></div>
+
+    <!-- Filter color -->
+    <h3 style="margin-top:12px;">Filter: only recolor this color</h3>
+    <div class="row">
+      <button id="filterToggle" class="btnSecondary" onclick="toggleFilter()" style="margin:0;font-size:12px;">Filter: Off</button>
+      <button id="filterPickBtn" class="btnSecondary" onclick="toggleFilterPick()" style="margin:0;font-size:12px;">Pick filter color</button>
+    </div>
+    <div class="row" id="filterInfo" style="display:none;">
+      <span id="filterSwatch" class="swatch" style="background:#5C3A1E;"></span>
+      <span id="filterHex" style="font-family:monospace;font-size:13px;">#5C3A1E</span>
+    </div>
+  </div>
+
+  <!-- Stroke history -->
+  <div class="section">
+    <h2 style="margin-bottom:8px;">Strokes <span class="counter" id="strokeCount">0</span></h2>
+    <div id="strokeList" style="max-height:120px;overflow-y:auto;margin-bottom:8px;"></div>
+    <button class="btnSecondary" onclick="undoLastStroke()" style="margin:0;">Undo Last Stroke</button>
+  </div>
+
+  <button class="btnPrimary" onclick="exportSVG()">Export Modified SVG</button>
+
+  <hr style="border:0;border-top:1px solid #333;margin:16px 0;">
+
+  <!-- Selection mode (original) -->
+  <h2>Select Mode <span class="counter" id="count">0</span></h2>
+  <p style="font-size:11px;">Click paths (with paint off) to select for removal.</p>
+  <div id="selectedList"></div>
+
+  <button class="btnPrimary" onclick="copyIndices()">Copy Path Indices</button>
+  <button class="btnSecondary" onclick="undoLast()">Undo Last Selection</button>
+  <button class="btnDanger" onclick="clearAll()">Clear All Selections</button>
+
+  <div id="output"></div>
+</div>
+
+<script>
+const selected = new Map();
+let allPaths = [];
+
+// Paint state
+let paintMode = false;
+let eyedropMode = false;
+let filterPickMode = false;
+let brushColor = '#C4A26E';
+let brushRadius = 15;
+let painting = false;
+let filterOn = false;
+let filterColor = '#5C3A1E';
+
+// Stroke tracking: each stroke is an array of {idx, el, oldFill, newFill}
+const strokes = [];
+let currentStroke = null;
+// Track which paths were already painted this stroke (avoid duplicates)
+let currentStrokePainted = new Set();
+
+const brushCursor = document.getElementById('brushCursor');
+
+function updateBrushSize() {
+  const val = document.getElementById('brushSize').value;
+  brushRadius = val / 2;
+  document.getElementById('brushSizeLabel').textContent = val + 'px';
+  brushCursor.style.width = val + 'px';
+  brushCursor.style.height = val + 'px';
+}
+
+// Hit-test: sample points in a circle and use elementsFromPoint
+function getPathsUnderBrush(cx, cy) {
+  const hit = new Set();
+  // Sample points in a grid within the brush radius
+  const step = Math.max(3, brushRadius / 4);
+  for (let dx = -brushRadius; dx <= brushRadius; dx += step) {
+    for (let dy = -brushRadius; dy <= brushRadius; dy += step) {
+      if (dx * dx + dy * dy > brushRadius * brushRadius) continue;
+      const els = document.elementsFromPoint(cx + dx, cy + dy);
+      for (const el of els) {
+        if (el.dataset && el.dataset.idx !== undefined) {
+          hit.add(el);
+        }
+      }
+    }
+  }
+  return hit;
+}
+
+function colorsMatch(a, b) {
+  // Normalize hex comparison (case-insensitive)
+  if (!a || !b) return false;
+  return a.toLowerCase() === b.toLowerCase();
+}
+
+function paintAt(cx, cy) {
+  const paths = getPathsUnderBrush(cx, cy);
+  for (const el of paths) {
+    const idx = parseInt(el.dataset.idx);
+    if (currentStrokePainted.has(idx)) continue;
+    const oldFill = el.getAttribute('fill') || '';
+    if (colorsMatch(oldFill, brushColor)) continue;
+    if (filterOn && !colorsMatch(oldFill, filterColor)) continue;
+
+    el.setAttribute('fill', brushColor);
+    currentStroke.push({ idx, el, oldFill, newFill: brushColor });
+    currentStrokePainted.add(idx);
+  }
+}
+
+async function init() {
+  const resp = await fetch('./sal.svg');
+  const text = await resp.text();
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(text, 'image/svg+xml');
+  const svg = doc.querySelector('svg');
+
+  document.getElementById('svgWrap').prepend(svg);
+
+  allPaths = [...svg.querySelectorAll('path, ellipse')];
+
+  allPaths.forEach((el, idx) => {
+    el.dataset.idx = idx;
+
+    el.addEventListener('mouseenter', () => {
+      if (painting) return;
+      el.classList.add('hovered');
+      const fill = el.getAttribute('fill') || '';
+      const transform = el.getAttribute('transform') || '';
+      const d = el.getAttribute('d') || '';
+      const tag = el.tagName;
+      document.getElementById('info').innerHTML = `
+        <div><span class="label">Index:</span> <span class="value">${idx}</span></div>
+        <div><span class="label">Tag:</span> <span class="value">${tag}</span></div>
+        <div><span class="label">Fill:</span> <span class="value"><span style="display:inline-block;width:12px;height:12px;background:${fill};border:1px solid #fff;vertical-align:middle;border-radius:2px;"></span> ${fill}</span></div>
+        <div><span class="label">Transform:</span> <span class="value">${transform}</span></div>
+        <div><span class="label">Path length:</span> <span class="value">${d.length} chars</span></div>
+        <div><span class="label">Selected:</span> <span class="value">${selected.has(idx) ? 'YES' : 'no'}</span></div>
+      `;
+    });
+
+    el.addEventListener('mouseleave', () => {
+      el.classList.remove('hovered');
+    });
+  });
+
+  // Unified mouse handling on svgWrap
+  const wrap = document.getElementById('svgWrap');
+  let scale = 1, panX = 0, panY = 0, dragging = false, lastX, lastY;
+
+  wrap.addEventListener('mousedown', (e) => {
+    // Eyedrop click
+    if (eyedropMode || filterPickMode) {
+      const target = e.target;
+      if (target.dataset && target.dataset.idx !== undefined) {
+        const fill = target.getAttribute('fill') || '#000000';
+        if (eyedropMode) {
+          brushColor = fill;
+          document.getElementById('brushSwatch').style.background = fill;
+          document.getElementById('brushHex').textContent = fill;
+          eyedropMode = false;
+          document.getElementById('eyedropBtn').textContent = 'Eyedrop';
+          document.getElementById('eyedropBtn').className = 'btnSecondary';
+        } else {
+          filterColor = fill;
+          document.getElementById('filterSwatch').style.background = fill;
+          document.getElementById('filterHex').textContent = fill;
+          filterPickMode = false;
+          document.getElementById('filterPickBtn').textContent = 'Pick filter color';
+          document.getElementById('filterPickBtn').className = 'btnSecondary';
+        }
+        wrap.style.cursor = paintMode ? 'none' : '';
+      }
+      e.preventDefault();
+      return;
+    }
+
+    // Alt+drag = pan
+    if (e.altKey || e.button === 1) {
+      dragging = true;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      e.preventDefault();
+      return;
+    }
+
+    // Paint mode: start brush stroke
+    if (paintMode) {
+      painting = true;
+      currentStroke = [];
+      currentStrokePainted = new Set();
+      brushCursor.classList.add('painting');
+      paintAt(e.clientX, e.clientY);
+      e.preventDefault();
+      return;
+    }
+
+    // Normal click: select/deselect
+    const target = e.target;
+    if (target.dataset && target.dataset.idx !== undefined) {
+      const clickIdx = parseInt(target.dataset.idx);
+      if (selected.has(clickIdx)) {
+        selected.delete(clickIdx);
+        target.classList.remove('selected');
+      } else {
+        selected.set(clickIdx, {
+          el: target,
+          fill: target.getAttribute('fill'),
+          transform: target.getAttribute('transform') || '',
+          tag: target.tagName
+        });
+        target.classList.add('selected');
+      }
+      updateUI();
+    }
+  });
+
+  wrap.addEventListener('mousemove', (e) => {
+    // Update brush cursor position
+    if (paintMode || eyedropMode || filterPickMode) {
+      const size = brushRadius * 2;
+      brushCursor.style.left = (e.clientX - brushRadius) + 'px';
+      brushCursor.style.top = (e.clientY - brushRadius) + 'px';
+      brushCursor.style.width = size + 'px';
+      brushCursor.style.height = size + 'px';
+      brushCursor.style.display = 'block';
+    }
+
+    if (dragging) {
+      panX += e.clientX - lastX;
+      panY += e.clientY - lastY;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      svg.style.transform = `translate(${panX}px,${panY}px) scale(${scale})`;
+      return;
+    }
+
+    if (painting) {
+      paintAt(e.clientX, e.clientY);
+    }
+  });
+
+  window.addEventListener('mouseup', () => {
+    dragging = false;
+    if (painting) {
+      painting = false;
+      brushCursor.classList.remove('painting');
+      if (currentStroke && currentStroke.length > 0) {
+        strokes.push(currentStroke);
+        updateStrokeUI();
+      }
+      currentStroke = null;
+      currentStrokePainted = null;
+    }
+  });
+
+  wrap.addEventListener('mouseleave', () => {
+    brushCursor.style.display = 'none';
+  });
+
+  wrap.addEventListener('mouseenter', () => {
+    if (paintMode || eyedropMode || filterPickMode) {
+      brushCursor.style.display = 'block';
+    }
+  });
+
+  svg.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? 0.9 : 1.1;
+    scale *= delta;
+    scale = Math.max(0.3, Math.min(5, scale));
+    svg.style.transform = `translate(${panX}px,${panY}px) scale(${scale})`;
+  });
+
+  // Initial brush cursor size
+  updateBrushSize();
+}
+
+function togglePaint() {
+  paintMode = !paintMode;
+  const btn = document.getElementById('paintToggle');
+  btn.textContent = paintMode ? 'Paint: ON' : 'Paint: Off';
+  btn.className = paintMode ? 'btnActive' : 'btnSecondary';
+  const wrap = document.getElementById('svgWrap');
+  wrap.style.cursor = paintMode ? 'none' : '';
+  brushCursor.style.display = paintMode ? 'block' : 'none';
+}
+
+function toggleEyedrop() {
+  eyedropMode = !eyedropMode;
+  filterPickMode = false;
+  const btn = document.getElementById('eyedropBtn');
+  btn.textContent = eyedropMode ? 'Click a path...' : 'Eyedrop';
+  btn.className = eyedropMode ? 'btnActive' : 'btnSecondary';
+  document.getElementById('filterPickBtn').textContent = 'Pick filter color';
+  document.getElementById('filterPickBtn').className = 'btnSecondary';
+  document.getElementById('svgWrap').style.cursor = eyedropMode ? 'cell' : (paintMode ? 'none' : '');
+}
+
+function toggleFilter() {
+  filterOn = !filterOn;
+  const btn = document.getElementById('filterToggle');
+  btn.textContent = filterOn ? 'Filter: ON' : 'Filter: Off';
+  btn.className = filterOn ? 'btnActive' : 'btnSecondary';
+  document.getElementById('filterInfo').style.display = filterOn ? 'flex' : 'none';
+}
+
+function toggleFilterPick() {
+  filterPickMode = !filterPickMode;
+  eyedropMode = false;
+  const btn = document.getElementById('filterPickBtn');
+  btn.textContent = filterPickMode ? 'Click a path...' : 'Pick filter color';
+  btn.className = filterPickMode ? 'btnActive' : 'btnSecondary';
+  document.getElementById('eyedropBtn').textContent = 'Eyedrop';
+  document.getElementById('eyedropBtn').className = 'btnSecondary';
+  document.getElementById('svgWrap').style.cursor = filterPickMode ? 'cell' : (paintMode ? 'none' : '');
+}
+
+function updateStrokeUI() {
+  document.getElementById('strokeCount').textContent = strokes.length;
+  const list = document.getElementById('strokeList');
+  list.innerHTML = '';
+  for (let i = strokes.length - 1; i >= 0; i--) {
+    const s = strokes[i];
+    const colors = new Set(s.map(p => p.oldFill));
+    const colorDots = [...colors].map(c => `<span style="display:inline-block;width:10px;height:10px;background:${c};border:1px solid #fff;border-radius:2px;"></span>`).join('');
+    const div = document.createElement('div');
+    div.className = 'selectedItem';
+    div.innerHTML = `<span>Stroke ${i + 1}: ${s.length} paths ${colorDots} → <span style="display:inline-block;width:10px;height:10px;background:${s[0].newFill};border:1px solid #fff;border-radius:2px;"></span></span>`;
+    list.appendChild(div);
+  }
+}
+
+function undoLastStroke() {
+  if (strokes.length === 0) return;
+  const stroke = strokes.pop();
+  for (const item of stroke) {
+    item.el.setAttribute('fill', item.oldFill);
+  }
+  updateStrokeUI();
+}
+
+function exportSVG() {
+  const svg = document.querySelector('#svgWrap svg');
+  const clone = svg.cloneNode(true);
+  clone.style.transform = '';
+  clone.querySelectorAll('.hovered').forEach(el => el.classList.remove('hovered'));
+  clone.querySelectorAll('.selected').forEach(el => el.classList.remove('selected'));
+  clone.querySelectorAll('[data-idx]').forEach(el => el.removeAttribute('data-idx'));
+
+  const svgText = new XMLSerializer().serializeToString(clone);
+  const blob = new Blob([svgText], { type: 'image/svg+xml' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'sal-modified.svg';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function updateUI() {
+  document.getElementById('count').textContent = selected.size;
+  const list = document.getElementById('selectedList');
+  list.innerHTML = '';
+  for (const [idx, info] of selected) {
+    const div = document.createElement('div');
+    div.className = 'selectedItem';
+    div.innerHTML = `<span>#${idx} <span style="display:inline-block;width:10px;height:10px;background:${info.fill};border:1px solid #fff;border-radius:2px;"></span> ${info.fill} ${info.transform.slice(0,25)}</span><span class="remove" data-idx="${idx}">&times;</span>`;
+    div.querySelector('.remove').addEventListener('click', () => {
+      info.el.classList.remove('selected');
+      selected.delete(idx);
+      updateUI();
+    });
+    list.appendChild(div);
+  }
+}
+
+function copyIndices() {
+  const indices = [...selected.keys()].sort((a,b) => a-b);
+  const text = JSON.stringify(indices);
+  navigator.clipboard.writeText(text).then(() => {
+    const out = document.getElementById('output');
+    out.style.display = 'block';
+    out.textContent = `Copied ${indices.length} indices:\n${text}`;
+  });
+}
+
+function undoLast() {
+  const keys = [...selected.keys()];
+  if (keys.length === 0) return;
+  const last = keys[keys.length - 1];
+  selected.get(last).el.classList.remove('selected');
+  selected.delete(last);
+  updateUI();
+}
+
+function clearAll() {
+  for (const [idx, info] of selected) {
+    info.el.classList.remove('selected');
+  }
+  selected.clear();
+  updateUI();
+}
+
+init();
+</script>
+</body>
+</html>
