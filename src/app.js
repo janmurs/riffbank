@@ -10,7 +10,7 @@
 window.onerror = (m, src, line, col) => alert(`JS ERROR:\n${m}\n${line}:${col}`);
 
 // Dev toggles: skip splash / welcome screen
- const DISABLE_SPLASH = true;
+ const DISABLE_SPLASH = false;
  const DISABLE_WELCOME = false;
 
 // Debug toggle: highlight sync status on song cards
