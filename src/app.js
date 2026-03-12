@@ -10,8 +10,8 @@
 window.onerror = (m, src, line, col) => alert(`JS ERROR:\n${m}\n${line}:${col}`);
 
 // Dev toggles: skip splash / welcome screen
- const DISABLE_SPLASH = false;
- const DISABLE_WELCOME = false;
+ const DISABLE_SPLASH = true;
+ const DISABLE_WELCOME = true;
 
 // Debug toggle: highlight sync status on song cards
 // Toggle via console: toggleSyncDebug()
@@ -63,6 +63,7 @@ let splashAlreadyRan = false;
 // ---------------------
 let playerFilter = "all"; // all | playlists | projects | releases
 let playerSort = "recent"; // recent | title
+let playerQuery = "";
 let playerQueue = []; // array of { songId, versionId }
 let sheetState = null; // { songId, versionId }
 let lastTabBeforeFullPlayer = null;
@@ -1426,6 +1427,7 @@ async function playNowPlaying({ autoplay = true } = {}){
       if (miniToggleEl) miniToggleEl.textContent = "▶";
     });
     navigator.mediaSession.setActionHandler("nexttrack", () => {
+      if (state.player?.repeat === "one") return;
       advanceToNextTrack({ render: true });
     });
     navigator.mediaSession.setActionHandler("previoustrack", () => {
@@ -3193,8 +3195,9 @@ function stopAndResetPlayback() {
       const inner = miniPlayerEl.querySelector('.miniSwipeInner');
       // Rubber band: apply 18% resistance when swiping in a "dead" direction
       const goingNext = dx < 0;
-      const canGo = goingNext
-        ? ((state.player?.queue || []).length > 0 || !!state.player?.repeat)
+      const repeatOne = state.player?.repeat === "one";
+      const canGo = repeatOne ? false : goingNext
+        ? ((state.player?.queue || []).length > 0 || state.player?.repeat === true)
         : ((state.player?.playHistory || []).length > 0);
       const effectiveDx = canGo ? dx : dx * 0.18;
       if (inner) { inner.style.transition = 'none'; inner.style.transform = `translateX(${effectiveDx}px)`; }
@@ -3226,8 +3229,9 @@ function stopAndResetPlayback() {
       if (didDrag && Math.abs(dx) > 55) {
         const goNext = dx < 0;
         // Dead swipe check
-        const canGoForward = (state.player?.queue || []).length > 0 || !!state.player?.repeat;
-        const canGoBack = ((state.player?.playHistory || []).length > 0);
+        const repeatOne = state.player?.repeat === "one";
+        const canGoForward = !repeatOne && ((state.player?.queue || []).length > 0 || state.player?.repeat === true);
+        const canGoBack = !repeatOne && ((state.player?.playHistory || []).length > 0);
         const isDead = goNext ? !canGoForward : !canGoBack;
         if (isDead) {
           // Rubber band spring back
@@ -7692,10 +7696,20 @@ function renderVersionDetail(songId, versionId) {
 // Player
 // ---------------------
 function renderPlayer() {
-  setHeader("Player");
+  setHeader("");
 
   // Build playlist rows (one row per version where playerYes === true)
-  const items = playerItems(state); // uses playerFilter/playerSort globals
+  const allItems = playerItems(state); // uses playerFilter/playerSort globals
+
+  // Apply search filter
+  const pq = playerQuery.toLowerCase();
+  const items = pq
+    ? allItems.filter(it => {
+        const s = getSong(it.songId);
+        const hay = `${it.songName || s?.title || ""} ${s?.project || ""} ${it.versionLabel || ""}`.toLowerCase();
+        return hay.includes(pq);
+      })
+    : allItems;
 
   function openPlayerActionSheet(item) {
     // Remove any existing sheet
@@ -7799,25 +7813,38 @@ function renderPlayer() {
     document.body.appendChild(sheet);
   }
 
-  // ── Layout: Actions → Filters → List ──
+  // ── Layout: Title row → Search → Filters → List ──
   activeScreenEl.innerHTML = `
-    <div class="playerActions">
-      <button class="playerShuffleBtn ${state.player?.shuffle ? "is-active" : ""}" id="playerShuffle" aria-label="Shuffle">
-        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/>
-          <polyline points="21 16 21 21 16 21"/><line x1="4" y1="4" x2="21" y2="21"/>
-        </svg>
-      </button>
-      <button class="playerPlayBtn" id="playerPlayAll" aria-label="Play">
-        <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-      </button>
+    <div class="playerHead">
+      <div class="playerTitleRow">
+        <div class="playerPageTitle">Player</div>
+        <div class="playerActions">
+          <button class="playerShuffleBtn ${state.player?.shuffle ? "is-active" : ""}" id="playerShuffle" aria-label="Shuffle">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/>
+              <polyline points="21 16 21 21 16 21"/><line x1="4" y1="4" x2="21" y2="21"/>
+            </svg>
+          </button>
+          <button class="playerPlayBtn" id="playerPlayAll" aria-label="Play">
+            <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          </button>
+        </div>
+      </div>
+      <input
+        id="playerSearch"
+        type="text"
+        placeholder="Search player..."
+        value="${escapeHtml(playerQuery)}"
+      />
     </div>
 
-    <div class="chipsRow" aria-label="Player filters">
-      <button class="chip ${playerFilter === "all" ? "active" : ""}" data-pf="all">Riffs</button>
-      <button class="chip ${playerFilter === "playlists" ? "active" : ""}" data-pf="playlists">Playlists</button>
-      <button class="chip ${playerFilter === "projects" ? "active" : ""}" data-pf="projects">Projects</button>
-      <button class="chip ${playerFilter === "releases" ? "active" : ""}" data-pf="releases">Releases</button>
+    <div class="playerChipsSticky">
+      <div class="chipsRow" aria-label="Player filters">
+        <button class="chip ${playerFilter === "all" ? "active" : ""}" data-pf="all">Riffs</button>
+        <button class="chip ${playerFilter === "playlists" ? "active" : ""}" data-pf="playlists">Playlists</button>
+        <button class="chip ${playerFilter === "projects" ? "active" : ""}" data-pf="projects">Projects</button>
+        <button class="chip ${playerFilter === "releases" ? "active" : ""}" data-pf="releases">Releases</button>
+      </div>
     </div>
 
     <div class="playerList">
@@ -7848,6 +7875,9 @@ function renderPlayer() {
                       ${fav ? `<span class="playerBadge fav">♥</span>` : ``}
                     </div>
                   </div>
+                  <button class="playerMore" data-more-song="${it.songId}" data-more-ver="${it.versionId}" aria-label="More options">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+                  </button>
                 </div>
               `;
             }).join("")
@@ -7856,6 +7886,18 @@ function renderPlayer() {
       }
     </div>
   `;
+
+  // Search input — live filter
+  const searchInput = $("#playerSearch");
+  if (searchInput) {
+    searchInput.addEventListener("input", () => {
+      playerQuery = searchInput.value;
+      renderPlayer();
+      // Re-focus and restore cursor position
+      const el = $("#playerSearch");
+      if (el) { el.focus(); el.selectionStart = el.selectionEnd = el.value.length; }
+    });
+  }
 
   // Filter chips (single-select mode filters)
   activeScreenEl.querySelectorAll("[data-pf]").forEach(btn => {
@@ -7891,6 +7933,18 @@ function renderPlayer() {
     await playNowPlaying({ autoplay: true });
     toast("Shuffled ▶️");
     renderPlayer();
+  });
+
+  // More (...) buttons — open action sheet
+  activeScreenEl.querySelectorAll(".playerMore").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const songId = btn.getAttribute("data-more-song");
+      const verId = btn.getAttribute("data-more-ver");
+      if (!songId || !verId) return;
+      const item = items.find(x => x.songId === songId && x.versionId === verId);
+      if (item) openPlayerActionSheet(item);
+    });
   });
 
   // Row interactions: tap to play, long-press for action sheet
@@ -7930,6 +7984,7 @@ function renderPlayer() {
       renderPlayer();
     });
   });
+
 }
 
 function renderNowPlaying() {
@@ -8287,10 +8342,12 @@ function renderNowPlaying() {
   });
 
   $("#npNext")?.addEventListener("click", () => {
+    if (state.player?.repeat === "one") return;
     if (!advanceToNextTrack({ render: true })) toast("Queue empty 😅");
   });
 
   $("#npPrev")?.addEventListener("click", () => {
+    if (state.player?.repeat === "one") return;
     advanceToPrevTrack({ render: true });
   });
 
