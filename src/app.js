@@ -33,6 +33,8 @@ import {
   gdriveHasValidToken,
   gdriveGetConfig,
   gdriveConnect,
+  gdriveSignIn,
+  gdrivePickHome,
   gdriveConnectNewFolder,
   gdriveDisconnect,
   gdriveUploadAudio,
@@ -44,6 +46,8 @@ import {
   gdrivePullStateSilent,
   gdriveRebuildFromFolders,
   gdriveUploadCoverArt,
+  gdriveFindExisting,
+  gdriveConnectToFolder,
 } from "./gdrive.js";
 
 const LS_KEY = "riffbank_v1";
@@ -162,7 +166,13 @@ class Nav {
   // Call at the start of render() before any DOM mutations.
   snapshot(screenEl) {
     if (!screenEl?.innerHTML) return;
-    this.peekNode = screenEl.cloneNode(true);
+    this.peekNode = this._cloneDeep(screenEl);
+    // Strip touch artifacts so snapshot shows natural (untouched) state
+    this.peekNode.querySelectorAll(".hCard.is-touched").forEach(c => c.classList.remove("is-touched"));
+    this.peekNode.querySelectorAll(".hDarken").forEach(d => d.style.opacity = 0);
+    this.peekNode.querySelectorAll(".hArt").forEach(a => { a.style.transform = ""; a.style.scale = ""; });
+    // Bake current animation state into inline styles so clones don't restart from keyframe 0%
+    this._freezeAnimations(screenEl, this.peekNode);
     const r = screenEl.getBoundingClientRect();
     this.aceViewTop = r.top || 0;
     this.aceScrollTop = screenEl.scrollTop || 0;
@@ -193,6 +203,43 @@ class Nav {
   }
 
   // --- Shared helpers ---
+
+  // Bake live CSS animation state (opacity, transform, background-position) into
+  // inline styles on the clone, then kill the animation so it doesn't restart.
+  _freezeAnimations(live, clone) {
+    const animEls = live.querySelectorAll(".hShimmer, .hCard");
+    const cloneEls = clone.querySelectorAll(".hShimmer, .hCard");
+    animEls.forEach((el, i) => {
+      const c = cloneEls[i];
+      if (!c) return;
+      const cs = getComputedStyle(el);
+      if (el.classList.contains("hShimmer")) {
+        c.style.opacity = cs.opacity;
+        c.style.transform = cs.transform;
+      }
+      if (el.classList.contains("hCard")) {
+        c.style.backgroundPosition = cs.backgroundPosition;
+      }
+      c.style.animation = "none";
+    });
+  }
+
+  // Clone a DOM node, preserving canvas pixel data (cloneNode doesn't copy canvas content)
+  _cloneDeep(node) {
+    const clone = node.cloneNode(true);
+    const origCanvases = node.querySelectorAll('canvas');
+    const cloneCanvases = clone.querySelectorAll('canvas');
+    origCanvases.forEach((orig, i) => {
+      const c = cloneCanvases[i];
+      if (c && orig.width > 0 && orig.height > 0) {
+        c.width = orig.width;
+        c.height = orig.height;
+        try { const ctx = c.getContext('2d'); if (ctx) ctx.drawImage(orig, 0, 0); }
+        catch (e) { /* tainted canvas */ }
+      }
+    });
+    return clone;
+  }
 
   _bottomOffset() {
     const bnEl = document.getElementById("bottomNav");
@@ -257,7 +304,7 @@ class Nav {
 
       const aceContent = document.createElement("div");
       aceContent.style.cssText = `position:absolute;top:${this.aceViewTop}px;left:0;width:100%;bottom:0;overflow:hidden;`;
-      const aceScreenClone = this.peekNode.cloneNode(true);
+      const aceScreenClone = this._cloneDeep(this.peekNode);
       aceScreenClone.style.padding = this.acePadding;
       aceContent.appendChild(aceScreenClone);
       aceOverlay.appendChild(aceContent);
@@ -405,7 +452,7 @@ class Nav {
       // Screen content — frozen at exact capture-time dimensions
       const aceWrap = document.createElement("div");
       aceWrap.style.cssText = `position:absolute;top:${aceRect.top}px;left:${aceRect.left}px;width:${aceRect.width}px;height:${aceRect.height}px;overflow:hidden;`;
-      const aceClone = aceNode.cloneNode(true);
+      const aceClone = this._cloneDeep(aceNode);
       aceClone.style.width = `${aceRect.width}px`;
       aceClone.style.height = `${aceRect.height}px`;
       aceClone.style.padding = isHomeAce ? "0" : acePadding;
@@ -544,7 +591,7 @@ class Nav {
     if (peekNode && peekRect) {
       const aceWrap = document.createElement("div");
       aceWrap.style.cssText = `position:absolute;top:${peekRect.top}px;left:${peekRect.left}px;width:${peekRect.width}px;height:${peekRect.height}px;overflow:hidden;`;
-      const aceScreenClone = peekNode.cloneNode(true);
+      const aceScreenClone = this._cloneDeep(peekNode);
       aceScreenClone.style.width = `${peekRect.width}px`;
       aceScreenClone.style.height = `${peekRect.height}px`;
       aceScreenClone.style.padding = isHomeAce ? "0" : peekPadding;
@@ -650,8 +697,23 @@ function setActiveScreen(name) {
     if (!el) return;
     const isActive = screenName === name;
     el.classList.toggle("is-active", isActive);
-    if (!isActive) el.innerHTML = "";
+    // Keep home screen alive so particles don't get destroyed on nav away
+    if (!isActive && screenName !== "home") el.innerHTML = "";
   });
+
+  // Pause/resume home particles + CSS animations to freeze state while away
+  const homeGrid = screens.home?.querySelector(".homeGrid");
+  if (homeGrid) {
+    if (homeGrid._resumeTimer) { clearTimeout(homeGrid._resumeTimer); homeGrid._resumeTimer = null; }
+    if (name === "home") {
+      // Delay resume until after transition overlay is removed (~300ms transition)
+      homeGrid._resumeTimer = setTimeout(() => {
+        if (homeGrid._resumeHome) homeGrid._resumeHome();
+      }, 330);
+    } else {
+      if (homeGrid._pauseHome) homeGrid._pauseHome();
+    }
+  }
 }
 
 // Thin wrappers — all logic lives in the Nav class above.
@@ -659,7 +721,7 @@ function captureNavState() {
   nav.captureState({
     currentTab, drawerView, projectDetailScreen, releaseDetailId,
     selectedSongId, selectedVersionId, songsView, overlayView,
-    songsBackTarget, headerTitle: headerTitle?.textContent || "RiffBank"
+    songsBackTarget, headerTitle: headerTitle?.textContent ?? "RiffBank"
   });
 }
 function triggerForwardSlide() { nav.forward(activeScreenEl); }
@@ -2138,6 +2200,9 @@ if ("serviceWorker" in navigator) {
       navigator.serviceWorker.addEventListener("controllerchange", () => {
         if (reloaded) return;
         reloaded = true;
+        // Hide the app shell before reloading so the home screen doesn't
+        // flash visible during the page transition (splash-flash bug).
+        document.body.classList.add("splashing");
         window.location.reload();
       });
 
@@ -2430,6 +2495,15 @@ function salSvg(size = 140) {
   return `<img src="./sal.svg" alt="Sal" width="${size}" style="height:auto;">`;
 }
 
+// ── Onboarding cleanup — fades + removes all onboarding overlays ────
+function dismissOnboarding() {
+  document.querySelectorAll(".welcomeScreen, .driveScreen").forEach(el => {
+    el.classList.add("welcomeOut");
+    el.addEventListener("animationend", () => el.remove(), { once: true });
+  });
+  document.body.classList.remove("welcoming");
+}
+
 // ── Welcome screen (Duolingo-style landing after splash) ────────────
 // Returns a promise that resolves when user taps a button.
 // result: "getStarted" or "hasAccount"
@@ -2438,7 +2512,8 @@ function showWelcomeScreen() {
     document.body.classList.add("welcoming");
     const el = document.createElement("div");
     el.id = "welcomeScreen";
-    el.className = "welcomeScreen";
+    // Start fully opaque so it seamlessly replaces the splash overlay
+    el.className = "welcomeScreen welcomeIn";
     el.innerHTML = `
       <div class="welcomeSalWrap">
         ${salSvg(140)}
@@ -2454,17 +2529,177 @@ function showWelcomeScreen() {
     el.addEventListener("click", e => {
       const btn = e.target.closest("[data-action]");
       if (!btn) return;
-      const action = btn.dataset.action;
-      el.classList.add("welcomeOut");
-      el.addEventListener("animationend", () => {
-        el.remove();
-        document.body.classList.remove("welcoming");
-        resolve(action);
-      }, { once: true });
+      // Resolve immediately — the overlay stays in place so the app shell
+      // never flashes. init() will call dismissOnboarding() after render().
+      resolve(btn.dataset.action);
     });
 
     document.body.appendChild(el);
-    // Trigger entrance animation on next frame
+    // Welcome is already opaque; now safe to unhide the app shell behind it
+    document.body.classList.remove("splashing");
+  });
+}
+
+// ── Drive connect screen (Duolingo-style, after welcome) ────────────
+// Returns a promise: { action: "connected"|"skip"|"back", email?, homeFolderName? }
+function showDriveScreen() {
+  return new Promise(resolve => {
+    const el = document.createElement("div");
+    el.className = "driveScreen";
+    el.innerHTML = `
+      <button class="driveBackBtn" data-action="back">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="15 18 9 12 15 6"/>
+        </svg>
+      </button>
+      <div class="driveBubbleArea">
+        <div class="driveBubble">
+          <strong>RiffBank</strong> uses your <strong>Google Drive</strong> to store, manage, and release all of your in-progress songs.
+        </div>
+        <div class="driveSalWrap">${salSvg(120)}</div>
+      </div>
+      <div class="driveBtns">
+        <button class="driveBtnConnect" data-action="connect">CONNECT GOOGLE DRIVE</button>
+        <button class="driveBtnSkip" data-action="skip">Maybe later</button>
+      </div>
+    `;
+
+    let _signedInEmail = "";
+    let _existingFolderId = null;
+
+    el.addEventListener("click", async e => {
+      const btn = e.target.closest("[data-action]");
+      if (!btn) return;
+      const action = btn.dataset.action;
+
+      if (action === "back" || action === "skip") {
+        // Resolve immediately — overlay stays. init() cleans up after render().
+        resolve({ action });
+        return;
+      }
+
+      if (action === "connect") {
+        // ── Sign in to Google ──
+        btn.textContent = "SIGNING IN…";
+        btn.style.pointerEvents = "none";
+        btn.style.opacity = "0.6";
+
+        await gdriveLoadGIS();
+        const signIn = await gdriveSignIn();
+        if (!signIn.success) {
+          btn.textContent = "CONNECT GOOGLE DRIVE";
+          btn.style.pointerEvents = "";
+          btn.style.opacity = "";
+          toast(signIn.error || "Sign-in failed — try again!");
+          return;
+        }
+
+        _signedInEmail = signIn.email || "";
+
+        // Check if there's already a RiffBank folder on Drive
+        el.querySelector(".driveBubble").innerHTML =
+          `Checking your <strong>Google Drive</strong>…`;
+        btn.textContent = "CHECKING…";
+
+        const existing = await gdriveFindExisting();
+
+        if (existing.found) {
+          // Existing RiffBank folder found!
+          _existingFolderId = existing.folderId;
+          el.querySelector(".driveBubble").innerHTML =
+            `Hey, I found a <strong>RiffBank</strong> folder on your Drive! Want me to connect to it?`;
+          btn.textContent = "CONNECT TO MY RIFFBANK";
+          btn.style.pointerEvents = "";
+          btn.style.opacity = "";
+          btn.dataset.action = "connectExisting";
+
+          const skipBtn = el.querySelector('[data-action="skip"]');
+          if (skipBtn) {
+            skipBtn.textContent = "Pick a different folder";
+            skipBtn.dataset.action = "pick";
+          }
+        } else {
+          // No existing folder — let user pick
+          el.querySelector(".driveBubble").innerHTML =
+            `Nice! Now pick a spot for your <strong>RiffBank</strong> folder — this is where all your songs, versions, and projects will live.`;
+          btn.textContent = "PICK A FOLDER";
+          btn.style.pointerEvents = "";
+          btn.style.opacity = "";
+          btn.dataset.action = "pick";
+
+          const skipBtn = el.querySelector('[data-action="skip"]');
+          if (skipBtn) skipBtn.textContent = "Skip for now";
+        }
+        return;
+      }
+
+      if (action === "connectExisting") {
+        // ── Connect to the found RiffBank folder ──
+        btn.textContent = "CONNECTING…";
+        btn.style.pointerEvents = "none";
+        btn.style.opacity = "0.6";
+
+        const result = await gdriveConnectToFolder(_existingFolderId, "RiffBank", _signedInEmail);
+        if (result.success) {
+          resolve({ action: "connected", homeFolderName: result.homeFolderName });
+        } else {
+          btn.textContent = "CONNECT TO MY RIFFBANK";
+          btn.style.pointerEvents = "";
+          btn.style.opacity = "";
+          toast(result.error || "Connection failed — try again!");
+        }
+        return;
+      }
+
+      if (action === "pick") {
+        // ── Open folder picker (full screen) ──
+        btn.textContent = "OPENING PICKER…";
+        btn.style.pointerEvents = "none";
+        btn.style.opacity = "0.6";
+
+        // Hide ALL overlays + app chrome so picker is full screen
+        const welcomeEl = document.getElementById("welcomeScreen");
+        const topBar = document.querySelector(".topBar");
+        const bottomNav = document.querySelector(".bottomNav");
+        el.style.display = "none";
+        if (welcomeEl) welcomeEl.style.display = "none";
+        if (topBar) topBar.style.display = "none";
+        if (bottomNav) bottomNav.style.display = "none";
+
+        // Show Sal PiP floating overlay while picker is open
+        const pip = document.createElement("div");
+        pip.className = "salPip";
+        pip.innerHTML = `
+          <div class="salPipBubble">Pick a folder for <strong>RiffBank</strong>!</div>
+          ${salSvg(56)}
+        `;
+        document.body.appendChild(pip);
+        requestAnimationFrame(() => pip.classList.add("salPipIn"));
+
+        const result = await gdrivePickHome(_signedInEmail);
+
+        // Restore everything
+        el.style.display = "";
+        if (welcomeEl) welcomeEl.style.display = "";
+        if (topBar) topBar.style.display = "";
+        if (bottomNav) bottomNav.style.display = "";
+
+        // Remove PiP
+        pip.classList.add("salPipOut");
+        pip.addEventListener("animationend", () => pip.remove(), { once: true });
+
+        if (result.success) {
+          resolve({ action: "connected", homeFolderName: result.homeFolderName });
+        } else {
+          // User cancelled picker — let them try again
+          btn.textContent = "PICK A FOLDER";
+          btn.style.pointerEvents = "";
+          btn.style.opacity = "";
+        }
+      }
+    });
+
+    document.body.appendChild(el);
     requestAnimationFrame(() => el.classList.add("welcomeIn"));
   });
 }
@@ -2574,6 +2809,11 @@ function openSalOnboarding() {
 document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
     const targetTab = btn.dataset.tab || "home";
+
+    // Already on home root with no overlays — nothing to do
+    if (targetTab === "home" && currentTab === "home" && nav.depth === 0 && !drawerView && !overlayView) {
+      return;
+    }
 
     // If tapping home while deep in a nav stack, jump straight to home
     if (targetTab === "home" && nav.depth > 0) {
@@ -3441,6 +3681,98 @@ function renderSheet() {
     return;
   }
 
+  if (sheetMode === "songDetailMenu") {
+    const song = getSong(sheetSongMenuId);
+    if (!song) { closeSheet(); return; }
+    const fv = featuredVersion(song);
+    const title = song?.title || "Song";
+    const canGenArt = !generatingArtSongs.has(song.id) && Date.now() >= artCooldownUntil;
+    const artLabel = generatingArtSongs.has(song.id) ? "Generating..." : song.coverImageUrl ? "Regen Art" : "Gen Art";
+    const hasApiKey = !!(state.settings.replicateKey || "");
+
+    sheetContent.innerHTML = `
+      <div class="sheetTitle">${escapeHtml(title)}</div>
+
+      <div class="sheetForm" style="gap:10px">
+        <button class="sheetChoice" id="sdmDetails">Details</button>
+        <button class="sheetChoice" id="sdmQueue" ${(fv?.link || fv?.fileId || fv?.localAudioId || fv?.driveFileId) ? "" : "disabled"}>Add to Queue</button>
+        <button class="sheetChoice" id="sdmGenArt" ${canGenArt && hasApiKey ? "" : "disabled"}>${escapeHtml(artLabel)}</button>
+        <button class="sheetChoice" id="sdmDelete" style="background: rgba(255,92,119,.12); border-color: rgba(255,92,119,.25);">
+          Delete song
+          <span class="sub">this can't be undone</span>
+        </button>
+        <button class="sheetChoice" id="sdmCancel">Cancel</button>
+      </div>
+    `;
+
+    $("#sdmDetails")?.addEventListener("click", () => {
+      closeSheet();
+      if (!fv) {
+        const first = createVersion(song);
+        if (!first) return toast("Couldn't create version");
+        captureNavState();
+        selectedVersionId = first.id;
+        render();
+        triggerForwardSlide();
+        return;
+      }
+      captureNavState();
+      selectedVersionId = fv.id;
+      render();
+      triggerForwardSlide();
+    });
+
+    $("#sdmQueue")?.addEventListener("click", () => {
+      if (fv) addToQueue(song.id, fv.id);
+      closeSheet();
+    });
+
+    $("#sdmGenArt")?.addEventListener("click", async () => {
+      if (!canGenArt) return;
+      const apiKey = state.settings.replicateKey || "";
+      if (!apiKey) { toast("Add your Replicate API key in Settings first"); return; }
+
+      closeSheet();
+      generatingArtSongs.add(song.id);
+      artCooldownUntil = Date.now() + 10000;
+      coverCache.clear();
+      render();
+
+      try {
+        await generateArtForSong(song, apiKey);
+        coverCache.clear();
+        saveState();
+        toast("Art generated");
+      } catch (e) {
+        console.error("Art generation failed:", e);
+        toast(e.message || "Art generation failed");
+      } finally {
+        generatingArtSongs.delete(song.id);
+        coverCache.clear();
+        render();
+        const remaining = artCooldownUntil - Date.now();
+        if (remaining > 0) setTimeout(() => render(), remaining + 50);
+      }
+    });
+
+    $("#sdmDelete")?.addEventListener("click", () => {
+      if (!confirm(`Delete "${song.title}"?`)) return;
+      state.songs = state.songs.filter(s => s.id !== song.id);
+      saveState();
+      toast("Deleted");
+      closeSheet();
+      selectedSongId = null;
+      selectedVersionId = null;
+      songsView = "list";
+      setHeader("Songs");
+      render();
+    });
+
+    $("#sdmCancel")?.addEventListener("click", () => closeSheet());
+
+    return;
+  }
+
       if (sheetMode === "songFilters") {
     // Build project list from settings + songs
     const projects = Array.from(
@@ -4065,7 +4397,14 @@ function render() {
   if (drawerView === "globalSearch") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderGlobalSearch(); }
 
   // Normal screens
-  if (currentTab === "home") { setActiveScreen("home"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderHome(); }
+  if (currentTab === "home") {
+    setActiveScreen("home");
+    if (!_isBack) activeScreenEl.scrollTop = 0;
+    // On back-nav, reuse existing home if particles are still alive (avoids position jump)
+    const existingGrid = activeScreenEl.querySelector(".homeGrid");
+    if (_isBack && existingGrid && existingGrid._cleanupHome) return;
+    return renderHome();
+  }
   if (currentTab === "songs") {
     setActiveScreen("songs");
     if (!_isBack) activeScreenEl.scrollTop = 0;
@@ -4122,10 +4461,29 @@ async function init() {
 
   // Welcome screen (after splash, before app loads)
   if (!DISABLE_WELCOME) {
-    const action = await showWelcomeScreen();
+    let welcomeAction = await showWelcomeScreen();
+
+    // "GET STARTED" → show Drive connect screen (handles sign-in + picker)
+    let driveConnected = false;
+    let driveFolderName = "";
+    if (welcomeAction === "getStarted") {
+      let driveResult = { action: "back" };
+      while (driveResult.action === "back") {
+        driveResult = await showDriveScreen();
+        if (driveResult.action === "back") {
+          welcomeAction = await showWelcomeScreen();
+          if (welcomeAction === "hasAccount") break;
+        }
+      }
+      if (driveResult.action === "connected") {
+        driveConnected = true;
+        driveFolderName = driveResult.homeFolderName || "RiffBank";
+      }
+    }
+
     localStorage.setItem("salOnboardingDone", "1");
-    if (action === "hasAccount") {
-      // User has an account — connect Google Drive immediately
+    if (welcomeAction === "hasAccount" && !driveConnected) {
+      // "I already have an account" — use original connect flow
       gdriveLoadGIS();
       toast("Connecting to Google Drive…");
       const result = await gdriveConnect();
@@ -4134,10 +4492,18 @@ async function init() {
         saveState();
         toast("Connected! Syncing your library…");
       }
+    } else if (driveConnected) {
+      // Already connected via drive screen
+      state.settings.driveRoot = driveFolderName;
+      saveState();
+      toast("Connected! Syncing your library…");
+      gdriveLoadGIS();
     } else {
       gdriveLoadGIS();
     }
   } else {
+    // No welcome screen — remove splashing class so app shell is visible
+    document.body.classList.remove("splashing");
     // Load Google Identity Services (non-blocking, for Drive integration)
     gdriveLoadGIS();
   }
@@ -4164,6 +4530,9 @@ async function init() {
   syncTabs();
   render();
   syncMiniPlayerUI();
+
+  // Now that the home screen is painted, fade out any remaining onboarding overlays
+  dismissOnboarding();
 
   // Background: restore cover art, scan cached blobs, sync Drive (non-blocking)
   restoreCoverUrlsFromCache().then(() => render()).catch(() => {});
@@ -5612,6 +5981,20 @@ function renderHome() {
     homeGrid.addEventListener("touchend", releaseCard, { passive: true });
     homeGrid.addEventListener("touchcancel", releaseCard, { passive: true });
 
+    // Pause/resume — freeze particle positions AND CSS animations when home goes off-screen
+    homeGrid._pauseHome = () => {
+      if (homeAnimId) { cancelAnimationFrame(homeAnimId); homeAnimId = null; }
+      homeGrid.querySelectorAll(".hShimmer, .hCard").forEach(el => {
+        el.style.animationPlayState = "paused";
+      });
+    };
+    homeGrid._resumeHome = () => {
+      if (!homeAnimId) homeAnimId = requestAnimationFrame(animLoop);
+      homeGrid.querySelectorAll(".hShimmer, .hCard").forEach(el => {
+        el.style.animationPlayState = "";
+      });
+    };
+
     // Cleanup when navigating away
     const cleanupHome = () => {
       if (homeAnimId) { cancelAnimationFrame(homeAnimId); homeAnimId = null; }
@@ -6542,6 +6925,11 @@ function iconFilter(){
 // ---------------------
 // Song detail
 // ---------------------
+function openSongDetailMenu(songId) {
+  sheetSongMenuId = songId;
+  openSheet("songDetailMenu");
+}
+
 function renderSongDetail(id) {
   const song = getSong(id);
   if (!song) {
@@ -6550,95 +6938,126 @@ function renderSongDetail(id) {
     return renderSongsList();
   }
 
-  setHeader("Song");
+  setHeader(song.title);
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("pdActive");
+  appEl?.classList.remove("pdScrolled");
+  activeScreenEl.style.paddingBottom = "0px";
+  const topbarEl = document.querySelector(".topbar");
+  const topbarH = topbarEl ? topbarEl.offsetHeight : 0;
+  activeScreenEl.style.setProperty("--pd-topbar-h", topbarH + "px");
 
-    // ✅ Fix: entering Song detail should not inherit Songs list scroll position
-  if (activeScreenEl) activeScreenEl.scrollTop = 0;
-  try { window.scrollTo(0, 0); } catch {}
-  try { document.documentElement.scrollTop = 0; } catch {}
-  try { document.body.scrollTop = 0; } catch {}
-  requestAnimationFrame(() => { if (screens.home) screens.home.scrollTop = 0; });
+  if (activeScreenEl) {
+    activeScreenEl.scrollTop = 0;
+    activeScreenEl.style.overflowY = "scroll";
+  }
 
   const fv = featuredVersion(song);
   const vCount = song.versions?.length || 0;
-
-  // hero cover uses your neon generator
   const heroCover = coverSvg(song);
-  const rowCover  = coverSvg(song, { lite: true }); // always lite for version rows
+  const rowCover = coverSvg(song, { lite: true });
 
-  const featuredTag = fv?.isBest ? "⭐ Best" : fv?.isActive ? "🎧 Active" : "Featured";
-  const featuredSub = fv
-    ? `${escapeHtml(fv.label || "Version")} ${fv.notes ? `• ${escapeHtml(fv.notes)}` : ""}`
-    : "No versions yet — add one below";
+  // Build playable items list for play/shuffle
+  const allV = (song.versions || []).slice();
+  const activeV = allV.find(v => v.isActive) || allV[0];
+  const others = allV
+    .filter(v => v.id !== activeV?.id)
+    .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+  const items = [activeV, ...others]
+    .filter(v => v && isPlayable(v))
+    .map(v => ({ songId: song.id, versionId: v.id }));
 
-activeScreenEl.innerHTML = `
-  <div class="albumHero">
-    <div class="albumBg" aria-hidden="true">
-      ${heroCover}
+  const versions = (song.versions || []).slice();
+
+  // Purple checkmark SVG for active versions
+  const activeCheck = `<svg class="sdActiveCheck" viewBox="0 0 20 20" fill="none" width="14" height="14"><path d="M3.5 10.5l4.5 4.5 8.5-9" stroke="#a855f7" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+  const versionRows = versions.map((v, i) => {
+    const sub = v.isActive
+      ? `${activeCheck}<span style="color:#a855f7;font-weight:600">Active</span>${v.notes ? ` · ${escapeHtml(v.notes)}` : ""}`
+      : `${escapeHtml(v.createdAt || "—")}${v.notes ? ` · ${escapeHtml(v.notes)}` : ""}`;
+
+    return `
+      <div class="pdSongRow" data-vrow="${v.id}">
+        <span class="pdSongNum">${i + 1}</span>
+        <div class="songThumb" aria-hidden="true">
+          ${rowCover}
+        </div>
+        <div class="songMain">
+          <div class="songTop">
+            <div class="songTitleRow">
+              <div class="songTitle">${escapeHtml(v.label || "Version")}</div>
+            </div>
+            <button class="songMore" data-vmore="${v.id}" aria-label="Version menu">&#x22EF;</button>
+          </div>
+          <div class="songSub sdVersionSub">${sub}</div>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  activeScreenEl.innerHTML = `
+    <div class="pdHero">
+      <div class="pdHeroBg" aria-hidden="true">${heroCover}</div>
+      <div class="pdHeroContent">
+        <div class="pdHeroTitle">${escapeHtml(song.title)}</div>
+        <div class="pdHeroMeta">${escapeHtml(song.project || "—")} · ${vCount} version${vCount === 1 ? "" : "s"}</div>
+      </div>
     </div>
 
-    <div class="albumTop">
-      <div class="albumArt" aria-hidden="true">
-        ${heroCover}
-      </div>
+    <div class="pdActions">
+      <button class="pdPlayBtn" id="songBigPlay" ${!items.length ? "disabled" : ""}>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+      </button>
+      <button class="pdShuffleBtn" id="songShuffle" ${!items.length ? "disabled" : ""}>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+      </button>
+      <button class="pdMoreBtn" id="songMoreMenu" aria-label="Song menu">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
+      </button>
+    </div>
 
-      <div class="albumText">
-        <div class="albumTitle">${escapeHtml(song.title)}</div>
-        <div class="albumMeta">
-          ${escapeHtml(song.project || "—")} • ${escapeHtml(song.genre || "—")} •
-          ${vCount} version${vCount===1?"":"s"}
+    <div class="pdSticky">
+      <div class="pdTabs">
+        <button class="pdTab pdTabActive" data-sd-tab="list">List</button>
+        <button class="pdTab" data-sd-tab="evolution">Evolution</button>
+      </div>
+      <div class="pdTabBody" id="pdTabBody">
+        <div class="pdSongList">
+          ${versionRows || `<div class="small" style="padding:24px 0; text-align:center">No versions yet.</div>`}
         </div>
       </div>
     </div>
 
-    <div class="albumActions">
-      <button class="songHeroPlay" id="songBigPlay" ${(fv?.link || fv?.fileId || fv?.localAudioId || fv?.driveFileId) ? "" : "disabled"}>
-        ▶ Play
-      </button>
-      <button class="songHeroQueue" id="songBigQueue" ${(fv?.link || fv?.fileId || fv?.localAudioId || fv?.driveFileId) ? "" : "disabled"}>
-        + Queue
-      </button>
-      <button class="songHeroDetails" id="songDetailsBtn">
-        Details
-      </button>
-      <button class="songHeroQueue" id="genArtBtn" title="Generate AI cover art" ${generatingArtSongs.has(song.id) || Date.now() < artCooldownUntil ? "disabled" : ""}>
-        ${generatingArtSongs.has(song.id) ? "✨ Generating…" : Date.now() < artCooldownUntil ? "⏳ Please wait…" : song.coverImageUrl ? "🔄 Regen Art" : "✨ Gen Art"}
-      </button>
-    </div>
-  </div>
+    <button class="sdFab" id="sdAddVersion" aria-label="Add version">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+    </button>
+  `;
 
-  <div class="versionsWrap">
-    <div class="versionsHeader">
-      <div class="versionsTitle">Versions</div>
-      <div class="versionsHeaderRight">
-        <div class="evoToggle">
-          <button id="evoToggleList" class="is-active">List</button>
-          <button id="evoToggleEvo">Evolution</button>
-        </div>
-        <button class="btn" id="addVersionJump">Add version</button>
-      </div>
-    </div>
+  /* ── Tab switching ── */
+  const tabBody = $("#pdTabBody");
+  activeScreenEl.querySelectorAll(".pdTab").forEach(tab => {
+    tab.addEventListener("click", () => {
+      activeScreenEl.querySelectorAll(".pdTab").forEach(t => t.classList.remove("pdTabActive"));
+      tab.classList.add("pdTabActive");
+      const which = tab.getAttribute("data-sd-tab");
+      if (which === "list") {
+        tabBody.innerHTML = `<div class="pdSongList">${versionRows || `<div class="small" style="padding:24px 0; text-align:center">No versions yet.</div>`}</div>`;
+        attachVersionListeners();
+      } else {
+        tabBody.innerHTML = `<div id="evolutionView"></div>`;
+        renderEvolutionView($("#evolutionView"), song);
+      }
+    });
+  });
 
-    <div id="versionsRows" class="versionsRows"></div>
-    <div id="evolutionView" style="display:none"></div>
-  </div>
-`;
-
+  /* ── Play all ── */
   $("#songBigPlay")?.addEventListener("click", async () => {
-    if (!(fv?.link || fv?.fileId || fv?.localAudioId || fv?.driveFileId)) return toast("No playable audio yet 😅");
-    // Play all versions: active first, then remaining sorted newest to oldest
-    const allV = (song.versions || []).slice();
-    const activeV = allV.find(v => v.isActive) || allV[0];
-    const others = allV
-      .filter(v => v.id !== activeV?.id)
-      .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
-    const items = [activeV, ...others]
-      .filter(v => v && isPlayable(v))
-      .map(v => ({ songId: song.id, versionId: v.id }));
-    if (!items.length) return toast("No playable audio yet 😅");
-    state.player.nowPlaying = items[0];
-    state.player.queue = items.slice(1);
-    state.player.repeatQueue = items;
+    if (!items.length) return toast("No playable versions");
+    const all = [...items];
+    state.player.nowPlaying = all[0];
+    state.player.queue = all.slice(1);
+    state.player.repeatQueue = all;
     state.player.shuffle = false;
     state.player.repeat = false;
     saveState();
@@ -6647,144 +7066,92 @@ activeScreenEl.innerHTML = `
     syncMiniPlayerUI();
   });
 
-  $("#songBigQueue")?.addEventListener("click", () => {
-    if (!(fv?.link || fv?.fileId || fv?.localAudioId || fv?.driveFileId)) return toast("No playable audio yet 😅");
-    addToQueue(song.id, fv.id);
-  });
-
-  // For now, keep your existing "Details" as the old long form screen:
-  // We’ll implement it as: details = version detail of the featured? or a new view later.
-  // For today: send you to the existing song form by reusing your old renderSongDetail UI? (we replaced it)
-  // So: we’ll open the featured version detail as "Details" as a first step.
-$("#songDetailsBtn")?.addEventListener("click", () => {
-  // If no versions yet, create the first one and open it
-  if (!fv) {
-    const first = createVersion(song);
-    if (!first) return toast("Couldn’t create version 😅");
-    selectedVersionId = first.id;
-    render();
-    return;
-  }
-
-  selectedVersionId = fv.id;
-  render();
-});
-
-$("#genArtBtn")?.addEventListener("click", async () => {
-  if (generatingArtSongs.has(song.id) || Date.now() < artCooldownUntil) return;
-
-  const apiKey = state.settings.replicateKey || "";
-  if (!apiKey) {
-    toast("Add your Replicate API key in Settings first");
-    return;
-  }
-
-  generatingArtSongs.add(song.id);
-  artCooldownUntil = Date.now() + 10000;
-  coverCache.clear();
-  render();
-
-  try {
-    await generateArtForSong(song, apiKey);
-    coverCache.clear();
+  /* ── Shuffle ── */
+  $("#songShuffle")?.addEventListener("click", async () => {
+    if (!items.length) return toast("No playable versions");
+    const all = shuffleArray([...items]);
+    state.player.nowPlaying = all[0];
+    state.player.queue = all.slice(1);
+    state.player.repeatQueue = all;
     saveState();
-    toast("Art generated ✨");
-  } catch (e) {
-    console.error("Art generation failed:", e);
-    toast(e.message || "Art generation failed — try again");
-  } finally {
-    generatingArtSongs.delete(song.id);
-    coverCache.clear();
+    unlockAudioOnce();
+    await playNowPlaying({ autoplay: true });
+    syncMiniPlayerUI();
+  });
+
+  /* ── Song more menu (Details, Regen Art, Delete) ── */
+  $("#songMoreMenu")?.addEventListener("click", () => {
+    openSongDetailMenu(song.id);
+  });
+
+  /* ── FAB: Add version ── */
+  $("#sdAddVersion")?.addEventListener("click", () => {
+    const newV = createVersion(song);
+    if (!newV) return toast("Couldn’t create version");
+    captureNavState();
+    selectedVersionId = newV.id;
     render();
-    const remaining = artCooldownUntil - Date.now();
-    if (remaining > 0) setTimeout(() => render(), remaining + 50);
+    triggerForwardSlide();
+  });
+
+  /* ── Version row listeners ── */
+  function attachVersionListeners() {
+    activeScreenEl.querySelectorAll("[data-vrow]").forEach(row => {
+      row.addEventListener("click", (e) => {
+        if (e.target.closest("[data-vmore]")) return;
+        captureNavState();
+        selectedVersionId = row.getAttribute("data-vrow");
+        render();
+        triggerForwardSlide();
+      });
+    });
+
+    activeScreenEl.querySelectorAll("[data-vmore]").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openVersionMenu(song.id, btn.getAttribute("data-vmore"));
+      });
+    });
   }
-});
 
-$("#addVersionJump")?.addEventListener("click", () => {
-  // Always create a brand new version (even if versions already exist)
-  const newV = createVersion(song);
-  if (!newV) return toast("Couldn’t create version 😅");
-  selectedVersionId = newV.id;
-  render();
-});
+  attachVersionListeners();
 
-  // Render version rows
-  const rowsEl = $("#versionsRows");
-  const versions = (song.versions || []).slice();
-
-  rowsEl.innerHTML = versions.length
-    ? versions.map((v) => {
-        const sub = `${escapeHtml(v.createdAt || "")}${v.notes ? ` • ${escapeHtml(v.notes)}` : ""}`;
-        const activeOverlay = v.isActive
-          ? `<div class="vThumbCheck"><svg viewBox="0 0 20 20" fill="none" width="16" height="16"><path d="M3.5 10.5l4.5 4.5 8.5-9" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div>`
-          : "";
-
-        return `
-          <div class="vRow" data-vrow="${v.id}">
-            <div class="vThumb ${v.isActive ? "is-active" : ""}" data-vactive="${v.id}" role="button" aria-label="Set active">${rowCover}${activeOverlay}</div>
-
-            <div class="vMain">
-              <div class="vTop">
-                ${window.RIFFBANK_DEBUG_SYNC ? `<span class="syncDot syncDot--${getVersionSyncColor(v)}" title="${getVersionSyncColor(v) === "green" ? "Local" : getVersionSyncColor(v) === "yellow" ? "Drive-only" : "No audio"}"></span>` : ""}
-                <div class="vTitle">${escapeHtml(v.label || "Version")}</div>
-              </div>
-              <div class="vSub">${sub}</div>
-            </div>
-
-            <button class="vMore" data-vmore="${v.id}" aria-label="Version menu">⋯</button>
-          </div>
-        `;
-      }).join("")
-    : `<div class="small" style="padding:12px 2px">No versions yet. Add one from Details.</div>`;
-
-  rowsEl.querySelectorAll("[data-vrow]").forEach((row) => {
-    row.addEventListener("click", () => {
-      captureNavState();
-      selectedVersionId = row.getAttribute("data-vrow");
-      render();
-      triggerForwardSlide();
+  /* ── Fade hero + actions to black, solid topbar as user scrolls ── */
+  const heroEl = activeScreenEl.querySelector(".pdHero");
+  const heroBgEl = heroEl?.querySelector(".pdHeroBg");
+  const heroContentEl = heroEl?.querySelector(".pdHeroContent");
+  const actionsEl = activeScreenEl.querySelector(".pdActions");
+  const stickyEl = activeScreenEl.querySelector(".pdSticky");
+  if (stickyEl && heroEl) {
+    let maxScroll = 0;
+    const FADE_PX = 200;
+    requestAnimationFrame(() => {
+      maxScroll = activeScreenEl.scrollHeight - activeScreenEl.clientHeight;
+      const tb = activeScreenEl.querySelector(".pdTabBody");
+      const sl = tb?.querySelector(".pdSongList, .pdPlaceholder");
+      if (tb && sl) sl.style.minHeight = (tb.clientHeight + 1) + "px";
     });
-  });
 
-  rowsEl.querySelectorAll("[data-vactive]").forEach((thumb) => {
-    thumb.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const vid = thumb.getAttribute("data-vactive");
-      song.versions.forEach(vv => { vv.isActive = vv.id === vid; });
-      song.updatedAt = nowStamp();
-      saveState();
-      render();
-    });
-  });
-
-  rowsEl.querySelectorAll("[data-vmore]").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const vid = btn.getAttribute("data-vmore");
-      openVersionMenu(song.id, vid);
-    });
-  });
-
-  // ── Evolution View toggle ──
-  const evoViewEl = $("#evolutionView");
-  const listBtn = $("#evoToggleList");
-  const evoBtn  = $("#evoToggleEvo");
-
-  listBtn.addEventListener("click", () => {
-    listBtn.classList.add("is-active");
-    evoBtn.classList.remove("is-active");
-    rowsEl.style.display = "";
-    evoViewEl.style.display = "none";
-  });
-
-  evoBtn.addEventListener("click", () => {
-    evoBtn.classList.add("is-active");
-    listBtn.classList.remove("is-active");
-    rowsEl.style.display = "none";
-    evoViewEl.style.display = "";
-    renderEvolutionView(evoViewEl, song);
-  });
+    activeScreenEl.addEventListener("scroll", () => {
+      const scrolled = activeScreenEl.scrollTop;
+      if (maxScroll > 0) {
+        const remaining = maxScroll - scrolled;
+        const opacity = remaining < FADE_PX ? Math.max(0, remaining / FADE_PX) : 1;
+        if (heroBgEl) heroBgEl.style.opacity = opacity;
+        if (heroContentEl) heroContentEl.style.opacity = opacity;
+        if (actionsEl) actionsEl.querySelectorAll("button").forEach(b => b.style.opacity = opacity);
+      }
+      if (appEl) {
+        const heroBottom = heroEl.getBoundingClientRect().bottom;
+        const screenTop = activeScreenEl.getBoundingClientRect().top;
+        if (heroBottom - screenTop < 60) {
+          appEl.classList.add("pdScrolled");
+        } else {
+          appEl.classList.remove("pdScrolled");
+        }
+      }
+    }, { passive: true });
+  }
 }
 
 // ── Evolution View — constellation visualization ──
@@ -8335,6 +8702,7 @@ function renderSettings() {
 
     // Replay splash like a fresh start, then show Sal onboarding
     await replaySplash();
+    document.body.classList.remove("splashing");
     openSalOnboarding();
   });
 }

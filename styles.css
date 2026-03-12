@@ -504,6 +504,7 @@ textarea{ min-height:100px; resize:vertical; }
 }
 .welcomeScreen.welcomeIn{
   opacity: 1;
+  transition: none;
 }
 .welcomeScreen.welcomeOut{
   animation: welcomeFadeOut 0.4s ease forwards;
@@ -582,6 +583,184 @@ textarea{ min-height:100px; resize:vertical; }
   color: rgba(255,255,255,0.45);
   border: 1.5px solid rgba(255,255,255,0.12);
   box-shadow: none;
+}
+
+/* ── Drive connect screen (Duolingo-style) ─── */
+.driveScreen{
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: linear-gradient(180deg, #0d0e12 0%, #1a0a2e 50%, #0d0e12 100%);
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+.driveScreen.welcomeIn{ opacity: 1; transition: none; }
+.driveScreen.welcomeOut{ animation: welcomeFadeOut 0.4s ease forwards; }
+
+.driveBackBtn{
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 12px);
+  left: 12px;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  background: none;
+  border: none;
+  color: rgba(255,255,255,0.5);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.driveBackBtn svg{ width: 24px; height: 24px; }
+
+.driveBubbleArea{
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 0 32px;
+  gap: 28px;
+}
+
+.driveBubble{
+  position: relative;
+  background: rgba(255,255,255,0.06);
+  border: 1.5px solid rgba(255,255,255,0.12);
+  border-radius: 20px;
+  padding: 28px 26px;
+  max-width: 340px;
+  text-align: center;
+  font-size: 17px;
+  line-height: 1.65;
+  color: rgba(255,255,255,0.75);
+}
+.driveBubble strong{
+  color: #fff;
+  font-weight: 800;
+}
+/* speech bubble tail */
+.driveBubble::after{
+  content: "";
+  position: absolute;
+  bottom: -12px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 13px solid transparent;
+  border-right: 13px solid transparent;
+  border-top: 13px solid rgba(255,255,255,0.06);
+}
+.driveBubble::before{
+  content: "";
+  position: absolute;
+  bottom: -14px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 14px solid transparent;
+  border-right: 14px solid transparent;
+  border-top: 14px solid rgba(255,255,255,0.12);
+}
+
+.driveSalWrap{
+  filter: drop-shadow(0 8px 32px rgba(168,85,247,0.3));
+}
+
+.driveBtns{
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 0 20px calc(env(safe-area-inset-bottom, 12px) + 16px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.driveBtnConnect{
+  width: 100%;
+  padding: 18px 24px;
+  border-radius: 16px;
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  border: none;
+  cursor: pointer;
+  background: linear-gradient(135deg, #a855f7, #7c3aed);
+  color: #fff;
+  box-shadow: 0 4px 24px rgba(168,85,247,0.4);
+  transition: transform 0.12s, opacity 0.12s;
+  -webkit-tap-highlight-color: transparent;
+}
+.driveBtnConnect:active{
+  transform: scale(0.97);
+  opacity: 0.85;
+}
+
+.driveBtnSkip{
+  width: 100%;
+  padding: 14px 24px;
+  border-radius: 16px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  border: none;
+  cursor: pointer;
+  background: transparent;
+  color: rgba(255,255,255,0.35);
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* ── Sal PiP (picture-in-picture during picker) ─── */
+.salPip{
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%) translateY(120px);
+  z-index: 10001;
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  pointer-events: none;
+  transition: transform 0.4s cubic-bezier(0.34,1.56,0.64,1), opacity 0.3s ease;
+  opacity: 0;
+}
+.salPip.salPipIn{
+  transform: translateX(-50%) translateY(0);
+  opacity: 1;
+}
+.salPip.salPipOut{
+  animation: salPipSlideOut 0.3s ease forwards;
+}
+@keyframes salPipSlideOut{
+  to{ transform: translateX(-50%) translateY(120px); opacity: 0; }
+}
+.salPipBubble{
+  background: rgba(30,20,50,0.92);
+  border: 1.5px solid rgba(168,85,247,0.35);
+  border-radius: 16px 16px 4px 16px;
+  padding: 14px 18px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: rgba(255,255,255,0.8);
+  max-width: 240px;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4), 0 0 0 1px rgba(168,85,247,0.1);
+}
+.salPipBubble strong{
+  color: #fff;
+  font-weight: 700;
+}
+.salPip img{
+  filter: drop-shadow(0 4px 12px rgba(168,85,247,0.3));
 }
 
 .navIcon{
@@ -1702,7 +1881,7 @@ body.splashing #toast {
   text-align: center;
 }
 
-/* Title: settles upward + glow breathes */
+/* Title: hidden until font is ready, then settles upward + glow breathes */
 #splashTitle{
   font-weight: 900;
   font-size: 52px;
@@ -1715,7 +1894,11 @@ body.splashing #toast {
   -webkit-text-fill-color: transparent;
   background-clip: text;
 
+  opacity: 0;
   transform: translateY(26px);
+}
+#splashTitle.ready{
+  opacity: 1;
   animation:
     splashTitleSettle var(--splash-title-settle-ms) cubic-bezier(.2,.9,.2,1) forwards,
     welcomeTitleShimmer 3s ease infinite;
@@ -3891,10 +4074,12 @@ body {
   inset: 0;
   z-index: 0;
 }
-.pdHeroBg svg{
+.pdHeroBg svg,
+.pdHeroBg img{
   width: 100%;
   height: 100%;
   display: block;
+  object-fit: cover;
 }
 .pdHeroBg::after{
   content: "";
@@ -4079,6 +4264,37 @@ body {
 .pdPlaceholderSub{
   font-size: 13px;
   color: rgba(255,255,255,.2);
+}
+
+/* ── Song detail FAB ── */
+.sdFab{
+  position: fixed;
+  bottom: calc(var(--dock-h, 80px) + 24px);
+  right: 20px;
+  z-index: 30;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: #a855f7;
+  color: #fff;
+  border: none;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  box-shadow: 0 4px 20px rgba(168,85,247,.4), 0 2px 8px rgba(0,0,0,.3);
+  transition: transform .15s ease, box-shadow .15s ease;
+}
+.sdFab:active{ transform: scale(.9); }
+.sdFab svg{ pointer-events: none; }
+
+/* ── Active version checkmark in song detail rows ── */
+.sdVersionSub{
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.sdActiveCheck{
+  flex-shrink: 0;
 }
 
 /* ── Sync debug dots ── */

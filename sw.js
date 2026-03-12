@@ -8,7 +8,7 @@
 
 // Type ./start.sh to start local server
 
-const CACHE_VERSION = "2026-03-09_48"; // <-- bump this when you deploy
+const CACHE_VERSION = "2026-03-11_37"; // <-- bump this when you deploy
 const STATIC_CACHE = `riffbank-static-${CACHE_VERSION}`;
 const RUNTIME_CACHE = `riffbank-runtime-${CACHE_VERSION}`;
 
@@ -82,6 +82,9 @@ self.addEventListener("fetch", (event) => {
   if (req.method !== "GET") return;
 
   const url = new URL(req.url);
+
+  // Never intercept cross-origin requests (Google auth, APIs, CDNs, etc.)
+  if (url.origin !== self.location.origin) return;
 
   // KEY FIX: navigations (HTML shell) should be network-first
   if (req.mode === "navigate") {

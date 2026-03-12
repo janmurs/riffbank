@@ -11,13 +11,17 @@ export async function runSplashSequence() {
 
   document.body.classList.add("splashing");
 
-  if (title) title.classList.add("shimmer");
-
   if (subText) subText.textContent = "Indexing your universe";
 
   if (subWrap) subWrap.classList.remove("show", "churn", "jumpIn", "jumpOut", "static");
 
   if (spinner) spinner.classList.remove("show");
+
+  // Wait for Montserrat to load so the title doesn't flash with a fallback font
+  await document.fonts.ready;
+
+  // Reveal title now that the correct font is available
+  if (title) title.classList.add("ready");
 
   await sleep(1200);
 
@@ -33,7 +37,9 @@ export async function runSplashSequence() {
   await sleep(420);
   splash.remove();
 
-  document.body.classList.remove("splashing");
+  // NOTE: body.splashing is NOT removed here — init() removes it
+  // after the welcome screen (or next overlay) is in place, preventing
+  // the app shell from flashing visible between splash and welcome.
 }
 
 /** Re-inject splash DOM and replay the sequence (used after wipe). */
