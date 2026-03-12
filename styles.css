@@ -2617,8 +2617,12 @@ body.splashing .app{
   font-size: 13px;
 }
 
+/* Remove screen top padding so sticky top:0 truly means the visual top */
+.screen--player{
+  padding-top: 0;
+}
 .playerHead{
-  padding: 12px 2px 0;
+  padding: 22px 2px 0; /* 12 + 10 to compensate removed screen padding */
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -2643,12 +2647,8 @@ body.splashing .app{
   top: 0;
   z-index: 10;
   background: var(--bg);
-  padding-top: 14px;
+  padding-top: 6px;
   padding-bottom: 4px;
-  margin-left: -16px;
-  margin-right: -16px;
-  padding-left: 16px;
-  padding-right: 16px;
 }
 .playerChipsSticky .chipsRow{
   padding-left: 0;
