@@ -2299,7 +2299,10 @@ function setHeader(t) {
   if (nav._isBackNav) return;
   if (headerTitle) headerTitle.textContent = t;
   const appEl = document.querySelector(".app");
-  appEl?.classList.remove("pdActive", "pdScrolled");
+  appEl?.classList.remove("pdActive", "pdScrolled", "collapseTitle");
+  // Reset inline opacity from collapse scroll listener
+  const h1El = appEl?.querySelector(".titleblock h1");
+  if (h1El) h1El.style.opacity = "";
   // Restore screen padding when leaving project detail
   document.querySelectorAll(".screen").forEach(s => s.style.paddingBottom = "");
 }
@@ -6729,7 +6732,9 @@ function coverSvg(song, { lite = false } = {}) {
 // Songs list + create
 // ---------------------
 function renderSongsList() {
-  setHeader("");
+  setHeader("Songs");
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("collapseTitle");
 
   const songs = [...state.songs];
   const projects = Array.from(
@@ -6902,9 +6907,42 @@ function renderSongsList() {
   $("#openSongFilters")?.addEventListener("click", openSongFilters);
 
   applyFilter();
+
   // Restore scroll position when returning from a song detail view
   if (songsListScrollTop > 0) {
     activeScreenEl.scrollTop = songsListScrollTop;
+  }
+
+  // Collapse title: fade small title in proportion to big title scrolling behind topbar
+  // Remove any previous listener to avoid stacking
+  if (activeScreenEl._collapseTitleScroll) {
+    activeScreenEl.removeEventListener("scroll", activeScreenEl._collapseTitleScroll);
+    activeScreenEl._collapseTitleScroll = null;
+  }
+  const _screen = activeScreenEl;
+  const _sm = document.querySelector(".app.collapseTitle .titleblock h1");
+  if (_sm) {
+    // Measure once after layout is complete — no getBoundingClientRect in the handler
+    requestAnimationFrame(() => {
+      const bt = _screen.querySelector(".songsPageTitle");
+      if (!bt) return;
+      const topbarEl = document.querySelector(".topbar");
+      // Screen's top edge in viewport (fixed — doesn't change with scroll)
+      const screenTop = _screen.getBoundingClientRect().top;
+      const topbarBottom = topbarEl ? topbarEl.getBoundingClientRect().bottom : 80;
+      // bt.offsetTop = big title's position within the scroll content
+      const fadeStart = bt.offsetTop - (topbarBottom - screenTop);
+      const fadeEnd = fadeStart + (bt.offsetHeight || 40);
+      const range = fadeEnd - fadeStart;
+
+      const onScroll = () => {
+        const progress = Math.min(1, Math.max(0, (_screen.scrollTop - fadeStart) / range));
+        _sm.style.opacity = progress;
+      };
+      _screen._collapseTitleScroll = onScroll;
+      _screen.addEventListener("scroll", onScroll, { passive: true });
+      onScroll();
+    });
   }
 }
 

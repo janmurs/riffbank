@@ -1608,6 +1608,37 @@ textarea{ min-height:100px; resize:vertical; }
 /* =========================
    Songs list (kept)
    ========================= */
+/* ── Collapsing large→small title ── */
+.app.collapseTitle .topbar{
+  z-index: 10;               /* paint above .view so ::after + descenders aren't covered */
+}
+/* Extend the topbar's visual cover area without changing its layout height */
+.app.collapseTitle .topbar::after{
+  content: "";
+  position: absolute;
+  left: 0; right: 0;
+  bottom: -14px;             /* extend below topbar to cover descenders + buffer */
+  height: 14px;
+  background: var(--bg);
+}
+.app.collapseTitle .titleblock{
+  position: absolute;
+  left: 38px;                                         /* right of back chevron */
+  top: calc(env(safe-area-inset-top, 0px) + 4px);    /* match headerBack top */
+  height: 44px;                                       /* match headerBack height */
+  display: flex;
+  align-items: center;
+  overflow: visible;
+  z-index: 1;               /* render above topbar ::after so descenders aren't covered */
+}
+.app.collapseTitle .titleblock h1{
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0;
+  transition: none;           /* override .topbar h1 transition — JS drives opacity directly */
+  opacity: 0;                 /* JS sets opacity directly via scroll position */
+}
+
 .songsPageTitle{
   font-size:34px;
   font-weight:700;
