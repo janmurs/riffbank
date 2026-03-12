@@ -110,6 +110,7 @@ input, textarea { -webkit-user-select: text; user-select: text; }
   padding: 0;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
+  z-index: 1;               /* render above topbar ::after cover band */
 }
 .headerBack:active{ opacity: 0.5; }
 
