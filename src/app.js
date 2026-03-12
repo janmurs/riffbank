@@ -6735,6 +6735,9 @@ function renderSongsList() {
   setHeader("Songs");
   const appEl = document.querySelector(".app");
   appEl?.classList.add("collapseTitle");
+  // Hide h1 immediately so it doesn't flash centered during slide transition
+  const h1 = appEl?.querySelector(".titleblock h1");
+  if (h1) h1.style.opacity = "0";
 
   const songs = [...state.songs];
   const projects = Array.from(
