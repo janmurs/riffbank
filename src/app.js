@@ -3629,10 +3629,22 @@ function renderSheet() {
     )].sort();
     const defaultProj = state.settings.defaultProject || "";
 
+    // Track the picked file for optional first-version upload
+    let _sheetAudioFile = null;
+
     sheetContent.innerHTML = `
       <div class="sheetTitle">New song</div>
 
       <div class="sheetForm">
+        <button class="sheetFileBtn" id="sheetPickFile">
+          <div class="sheetFileIcon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          </div>
+          <div class="sheetFileMeta">
+            <div class="sheetFileLabel" id="sheetFileName">Add audio file</div>
+            <div class="sheetFileSub" id="sheetFileSub">Optional — or just create a placeholder</div>
+          </div>
+        </button>
         <input id="sheetSongTitle" type="text" placeholder="Title (e.g. Internal)" />
         <select id="sheetSongProject">
           ${existingProjects.map(p => `<option value="${escapeHtml(p)}"${p === defaultProj ? " selected" : ""}>${escapeHtml(p)}</option>`).join("")}
@@ -3650,6 +3662,27 @@ function renderSheet() {
       </div>
     `;
 
+    // Optional file pick — auto-populate title from filename
+    $("#sheetPickFile")?.addEventListener("click", async () => {
+      const file = await pickAudioFile();
+      if (!file) return;
+      _sheetAudioFile = file;
+
+      const nameEl = $("#sheetFileName");
+      const subEl = $("#sheetFileSub");
+      const btn = $("#sheetPickFile");
+      if (nameEl) nameEl.textContent = file.name;
+      if (subEl) subEl.textContent = `${(file.size/1024/1024).toFixed(1)} MB · tap to change`;
+      if (btn) btn.classList.add("sheetFilePicked");
+
+      // Auto-populate title if empty
+      const titleInput = $("#sheetSongTitle");
+      if (titleInput && !titleInput.value.trim()) {
+        const baseName = (file.name || "").replace(/\.[^.]+$/, "").replace(/[-_]/g, " ").trim();
+        titleInput.value = baseName;
+      }
+    });
+
     $("#sheetSongProject")?.addEventListener("change", (e) => {
       const isNew = e.target.value === "__new__";
       const inp = $("#sheetNewProject");
@@ -3659,7 +3692,7 @@ function renderSheet() {
 
     $("#sheetBack")?.addEventListener("click", () => openSheet("chooser"));
 
-    $("#sheetCreateSong")?.addEventListener("click", () => {
+    $("#sheetCreateSong")?.addEventListener("click", async () => {
       const title = ($("#sheetSongTitle")?.value || "").trim();
       if (!title) return toast("Give it a title 🙂");
 
@@ -3688,8 +3721,16 @@ function renderSheet() {
       };
 
       state.songs.unshift(song);
-      saveState();
-      toast("Created 🎸");
+
+      // If user picked a file, create v1 with audio attached
+      if (_sheetAudioFile) {
+        const v = createVersion(song);
+        await attachSharedAudio(song, v, _sheetAudioFile, _sheetAudioFile.name || "audio", _sheetAudioFile.type || "audio/*", _sheetAudioFile.size || 0);
+        toast("Created with audio 🎸");
+      } else {
+        saveState();
+        toast("Created 🎸");
+      }
 
       closeSheet();
       currentTab = "songs";
@@ -8162,46 +8203,49 @@ function renderVersionDetail(songId, versionId) {
         </div>
 
         <div class="vDetailRow">
-          <div class="vDetailLabel">Local file</div>
-          <div class="vDetailValue">
-            ${hasLocal
-              ? `<span style="opacity:.85">${escapeHtml(v.fileName || v.originalFileName || "audio file")}${v.fileSize ? ` • ${(v.fileSize/1024/1024).toFixed(1)} MB` : ""}</span>`
-              : `<span style="opacity:.45">No local file attached.</span>`
-            }
-          </div>
-        </div>
-
-        ${hasDrive ? `
-        <div class="vDetailRow">
-          <div class="vDetailLabel">Drive</div>
-          <div class="vDetailValue" style="color:#4ecdc4">
-            ☁️ ${escapeHtml(v.fileName || v.originalFileName || "audio")}
-            ${v.driveWebViewLink ? `<a href="${escapeHtml(v.driveWebViewLink)}" target="_blank" id="openLinkBtn" style="color:#4ecdc4; text-decoration:underline; margin-left:6px;">View ↗</a>` : ""}
-          </div>
-        </div>
-        ` : driveConnected ? `
-        <div class="vDetailRow">
-          <div class="vDetailLabel">Drive</div>
-          <div class="vDetailValue" style="opacity:.45">☁️ Not yet synced.</div>
-        </div>
-        ` : ""}
-
-        <div class="vDetailRow">
           <div class="vDetailLabel">Status</div>
           <div class="vDetailValue">
-            <button class="songHeroQueue" id="toggleActiveBtn" style="padding:6px 14px; font-size:13px">${v.isActive ? "✅ Active" : "Set Active"}</button>
+            <button class="vdChip ${v.isActive ? "vdChipActive" : ""}" id="toggleActiveBtn">${v.isActive ? "Active" : "Set Active"}</button>
           </div>
         </div>
 
-        <div class="vDetailRow">
-          <div class="vDetailLabel">Audio</div>
-          <div class="vDetailValue" style="display:flex; gap:8px; flex-wrap:wrap">
-            <button class="songHeroQueue" id="importAudioBtn" style="padding:6px 14px; font-size:13px">Import file 📁</button>
-            ${hasLocal ? `<button class="songHeroQueue" id="clearLocalBtn" style="padding:6px 14px; font-size:13px">Remove local</button>` : ""}
-            ${hasLocal && driveConnected && !hasDrive ? `<button class="songHeroQueue" id="uploadToDriveBtn" style="padding:6px 14px; font-size:13px">Upload ☁️</button>` : ""}
-            ${v.link && !hasDrive ? `<button class="songHeroQueue" id="openLinkBtn" style="padding:6px 14px; font-size:13px">Open link ↗</button>` : ""}
+      </div>
+
+      <div class="vdAudioSection">
+        ${hasLocal || hasDrive || v.link ? `
+          <div class="vdAudioCard">
+            <div class="vdAudioIcon">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+            </div>
+            <div class="vdAudioInfo">
+              <div class="vdAudioName">${escapeHtml(v.fileName || v.originalFileName || "audio file")}</div>
+              <div class="vdAudioMeta">
+                ${v.fileSize ? `${(v.fileSize/1024/1024).toFixed(1)} MB` : ""}
+                ${hasLocal ? `<span class="vdAudioBadge vdBadgeLocal">Local</span>` : ""}
+                ${hasDrive ? `<span class="vdAudioBadge vdBadgeDrive">Drive</span>` : ""}
+                ${v.link ? `<span class="vdAudioBadge vdBadgeLink">URL</span>` : ""}
+              </div>
+            </div>
+            <div class="vdAudioActions">
+              <button class="vdAudioActionBtn" id="importAudioBtn" aria-label="Replace file">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              </button>
+              ${hasLocal ? `<button class="vdAudioActionBtn vdAudioDanger" id="clearLocalBtn" aria-label="Remove local"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>` : ""}
+              ${hasLocal && driveConnected && !hasDrive ? `<button class="vdAudioActionBtn vdAudioCloud" id="uploadToDriveBtn" aria-label="Upload to Drive"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></button>` : ""}
+              ${v.link ? `<button class="vdAudioActionBtn" id="openLinkBtn" aria-label="Open link"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></button>` : ""}
+              ${hasDrive && v.driveWebViewLink ? `<a href="${escapeHtml(v.driveWebViewLink)}" target="_blank" class="vdAudioActionBtn" aria-label="View on Drive"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>` : ""}
+            </div>
           </div>
-        </div>
+        ` : `
+          <button class="vdUploadBtn" id="importAudioBtn">
+            <div class="vdUploadIcon">
+              <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            </div>
+            <div class="vdUploadLabel">Upload Song</div>
+            <div class="vdUploadSub">WAV, MP3, M4A, AIFF, FLAC, OGG</div>
+          </button>
+        `}
+      </div>
 
       </div>
     </div>

@@ -2460,6 +2460,216 @@ body.splashing .app{
   box-sizing: border-box;
 }
 
+/* Version detail — active chip */
+.vdChip{
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 16px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 700;
+  border: 1px solid rgba(255,255,255,.12);
+  background: rgba(255,255,255,.06);
+  color: rgba(255,255,255,.7);
+  cursor: pointer;
+  transition: all .2s;
+}
+.vdChip:active{ transform: scale(.96); }
+.vdChipActive{
+  background: rgba(30,215,96,.15);
+  border-color: rgba(30,215,96,.35);
+  color: rgba(30,215,96,.95);
+}
+
+/* Version detail — audio section */
+.vdAudioSection{
+  padding: 16px;
+}
+
+/* Big upload button (no file yet) */
+.vdUploadBtn{
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  padding: 32px 20px;
+  border-radius: 16px;
+  border: 2px dashed rgba(255,255,255,.12);
+  background: rgba(255,255,255,.03);
+  color: rgba(255,255,255,.55);
+  cursor: pointer;
+  transition: all .25s;
+}
+.vdUploadBtn:active{
+  transform: scale(.97);
+  border-color: rgba(168,85,247,.5);
+  background: rgba(168,85,247,.08);
+}
+.vdUploadIcon{
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: rgba(168,85,247,.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 12px;
+  color: rgba(168,85,247,.8);
+}
+.vdUploadLabel{
+  font-size: 16px;
+  font-weight: 800;
+  color: rgba(255,255,255,.85);
+  margin-bottom: 4px;
+}
+.vdUploadSub{
+  font-size: 12px;
+  color: rgba(255,255,255,.35);
+  letter-spacing: .3px;
+}
+
+/* Audio card (file attached) */
+.vdAudioCard{
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: rgba(255,255,255,.05);
+  border: 1px solid rgba(255,255,255,.08);
+}
+.vdAudioIcon{
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(168,85,247,.2), rgba(59,130,246,.2));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: rgba(168,85,247,.8);
+}
+.vdAudioInfo{
+  flex: 1;
+  min-width: 0;
+}
+.vdAudioName{
+  font-size: 14px;
+  font-weight: 700;
+  color: rgba(255,255,255,.85);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vdAudioMeta{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 12px;
+  color: rgba(255,255,255,.4);
+}
+.vdAudioBadge{
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .3px;
+}
+.vdBadgeLocal{
+  background: rgba(30,215,96,.12);
+  color: rgba(30,215,96,.85);
+}
+.vdBadgeDrive{
+  background: rgba(78,205,196,.12);
+  color: rgba(78,205,196,.85);
+}
+.vdBadgeLink{
+  background: rgba(59,130,246,.12);
+  color: rgba(59,130,246,.85);
+}
+
+.vdAudioActions{
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.vdAudioActionBtn{
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,.1);
+  background: rgba(255,255,255,.05);
+  color: rgba(255,255,255,.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all .2s;
+  text-decoration: none;
+}
+.vdAudioActionBtn:active{ transform: scale(.9); background: rgba(255,255,255,.1); }
+.vdAudioDanger{ color: rgba(255,100,100,.7); }
+.vdAudioDanger:active{ background: rgba(255,60,60,.15); }
+.vdAudioCloud{ color: rgba(78,205,196,.7); }
+.vdAudioCloud:active{ background: rgba(78,205,196,.15); }
+
+/* Create sheet — file pick button */
+.sheetFileBtn{
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 2px dashed rgba(255,255,255,.1);
+  background: rgba(255,255,255,.03);
+  color: rgba(255,255,255,.55);
+  cursor: pointer;
+  transition: all .25s;
+  text-align: left;
+  margin-bottom: 6px;
+}
+.sheetFileBtn:active{ transform: scale(.98); border-color: rgba(168,85,247,.4); }
+.sheetFilePicked{
+  border-style: solid;
+  border-color: rgba(168,85,247,.35);
+  background: rgba(168,85,247,.08);
+}
+.sheetFileIcon{
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: rgba(168,85,247,.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: rgba(168,85,247,.75);
+}
+.sheetFilePicked .sheetFileIcon{
+  background: rgba(30,215,96,.15);
+  color: rgba(30,215,96,.85);
+}
+.sheetFileMeta{ min-width: 0; }
+.sheetFileLabel{
+  font-size: 14px;
+  font-weight: 700;
+  color: rgba(255,255,255,.8);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sheetFilePicked .sheetFileLabel{ color: rgba(255,255,255,.95); }
+.sheetFileSub{
+  font-size: 12px;
+  color: rgba(255,255,255,.35);
+  margin-top: 1px;
+}
+
 .vTitle{
   font-weight: 900;
   font-size: 14px;
