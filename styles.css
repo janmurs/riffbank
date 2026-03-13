@@ -1614,7 +1614,8 @@ textarea{ min-height:100px; resize:vertical; }
   z-index: 10;               /* paint above .view so ::after + descenders aren't covered */
 }
 /* Extend the topbar's visual cover area without changing its layout height */
-.app.collapseTitle .topbar::after{
+.app.collapseTitle .topbar::after,
+.topbar[data-tb-ext]::after{
   content: "";
   position: absolute;
   left: 0; right: 0;
@@ -1799,6 +1800,42 @@ textarea{ min-height:100px; resize:vertical; }
   width:100%;
   height:100%;
   object-fit:cover;
+}
+
+/* ── Release mosaic (composite album art) ── */
+.relMosaic{
+  width:100%; height:100%;
+  display:grid; gap:1px;
+  overflow:hidden;
+  border-radius:inherit;
+  background:rgba(0,0,0,.3);
+}
+.relMosaicCell{
+  overflow:hidden;
+  min-width:0; min-height:0;
+}
+.relMosaicCell svg,
+.relMosaicCell img{
+  width:100%; height:100%;
+  display:block; object-fit:cover;
+}
+/* 2 songs — side by side */
+.relMosaic2{
+  grid-template-columns:1fr 1fr;
+  grid-template-rows:1fr;
+}
+/* 3 songs — first takes left half, other two stack on right */
+.relMosaic3{
+  grid-template-columns:1fr 1fr;
+  grid-template-rows:1fr 1fr;
+}
+.relMosaic3 .relMosaicCell:first-child{
+  grid-row:1 / -1;
+}
+/* 4 songs — 2×2 grid */
+.relMosaic4{
+  grid-template-columns:1fr 1fr;
+  grid-template-rows:1fr 1fr;
 }
 
 .songCardInfo{
@@ -2199,7 +2236,8 @@ body.splashing .app{
   }
 }
 
-.albumBg svg{
+.albumBg svg,
+.albumBg .relMosaic{
   width: 100%;
   height: 100%;
   display: block;
@@ -2242,7 +2280,8 @@ body.splashing .app{
   box-shadow: 0 10px 24px rgba(0,0,0,.35);
 }
 
-.albumArt svg{
+.albumArt svg,
+.albumArt .relMosaic{
   width: 100%;
   height: 100%;
   display: block;
@@ -4125,7 +4164,6 @@ body {
 .app.pdActive .screen{
   padding-top: 0;
   padding-bottom: 0 !important;
-  overscroll-behavior-y: none;
 }
 /* When hero scrolled away, show solid topbar */
 .app.pdScrolled .topbar{
@@ -4238,6 +4276,14 @@ body {
   cursor: not-allowed;
 }
 
+/* ── Sticky bar (simple sticky, no inner scroll — elastic bounce) ── */
+.pdStickyBar{
+  position: sticky;
+  top: var(--pd-topbar-h, 0px);
+  z-index: 10;
+  background: var(--bg);
+}
+
 /* ── Sticky panel: tabs + content stick at top ── */
 .pdSticky{
   position: sticky;
@@ -4293,6 +4339,11 @@ body {
   overflow-y: scroll;
   -webkit-overflow-scrolling: touch;
   min-height: 0;
+}
+/* Ensure inner content always overflows pdTabBody so iOS elastic bounce works */
+.pdTabBody > *{
+  min-height: calc(100% + 1px);
+  box-sizing: border-box;
 }
 
 /* ── Song list rows ── */

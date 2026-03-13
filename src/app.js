@@ -183,7 +183,49 @@ class Nav {
     const tb = document.querySelector(".topbar");
     const tbRect = tb?.getBoundingClientRect();
     const tbVisible = tbRect && tbRect.height > 0;
-    this.topbarHTML = tbVisible ? (tb?.outerHTML || "") : "";
+    if (tbVisible && tb) {
+      // Bake computed styles into the snapshot so collapseTitle/pdActive context
+      // isn't lost when the clone is placed outside .app in an overlay.
+      const tbBg = getComputedStyle(tb).background;
+      const prevTbStyle = tb.getAttribute("style") || "";
+      tb.style.background = tbBg;
+
+      // collapseTitle uses a ::after pseudo to extend the topbar 14px downward.
+      // Flag via data attribute so the standalone CSS rule fires on the clone.
+      const isCollapse = document.querySelector(".app")?.classList.contains("collapseTitle");
+      if (isCollapse) {
+        tb.dataset.tbExt = "";
+      }
+
+      const tbBlock = tb.querySelector(".titleblock");
+      const h1Live = tbBlock?.querySelector("h1");
+      let prevH1Style = "", prevBlockStyle = "";
+      if (h1Live) {
+        const cs = getComputedStyle(h1Live);
+        prevH1Style = h1Live.getAttribute("style") || "";
+        h1Live.style.fontSize = cs.fontSize;
+        h1Live.style.fontWeight = cs.fontWeight;
+        h1Live.style.letterSpacing = cs.letterSpacing;
+      }
+      if (tbBlock) {
+        const bs = getComputedStyle(tbBlock);
+        prevBlockStyle = tbBlock.getAttribute("style") || "";
+        tbBlock.style.position = bs.position;
+        tbBlock.style.left = bs.left;
+        tbBlock.style.top = bs.top;
+        tbBlock.style.height = bs.height;
+        tbBlock.style.display = bs.display;
+        tbBlock.style.alignItems = bs.alignItems;
+      }
+      this.topbarHTML = tb.outerHTML || "";
+      // Restore original inline styles so live DOM isn't polluted
+      if (isCollapse) delete tb.dataset.tbExt;
+      tb.setAttribute("style", prevTbStyle);
+      if (h1Live) h1Live.setAttribute("style", prevH1Style);
+      if (tbBlock) tbBlock.setAttribute("style", prevBlockStyle);
+    } else {
+      this.topbarHTML = "";
+    }
     this.topbarRect = tbVisible ? { top: tbRect.top, height: tbRect.height } : null;
   }
 
@@ -248,6 +290,46 @@ class Nav {
     return bnRect ? `${window.innerHeight - bnRect.top}px` : "0px";
   }
 
+  // Bake context-dependent styles (collapseTitle, pdActive, etc.) into a
+  // topbar clone so it renders correctly outside .app.
+  // IMPORTANT: call AFTER setting cssText on tbClone so topbar-level
+  // properties aren't wiped out.
+  _bakeTopbarStyles(tbClone, tbLive) {
+    // Topbar's own background (transparent in pdActive, solid otherwise)
+    const tbBg = getComputedStyle(tbLive).background;
+    tbClone.style.background = tbBg;
+
+    // collapseTitle uses a ::after pseudo to extend the topbar 14px downward.
+    // The clone loses .app ancestor context, so flag via data attribute to
+    // trigger the standalone CSS rule (.topbar[data-tb-ext]::after).
+    const isCollapse = document.querySelector(".app")?.classList.contains("collapseTitle");
+    if (isCollapse) {
+      tbClone.dataset.tbExt = "";
+      tbClone.style.overflow = "visible";
+    }
+
+    const h1L = tbLive.querySelector(".titleblock h1");
+    const h1C = tbClone.querySelector(".titleblock h1");
+    if (h1L && h1C) {
+      const cs = getComputedStyle(h1L);
+      h1C.style.fontSize = cs.fontSize;
+      h1C.style.fontWeight = cs.fontWeight;
+      h1C.style.letterSpacing = cs.letterSpacing;
+      if (!h1C.style.opacity) h1C.style.opacity = cs.opacity;
+    }
+    const blkL = tbLive.querySelector(".titleblock");
+    const blkC = tbClone.querySelector(".titleblock");
+    if (blkL && blkC) {
+      const bs = getComputedStyle(blkL);
+      blkC.style.position = bs.position;
+      blkC.style.left = bs.left;
+      blkC.style.top = bs.top;
+      blkC.style.height = bs.height;
+      blkC.style.display = bs.display;
+      blkC.style.alignItems = bs.alignItems;
+    }
+  }
+
   // Lock a screen element into a context-independent frozen clone.
   // The clone renders pixel-perfect no matter where it's placed in the DOM
   // (immune to parent CSS classes like .app.pdActive, body.isHome, etc.).
@@ -298,7 +380,7 @@ class Nav {
         tbWrap.innerHTML = this.topbarHTML;
         const tbEl = tbWrap.firstElementChild;
         if (tbEl) {
-          tbEl.style.cssText = `display:flex;position:absolute;top:${this.topbarRect.top}px;left:0;width:100%;height:${this.topbarRect.height}px;overflow:hidden;pointer-events:none;box-sizing:border-box;`;
+          tbEl.style.cssText = `display:flex;position:absolute;top:${this.topbarRect.top}px;left:0;width:100%;height:${this.topbarRect.height}px;overflow:visible;pointer-events:none;box-sizing:border-box;`;
           aceOverlay.appendChild(tbEl);
         }
       }
@@ -327,7 +409,8 @@ class Nav {
     if (topbar) {
       const tbRect = topbar.getBoundingClientRect();
       const tbClone = topbar.cloneNode(true);
-      tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${r.left}px;width:${r.width}px;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
+      tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${r.left}px;width:${r.width}px;height:${tbRect.height}px;overflow:visible;pointer-events:none;`;
+      this._bakeTopbarStyles(tbClone, topbar);
       overlay.appendChild(tbClone);
     }
 
@@ -335,6 +418,21 @@ class Nav {
     screenWrap.style.cssText = `position:absolute;top:${r.top}px;left:${r.left}px;width:${r.width}px;height:${r.height}px;overflow:hidden;`;
     screenWrap.appendChild(this._freeze(screenEl));
     overlay.appendChild(screenWrap);
+
+    // Reposition FAB from fixed to absolute so it doesn't jump during slide
+    const overlayFab = overlay.querySelector('.sdFab');
+    if (overlayFab) {
+      const liveFab = screenEl.querySelector('.sdFab');
+      if (liveFab) {
+        const fr = liveFab.getBoundingClientRect();
+        overlayFab.style.position = 'absolute';
+        overlayFab.style.top = `${fr.top}px`;
+        overlayFab.style.left = `${fr.left}px`;
+        overlayFab.style.bottom = 'auto';
+        overlayFab.style.right = 'auto';
+        overlay.appendChild(overlayFab);
+      }
+    }
 
     document.body.appendChild(overlay);
 
@@ -406,7 +504,8 @@ class Nav {
 
     if (tbRect && tb) {
       const tbClone = tb.cloneNode(true);
-      tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${tbRect.left}px;width:${tbRect.width}px;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
+      tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${tbRect.left}px;width:${tbRect.width}px;height:${tbRect.height}px;overflow:visible;pointer-events:none;`;
+      this._bakeTopbarStyles(tbClone, tb);
       queenEl.appendChild(tbClone);
     }
 
@@ -417,8 +516,28 @@ class Nav {
     screenWrap.appendChild(queenClone);
     queenEl.appendChild(screenWrap);
 
+    // Bake fixed-position FAB into absolute pixel coords so it won't jump
+    // when renderUnderneath() changes --dock-h
+    const queenFab = queenEl.querySelector('.sdFab');
+    if (queenFab) {
+      const liveFab = document.querySelector('.sdFab');
+      if (liveFab) {
+        const fr = liveFab.getBoundingClientRect();
+        queenFab.style.position = 'absolute';
+        queenFab.style.top = `${fr.top}px`;
+        queenFab.style.left = `${fr.left}px`;
+        queenFab.style.bottom = 'auto';
+        queenFab.style.right = 'auto';
+        queenEl.appendChild(queenFab);
+      }
+    }
+
     // Queen goes on first — covers everything while we render + build ace
     document.body.appendChild(queenEl);
+
+    // Hide live topbar — overlays have their own clones; prevents the live
+    // topbar from peeking through the ace's parallax gap during animation.
+    if (tb) tb.style.visibility = "hidden";
 
     // Render live DOM invisibly underneath the queen overlay.
     // This removes pdActive, restores normal .view dimensions, etc.
@@ -445,7 +564,7 @@ class Nav {
         tbWrap.innerHTML = aceTopbarHTML;
         const tbEl = tbWrap.firstElementChild;
         if (tbEl) {
-          tbEl.style.cssText = `display:flex;position:absolute;top:${aceTbRect.top}px;left:${aceRect.left}px;width:${aceRect.width}px;height:${aceTbRect.height}px;overflow:hidden;pointer-events:none;box-sizing:border-box;`;
+          tbEl.style.cssText = `display:flex;position:absolute;top:${aceTbRect.top}px;left:${aceRect.left}px;width:${aceRect.width}px;height:${aceTbRect.height}px;overflow:visible;pointer-events:none;box-sizing:border-box;`;
           aceOverlay.appendChild(tbEl);
         }
       }
@@ -491,6 +610,7 @@ class Nav {
         queenEl.addEventListener("transitionend", () => {
           queenEl.remove();
           if (aceOverlay) aceOverlay.remove();
+          if (tb) tb.style.visibility = "";
         }, { once: true });
       });
     });
@@ -511,7 +631,8 @@ class Nav {
 
     if (tbRect && tb) {
       const tbClone = tb.cloneNode(true);
-      tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${tbRect.left}px;width:${tbRect.width}px;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
+      tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${tbRect.left}px;width:${tbRect.width}px;height:${tbRect.height}px;overflow:visible;pointer-events:none;`;
+      this._bakeTopbarStyles(tbClone, tb);
       queenEl.appendChild(tbClone);
     }
 
@@ -521,6 +642,21 @@ class Nav {
     queenClone.scrollTop = screenEl.scrollTop;
     screenWrap.appendChild(queenClone);
     queenEl.appendChild(screenWrap);
+
+    // Reposition FAB from fixed to absolute so it doesn't jump during slide
+    const jumpFab = queenEl.querySelector('.sdFab');
+    if (jumpFab) {
+      const liveFab = screenEl.querySelector('.sdFab');
+      if (liveFab) {
+        const fr = liveFab.getBoundingClientRect();
+        jumpFab.style.position = 'absolute';
+        jumpFab.style.top = `${fr.top}px`;
+        jumpFab.style.left = `${fr.left}px`;
+        jumpFab.style.bottom = 'auto';
+        jumpFab.style.right = 'auto';
+        queenEl.appendChild(jumpFab);
+      }
+    }
 
     document.body.appendChild(queenEl);
 
@@ -584,7 +720,7 @@ class Nav {
       tbWrap.innerHTML = peekTopbarHTML;
       const tbEl = tbWrap.firstElementChild;
       if (tbEl) {
-        tbEl.style.cssText = `display:flex;position:absolute;top:${peekTopbarRect.top}px;left:${peekRect.left}px;width:${peekRect.width}px;height:${peekTopbarRect.height}px;overflow:hidden;pointer-events:none;box-sizing:border-box;`;
+        tbEl.style.cssText = `display:flex;position:absolute;top:${peekTopbarRect.top}px;left:${peekRect.left}px;width:${peekRect.width}px;height:${peekTopbarRect.height}px;overflow:visible;pointer-events:none;box-sizing:border-box;`;
         this.swipeAceEl.appendChild(tbEl);
       }
     }
@@ -616,7 +752,8 @@ class Nav {
     if (swipeTb) {
       const tbRect = swipeTb.getBoundingClientRect();
       const tbClone = swipeTb.cloneNode(true);
-      tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${tbRect.left}px;width:${tbRect.width}px;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
+      tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${tbRect.left}px;width:${tbRect.width}px;height:${tbRect.height}px;overflow:visible;pointer-events:none;`;
+      this._bakeTopbarStyles(tbClone, swipeTb);
       this.swipeQueenEl.appendChild(tbClone);
     }
 
@@ -631,8 +768,26 @@ class Nav {
       this.swipeQueenEl.appendChild(screenWrap);
     }
 
+    // Reposition FAB from fixed to absolute so it doesn't jump during swipe
+    const swipeFab = this.swipeQueenEl.querySelector('.sdFab');
+    if (swipeFab) {
+      const liveFab = screenEl?.querySelector('.sdFab');
+      if (liveFab) {
+        const fr = liveFab.getBoundingClientRect();
+        swipeFab.style.position = 'absolute';
+        swipeFab.style.top = `${fr.top}px`;
+        swipeFab.style.left = `${fr.left}px`;
+        swipeFab.style.bottom = 'auto';
+        swipeFab.style.right = 'auto';
+        this.swipeQueenEl.appendChild(swipeFab);
+      }
+    }
+
     document.body.appendChild(this.swipeQueenEl);
     if (clonedScreen) clonedScreen.scrollTop = savedScrollTop;
+
+    // Hide live topbar — overlays have their own clones
+    if (swipeTb) swipeTb.style.visibility = "hidden";
 
     if (this.swipeAceEl) this.swipeAceEl.style.transform = `translateX(-${this.ACE_PARALLAX}px)`;
   }
@@ -680,6 +835,8 @@ class Nav {
   _cleanupSwipe() {
     if (this.swipeQueenEl) { this.swipeQueenEl.remove(); this.swipeQueenEl = null; }
     if (this.swipeAceEl) { this.swipeAceEl.remove(); this.swipeAceEl = null; }
+    const tb = document.querySelector(".topbar");
+    if (tb) tb.style.visibility = "";
   }
 }
 
@@ -3418,7 +3575,7 @@ globalAudio?.addEventListener("ended", () => {
 const sheet = $("#createSheet");
 const sheetOverlay = $("#sheetOverlay");
 const sheetContent = $("#sheetContent");
-let sheetMode = "chooser"; // chooser | song | lyrics | release | songMenu | versionMenu | songFilters
+let sheetMode = "chooser"; // chooser | song | lyrics | release | songMenu | versionMenu | songFilters | shareTarget | shareNewSong | shareExistingSong
 let sheetSongMenuId = null;
 
 function openSongMenu(songId){
@@ -3935,6 +4092,28 @@ function renderSheet() {
     $("#pmCancel")?.addEventListener("click", closeSheet);
     return;
   }
+
+  if (sheetMode === "releaseMenu") {
+    const rel = (state.releases || []).find(r => r.id === sheetReleaseMenuId);
+    if (!rel) { closeSheet(); return; }
+    sheetContent.innerHTML = `
+      <div class="sheetTitle">${escapeHtml(rel.title)}</div>
+      <div class="sheetForm" style="gap:10px; margin-top:12px">
+        <button class="sheetChoice" id="rmDelete" style="color:#ef4444">Delete Release</button>
+        <button class="sheetChoice" id="rmCancel">Cancel</button>
+      </div>
+    `;
+    $("#rmDelete")?.addEventListener("click", () => {
+      closeSheet();
+      if (!confirm(`Delete "${rel.title}"?`)) return;
+      state.releases = (state.releases || []).filter(r => r.id !== rel.id);
+      saveState();
+      releaseDetailId = null;
+      render();
+    });
+    $("#rmCancel")?.addEventListener("click", closeSheet);
+    return;
+  }
 }
 
 let sheetVersionMenu = { songId: null, versionId: null };
@@ -3948,6 +4127,13 @@ function openVersionMenu(songId, versionId){
 function openProjectMenu(projectName) {
   sheetProjectMenuName = projectName;
   openSheet("projectMenu");
+}
+
+let sheetReleaseMenuId = null;
+
+function openReleaseMenu(releaseId) {
+  sheetReleaseMenuId = releaseId;
+  openSheet("releaseMenu");
 }
 
 sheetOverlay?.addEventListener("click", closeSheet);
@@ -4457,6 +4643,280 @@ async function preFetchDriveAudio() {
   }
 }
 
+// ---------------------
+// Web Share Target — receive files shared from other apps
+// ---------------------
+async function checkSharedAudioFile() {
+  const params = new URLSearchParams(window.location.search);
+  if (!params.has("shared")) return;
+
+  // Clean URL so refreshing doesn't re-trigger
+  history.replaceState(null, "", window.location.pathname);
+
+  try {
+    const cache = await caches.open("riffbank-share-target");
+    const resp = await cache.match("shared-audio-file");
+    if (!resp) return;
+
+    const blob = await resp.blob();
+    const fileName = decodeURIComponent(resp.headers.get("X-File-Name") || "audio");
+    const fileType = resp.headers.get("X-File-Type") || "audio/*";
+    const fileSize = parseInt(resp.headers.get("X-File-Size") || "0", 10);
+
+    // Clean up the temp cache
+    await cache.delete("shared-audio-file");
+
+    // Show the share target sheet
+    openShareTargetSheet(blob, fileName, fileType, fileSize);
+  } catch (err) {
+    console.error("Share target error:", err);
+  }
+}
+
+function openShareTargetSheet(blob, fileName, fileType, fileSize) {
+  sheetMode = "shareTarget";
+  const existingSongs = (state.songs || []).filter(s => s.title);
+
+  sheetContent.innerHTML = `
+    <div class="sheetTitle">Shared file</div>
+    <div style="padding:0 20px 12px;color:#aaa;font-size:13px">${escapeHtml(fileName)}</div>
+
+    <div class="sheetRow">
+      <button class="sheetChoice" id="shareNewSong">
+        New song
+        <span class="sub">create a song with this file</span>
+      </button>
+      <button class="sheetChoice" id="shareExistingSong">
+        Existing song
+        <span class="sub">add as latest version</span>
+      </button>
+    </div>
+  `;
+
+  document.body.classList.add("sheetOpen");
+  sheet?.setAttribute("aria-hidden", "false");
+  sheetOverlay?.setAttribute("aria-hidden", "false");
+
+  $("#shareNewSong")?.addEventListener("click", () => {
+    closeSheet();
+    openShareNewSongSheet(blob, fileName, fileType, fileSize);
+  });
+
+  $("#shareExistingSong")?.addEventListener("click", () => {
+    closeSheet();
+    openShareExistingSongSheet(blob, fileName, fileType, fileSize);
+  });
+}
+
+function openShareNewSongSheet(blob, fileName, fileType, fileSize) {
+  sheetMode = "shareNewSong";
+
+  const existingProjects = [...new Set(
+    state.songs.map(s => (s.project || "").trim()).filter(Boolean)
+  )].sort();
+  const defaultProj = state.settings.defaultProject || "";
+
+  sheetContent.innerHTML = `
+    <div class="sheetTitle">New song</div>
+    <div style="padding:0 20px 12px;color:#aaa;font-size:13px">${escapeHtml(fileName)}</div>
+
+    <div class="sheetForm">
+      <input id="sheetSongTitle" type="text" placeholder="Title (e.g. Internal)" />
+      <select id="sheetSongProject">
+        ${existingProjects.map(p => `<option value="${escapeHtml(p)}"${p === defaultProj ? " selected" : ""}>${escapeHtml(p)}</option>`).join("")}
+        <option value="__new__"${!existingProjects.length ? " selected" : ""}>+ New project…</option>
+      </select>
+      <input id="sheetNewProject" type="text" placeholder="Project name"
+        style="display:${!existingProjects.length ? "block" : "none"}; margin-top:-4px" />
+      <input id="sheetSongGenre" type="text" placeholder="Genre" value="${escapeHtml(state.settings.defaultGenre || "")}" />
+      <input id="sheetSongSprint" type="text" placeholder="Sprint" value="${escapeHtml(state.settings.defaultSprint || "")}" />
+    </div>
+
+    <div class="sheetActions">
+      <button class="sheetBtn ghost" id="sheetBack">Back</button>
+      <button class="sheetBtn primary" id="sheetCreateSong">Create</button>
+    </div>
+  `;
+
+  document.body.classList.add("sheetOpen");
+  sheet?.setAttribute("aria-hidden", "false");
+  sheetOverlay?.setAttribute("aria-hidden", "false");
+
+  $("#sheetSongProject")?.addEventListener("change", (e) => {
+    const isNew = e.target.value === "__new__";
+    const inp = $("#sheetNewProject");
+    if (inp) { inp.style.display = isNew ? "block" : "none"; }
+    if (isNew) setTimeout(() => $("#sheetNewProject")?.focus(), 0);
+  });
+
+  $("#sheetBack")?.addEventListener("click", () => {
+    closeSheet();
+    openShareTargetSheet(blob, fileName, fileType, fileSize);
+  });
+
+  $("#sheetCreateSong")?.addEventListener("click", async () => {
+    const title = ($("#sheetSongTitle")?.value || "").trim();
+    if (!title) return toast("Give it a title 🙂");
+
+    const projSel = $("#sheetSongProject")?.value || "";
+    const projectRaw = projSel === "__new__"
+      ? ($("#sheetNewProject")?.value || "").trim()
+      : projSel;
+
+    const song = {
+      id: uid(),
+      title,
+      project: projectRaw || "Project",
+      genre: ($("#sheetSongGenre")?.value || "").trim() || "",
+      sprint: ($("#sheetSongSprint")?.value || "").trim() || "Unsorted",
+      instrumentation: "",
+      collaborators: "",
+      status: "Idea",
+      stuckState: "Active",
+      nextAction: "",
+      vibes: "",
+      lyrics: "",
+      notes: "",
+      versions: [],
+      createdAt: nowStamp(),
+      updatedAt: nowStamp(),
+    };
+
+    state.songs.unshift(song);
+
+    // Create version and attach audio
+    const v = createVersion(song);
+    await attachSharedAudio(song, v, blob, fileName, fileType, fileSize);
+
+    closeSheet();
+    toast("Created with audio 🎸");
+
+    currentTab = "songs";
+    songsView = "list";
+    selectedSongId = song.id;
+    setHeader("Song");
+    syncTabs();
+    render();
+  });
+
+  setTimeout(() => $("#sheetSongTitle")?.focus(), 0);
+}
+
+function openShareExistingSongSheet(blob, fileName, fileType, fileSize) {
+  sheetMode = "shareExistingSong";
+
+  const songs = (state.songs || []).filter(s => s.title);
+
+  sheetContent.innerHTML = `
+    <div class="sheetTitle">Choose song</div>
+    <div style="padding:0 20px 12px;color:#aaa;font-size:13px">${escapeHtml(fileName)}</div>
+
+    <div class="sheetForm">
+      <input id="shareSearchSongs" type="text" placeholder="Search songs…" />
+    </div>
+
+    <div id="shareSongList" class="sheetRow" style="flex-direction:column;max-height:50vh;overflow-y:auto">
+      ${songs.map(s => `
+        <button class="sheetChoice sharePickSong" data-id="${s.id}" style="text-align:left">
+          ${escapeHtml(s.title)}
+          <span class="sub">${escapeHtml(s.project || "")}${s.versions?.length ? ` · ${s.versions.length} version${s.versions.length > 1 ? "s" : ""}` : ""}</span>
+        </button>
+      `).join("")}
+    </div>
+
+    <div class="sheetActions">
+      <button class="sheetBtn ghost" id="sheetBack">Back</button>
+    </div>
+  `;
+
+  document.body.classList.add("sheetOpen");
+  sheet?.setAttribute("aria-hidden", "false");
+  sheetOverlay?.setAttribute("aria-hidden", "false");
+
+  // Search filter
+  $("#shareSearchSongs")?.addEventListener("input", (e) => {
+    const q = (e.target.value || "").toLowerCase();
+    const list = document.getElementById("shareSongList");
+    if (!list) return;
+    for (const btn of list.querySelectorAll(".sharePickSong")) {
+      const text = (btn.textContent || "").toLowerCase();
+      btn.style.display = !q || text.includes(q) ? "" : "none";
+    }
+  });
+
+  $("#sheetBack")?.addEventListener("click", () => {
+    closeSheet();
+    openShareTargetSheet(blob, fileName, fileType, fileSize);
+  });
+
+  // Song pick handlers
+  for (const btn of document.querySelectorAll(".sharePickSong")) {
+    btn.addEventListener("click", async () => {
+      const songId = btn.dataset.id;
+      const song = getSong(songId);
+      if (!song) return toast("Song not found 😅");
+
+      const v = createVersion(song);
+      await attachSharedAudio(song, v, blob, fileName, fileType, fileSize);
+
+      closeSheet();
+      toast(`Added v${song.versions.length} to ${song.title} 🎸`);
+
+      currentTab = "songs";
+      songsView = "list";
+      selectedSongId = song.id;
+      setHeader("Song");
+      syncTabs();
+      render();
+    });
+  }
+
+  setTimeout(() => $("#shareSearchSongs")?.focus(), 0);
+}
+
+async function attachSharedAudio(song, v, blob, fileName, fileType, fileSize) {
+  const id = uid();
+
+  await audioPut({
+    id,
+    name: fileName,
+    type: fileType,
+    size: fileSize,
+    blob,
+    createdAt: nowStamp(),
+  });
+
+  v.fileId = id;
+  v.fileName = fileName;
+  v.fileType = fileType;
+  v.fileSize = fileSize;
+
+  song.updatedAt = nowStamp();
+  saveState();
+
+  // Upload to Google Drive in background if connected
+  if (gdriveIsConnected()) {
+    toast("Uploading to Drive… ☁️");
+    const file = new File([blob], fileName, { type: fileType });
+    const suggested = suggestedFileName(song, fileName);
+    gdriveUploadAudio({
+      file,
+      fileName: suggested,
+      project: song.project,
+      songTitle: song.title,
+    }).then(result => {
+      if (result.success) {
+        v.driveFileId = result.driveFileId;
+        v.driveWebViewLink = result.driveWebViewLink || "";
+        saveState();
+        toast("Synced to Drive ✅ ☁️");
+      } else {
+        toast("Local saved, Drive failed 😅");
+      }
+    }).catch(() => toast("Local saved, Drive failed 😅"));
+  }
+}
+
 async function init() {
   if (!DISABLE_SPLASH) {
     await runSplashSequence();
@@ -4561,6 +5021,9 @@ async function init() {
       preFetchDriveAudio().catch(console.warn);
     }).catch(console.warn);
   }
+
+  // Check for Web Share Target file
+  checkSharedAudioFile();
 }
 
 // Incremental sync: pull Drive state JSON and merge only new/changed songs
@@ -4645,6 +5108,10 @@ if (document.readyState === "loading") {
 // ---------------------
 function renderProjects() {
   setHeader("Projects");
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("collapseTitle");
+  const h1 = appEl?.querySelector(".titleblock h1");
+  if (h1) h1.style.opacity = "0";
 
   const projects = Array.from(
     new Set([
@@ -4693,6 +5160,7 @@ function renderProjects() {
     }).join("");
 
   activeScreenEl.innerHTML = `
+    <div class="songsPageTitle">Projects</div>
     <div class="songsHead">
       <div class="songsBar">
         <input id="projSearch" type="text" placeholder="Search projects..." />
@@ -4822,10 +5290,40 @@ function renderProjects() {
 
   $("#projSearch")?.addEventListener("input", applyProjFilter);
   applyProjFilter();
+
+  // Collapse title: fade small title in as big title scrolls behind topbar
+  if (activeScreenEl._collapseTitleScroll) {
+    activeScreenEl.removeEventListener("scroll", activeScreenEl._collapseTitleScroll);
+    activeScreenEl._collapseTitleScroll = null;
+  }
+  const _screen = activeScreenEl;
+  const _sm = document.querySelector(".app.collapseTitle .titleblock h1");
+  if (_sm) {
+    requestAnimationFrame(() => {
+      const bt = _screen.querySelector(".songsPageTitle");
+      if (!bt) return;
+      const topbarEl = document.querySelector(".topbar");
+      const screenTop = _screen.getBoundingClientRect().top;
+      const topbarBottom = topbarEl ? topbarEl.getBoundingClientRect().bottom : 80;
+      const fadeStart = bt.offsetTop - (topbarBottom - screenTop);
+      const fadeEnd = fadeStart + (bt.offsetHeight || 40);
+      const range = fadeEnd - fadeStart;
+      const onScroll = () => {
+        const progress = Math.min(1, Math.max(0, (_screen.scrollTop - fadeStart) / range));
+        _sm.style.opacity = progress;
+      };
+      _screen._collapseTitleScroll = onScroll;
+      _screen.addEventListener("scroll", onScroll, { passive: true });
+      onScroll();
+    });
+  }
 }
 
 function renderProjectSongs(projectName) {
   setHeader(projectName);
+  // Hide topbar title — the hero has its own large title
+  const _tbH1 = document.querySelector(".topbar h1");
+  if (_tbH1) _tbH1.textContent = "";
   const appEl = document.querySelector(".app");
   appEl?.classList.add("pdActive");
   appEl?.classList.remove("pdScrolled");
@@ -4836,10 +5334,7 @@ function renderProjectSongs(projectName) {
   const topbarH = topbarEl ? topbarEl.offsetHeight : 0;
   activeScreenEl.style.setProperty("--pd-topbar-h", topbarH + "px");
 
-  if (activeScreenEl) {
-    activeScreenEl.scrollTop = 0;
-    activeScreenEl.style.overflowY = "scroll";
-  }
+  activeScreenEl.style.overflowY = "scroll";
 
   const songs = state.songs.filter(s => (s.project || "").trim() === projectName);
 
@@ -4910,6 +5405,9 @@ function renderProjectSongs(projectName) {
       </div>
     </div>
   `;
+
+  // Reset scroll AFTER innerHTML so the hero is visible on load
+  activeScreenEl.scrollTop = 0;
 
   /* ── Tab switching ── */
   const tabBody = $("#pdTabBody");
@@ -4993,10 +5491,6 @@ function renderProjectSongs(projectName) {
     const FADE_PX = 200;
     requestAnimationFrame(() => {
       maxScroll = activeScreenEl.scrollHeight - activeScreenEl.clientHeight;
-      // Force pdTabBody content to overflow so iOS elastic scroll works
-      const tb = activeScreenEl.querySelector(".pdTabBody");
-      const sl = tb?.querySelector(".pdSongList, .pdPlaceholder");
-      if (tb && sl) sl.style.minHeight = (tb.clientHeight + 1) + "px";
     });
 
     activeScreenEl.addEventListener("scroll", () => {
@@ -5025,6 +5519,10 @@ function renderProjectSongs(projectName) {
 
 function renderReleases() {
   setHeader("Releases");
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("collapseTitle");
+  const h1 = appEl?.querySelector(".titleblock h1");
+  if (h1) h1.style.opacity = "0";
 
   const releases = state.releases || [];
 
@@ -5034,44 +5532,109 @@ function renderReleases() {
     return new Date(+y, +m - 1, +day).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
   };
 
-  const rows = releases.map(r => {
+  const releaseCompositeArt = (r, lite) => {
+    const songs = (r.songIds || []).map(id => state.songs.find(s => s.id === id)).filter(Boolean);
+    if (!songs.length) {
+      const fakeSong = { id: r.id, title: r.title, project: r.artist, genre: "" };
+      return coverSvg(fakeSong, { lite });
+    }
+    if (songs.length === 1) return coverSvg(songs[0], { lite });
+    // 2 → side by side, 3 → top-left big + right column, 4+ → 2×2 grid
+    const cells = songs.slice(0, 4);
+    const cls = `relMosaic relMosaic${Math.min(cells.length, 4)}`;
+    return `<div class="${cls}">${cells.map(s => `<div class="relMosaicCell">${coverSvg(s, { lite })}</div>`).join("")}</div>`;
+  };
+
+  const releaseCard = (r, span) => {
     const count = (r.songIds || []).length;
-    const fakeSong = { id: r.id, title: r.title, project: r.artist, genre: "" };
+    const spanStyle = span > 1 ? ` style="grid-column:span ${span}"` : "";
     return `
-      <div class="songRow" data-rel-open="${escapeHtml(r.id)}">
-        <div class="songThumb" aria-hidden="true">${coverSvg(fakeSong, { lite: true })}</div>
-        <div class="songMain">
-          <div class="songTop">
-            <div class="songTitleRow"><div class="songTitle">${escapeHtml(r.title)}</div></div>
+      <div class="songCard" data-rel-open="${escapeHtml(r.id)}"${spanStyle}>
+        <div class="songCardStack">
+          <div class="songCardLayer songCardLayer2"></div>
+          <div class="songCardLayer songCardLayer1"></div>
+          <div class="songCardFront">
+            <div class="songCardArt">${releaseCompositeArt(r, true)}</div>
           </div>
-          <div class="songSub">${escapeHtml(r.artist || "—")} · ${escapeHtml(fmtDate(r.releaseDate))} · ${count} song${count === 1 ? "" : "s"}</div>
+        </div>
+        <div class="songCardInfo">
+          <div class="songCardTitle">${escapeHtml(r.title)}</div>
+          <div class="songCardSub">${escapeHtml(r.artist || "—")} · ${count} song${count !== 1 ? "s" : ""}</div>
         </div>
       </div>
     `;
-  }).join("");
+  };
+
+  const buildRelGrid = (items) => {
+    const count = items.length;
+    if (count === 0) return "";
+    if (count === 1) return releaseCard(items[0], 3);
+    if (count === 2) return releaseCard(items[0], 2) + releaseCard(items[1], 1);
+    const remainder = count % 3;
+    if (remainder === 0) return items.map(r => releaseCard(r, 1)).join("");
+    const fullCount = count - (remainder === 1 ? 4 : remainder);
+    let html = items.slice(0, fullCount).map(r => releaseCard(r, 1)).join("");
+    const tail = items.slice(fullCount);
+    if (remainder === 2) {
+      html += releaseCard(tail[0], 2) + releaseCard(tail[1], 1);
+    } else {
+      // remainder === 1 → take last 4, two rows of span 2 + span 1 (alternating)
+      html += releaseCard(tail[0], 2) + releaseCard(tail[1], 1);
+      html += releaseCard(tail[2], 1) + releaseCard(tail[3], 2);
+    }
+    return html;
+  };
 
   activeScreenEl.innerHTML = `
+    <div class="songsPageTitle">Releases</div>
     <div class="songsHead">
       <div class="songsBar" style="justify-content:space-between;align-items:center">
-        <span style="font-size:15px;font-weight:600;color:rgba(255,255,255,.6)">${releases.length} release${releases.length === 1 ? "" : "s"}</span>
+        <span style="font-size:13px;font-weight:600;color:rgba(255,255,255,.4)">${releases.length} release${releases.length === 1 ? "" : "s"}</span>
         <button class="btn" id="addReleaseBtn" style="padding:6px 14px;font-size:13px">+ Add Release</button>
       </div>
     </div>
     <div class="songsList">
-      ${rows || `<div class="small">No releases yet. Tap "+ Add Release" to plan your first drop.</div>`}
+      ${buildRelGrid(releases) || `<div class="small" style="grid-column:1/-1">No releases yet. Tap "+ Add Release" to plan your first drop.</div>`}
     </div>
   `;
 
-  activeScreenEl.querySelectorAll("[data-rel-open]").forEach(row => {
-    row.addEventListener("click", () => {
+  activeScreenEl.querySelectorAll(".songCard[data-rel-open]").forEach(el => {
+    el.addEventListener("click", () => {
       captureNavState();
-      releaseDetailId = row.getAttribute("data-rel-open");
+      releaseDetailId = el.getAttribute("data-rel-open");
       render();
       triggerForwardSlide();
     });
   });
 
   $("#addReleaseBtn")?.addEventListener("click", () => openSheet("release"));
+
+  // Collapse title: fade small title in as big title scrolls behind topbar
+  if (activeScreenEl._collapseTitleScroll) {
+    activeScreenEl.removeEventListener("scroll", activeScreenEl._collapseTitleScroll);
+    activeScreenEl._collapseTitleScroll = null;
+  }
+  const _screen = activeScreenEl;
+  const _sm = document.querySelector(".app.collapseTitle .titleblock h1");
+  if (_sm) {
+    requestAnimationFrame(() => {
+      const bt = _screen.querySelector(".songsPageTitle");
+      if (!bt) return;
+      const topbarEl = document.querySelector(".topbar");
+      const screenTop = _screen.getBoundingClientRect().top;
+      const topbarBottom = topbarEl ? topbarEl.getBoundingClientRect().bottom : 80;
+      const fadeStart = bt.offsetTop - (topbarBottom - screenTop);
+      const fadeEnd = fadeStart + (bt.offsetHeight || 40);
+      const range = fadeEnd - fadeStart;
+      const onScroll = () => {
+        const progress = Math.min(1, Math.max(0, (_screen.scrollTop - fadeStart) / range));
+        _sm.style.opacity = progress;
+      };
+      _screen._collapseTitleScroll = onScroll;
+      _screen.addEventListener("scroll", onScroll, { passive: true });
+      onScroll();
+    });
+  }
 }
 
 function renderReleaseDetail(releaseId) {
@@ -5079,7 +5642,17 @@ function renderReleaseDetail(releaseId) {
   if (!release) { releaseDetailId = null; return renderReleases(); }
 
   setHeader(release.title);
-  if (activeScreenEl) activeScreenEl.scrollTop = 0;
+  // Hide topbar title — the hero has its own large title
+  const _tbH1 = document.querySelector(".topbar h1");
+  if (_tbH1) _tbH1.textContent = "";
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("pdActive");
+  appEl?.classList.remove("pdScrolled");
+  activeScreenEl.style.paddingBottom = "0px";
+  const topbarEl = document.querySelector(".topbar");
+  const topbarH = topbarEl ? topbarEl.offsetHeight : 0;
+  activeScreenEl.style.setProperty("--pd-topbar-h", topbarH + "px");
+  activeScreenEl.style.overflowY = "scroll";
 
   const fmtDate = (d) => {
     if (!d) return "No date set";
@@ -5098,16 +5671,33 @@ function renderReleaseDetail(releaseId) {
       return { songId: s.id, versionId: vv.id };
     });
 
-  const fakeSong = { id: release.id, title: release.title, project: release.artist, genre: "" };
-  const heroCover = coverSvg(fakeSong);
+  // Composite art for release hero
+  const releaseHeroArt = (rel, lite) => {
+    const rSongs = (rel.songIds || []).map(id => state.songs.find(s => s.id === id)).filter(Boolean);
+    if (!rSongs.length) {
+      const fake = { id: rel.id, title: rel.title, project: rel.artist, genre: "" };
+      return coverSvg(fake, { lite });
+    }
+    if (rSongs.length === 1) return coverSvg(rSongs[0], { lite });
+    const cells = rSongs.slice(0, 4);
+    const cls = `relMosaic relMosaic${Math.min(cells.length, 4)}`;
+    return `<div class="${cls}">${cells.map(s => `<div class="relMosaicCell">${coverSvg(s, { lite })}</div>`).join("")}</div>`;
+  };
+  const heroCover = releaseHeroArt(release, false);
 
-  const rows = songs.map(s => {
+  const songRows = songs.map((s, i) => {
     return `
-      <div class="songRow" data-open-song="${s.id}">
-        <div class="songThumb" aria-hidden="true">${coverSvg(s, { lite: true })}</div>
+      <div class="pdSongRow" data-open-song="${s.id}">
+        <span class="pdSongNum">${i + 1}</span>
+        <div class="songThumb" aria-hidden="true">
+          ${coverSvg(s, { lite: true })}
+        </div>
         <div class="songMain">
           <div class="songTop">
-            <div class="songTitleRow"><div class="songTitle">${escapeHtml(s.title || "Untitled")}</div></div>
+            <div class="songTitleRow">
+              <div class="songTitle">${escapeHtml(s.title || "Untitled")}</div>
+            </div>
+            <button class="songMore" data-rel-song-more="${s.id}" aria-label="Song menu">&#x22EF;</button>
           </div>
           <div class="songSub">${escapeHtml(s.genre || s.project || "—")}</div>
         </div>
@@ -5116,66 +5706,127 @@ function renderReleaseDetail(releaseId) {
   }).join("");
 
   activeScreenEl.innerHTML = `
-    <div class="albumHero">
-      <div class="albumBg" aria-hidden="true">${heroCover}</div>
-      <div class="albumTop">
-        <div class="albumArt" aria-hidden="true">${heroCover}</div>
-        <div class="albumText">
-          <div class="albumTitle">${escapeHtml(release.title)}</div>
-          <div class="albumMeta">${escapeHtml(release.artist || "—")} · ${escapeHtml(fmtDate(release.releaseDate))}</div>
-        </div>
-      </div>
-      <div class="albumActions">
-        <button class="songHeroPlay" id="relPlayAll" ${!items.length ? "disabled" : ""}>▶ Play All</button>
-        <button class="songHeroQueue" id="relShuffle" ${!items.length ? "disabled" : ""}>⇄ Shuffle</button>
+    <div class="pdHero">
+      <div class="pdHeroBg" aria-hidden="true">${heroCover}</div>
+      <div class="pdHeroContent">
+        <div class="pdHeroTitle">${escapeHtml(release.title)}</div>
+        <div class="pdHeroMeta">${escapeHtml(release.artist || "—")} · ${escapeHtml(fmtDate(release.releaseDate))}</div>
       </div>
     </div>
 
-    <div class="versionsWrap">
-      <div class="versionsHeader">
-        <div class="versionsTitle">Songs (${songs.length})</div>
+    <div class="pdActions">
+      <button class="pdPlayBtn" id="relPlayAll" ${!items.length ? "disabled" : ""}>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+      </button>
+      <button class="pdShuffleBtn" id="relShuffle" ${!items.length ? "disabled" : ""}>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+      </button>
+      <button class="pdMoreBtn" id="relMoreMenu" aria-label="Release menu">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
+      </button>
+    </div>
+
+    <div class="pdSticky">
+      <div class="pdTabs">
+        <button class="pdTab pdTabActive">Songs</button>
       </div>
-      <div class="versionsRows songsList">
-        ${rows || `<div class="small" style="padding:12px 2px">No songs linked to this release yet.</div>`}
+      <div class="pdTabBody" id="pdTabBody">
+        <div class="pdSongList">
+          ${songRows || `<div class="small" style="padding:24px 0; text-align:center">No songs linked to this release yet.</div>`}
+        </div>
       </div>
     </div>
   `;
 
+  // Reset scroll AFTER innerHTML so the hero is visible on load
+  activeScreenEl.scrollTop = 0;
+
+  /* ── Play / Shuffle ── */
   $("#relPlayAll")?.addEventListener("click", async () => {
-    if (!items.length) return toast("No playable songs 😅");
+    if (!items.length) return toast("No playable songs");
     const all = [...items];
     state.player.nowPlaying = all[0];
     state.player.queue = all.slice(1);
     state.player.repeatQueue = all;
     saveState();
     await playNowPlaying({ autoplay: true });
-    toast("Playing ▶️");
   });
 
   $("#relShuffle")?.addEventListener("click", async () => {
-    if (!items.length) return toast("No playable songs 😅");
+    if (!items.length) return toast("No playable songs");
     const all = shuffleArray([...items]);
     state.player.nowPlaying = all[0];
     state.player.queue = all.slice(1);
     state.player.repeatQueue = all;
     saveState();
     await playNowPlaying({ autoplay: true });
-    toast("Shuffled ▶️");
   });
 
-  activeScreenEl.querySelectorAll("[data-open-song]").forEach(row => {
-    row.addEventListener("click", () => {
-      captureNavState();
-      releaseDetailId = null;
-      drawerView = null;
-      currentTab = "songs";
-      songsView = "detail";
-      selectedSongId = row.getAttribute("data-open-song");
-      selectedVersionId = null;
-      render();
-      triggerForwardSlide();
-    });
+  $("#relMoreMenu")?.addEventListener("click", () => {
+    openReleaseMenu(releaseId);
   });
+
+  /* ── Song row listeners ── */
+  function attachSongListeners() {
+    activeScreenEl.querySelectorAll("[data-open-song]").forEach(row => {
+      row.addEventListener("click", (e) => {
+        if (e.target.closest("[data-rel-song-more]")) return;
+        captureNavState();
+        const sid = row.getAttribute("data-open-song");
+        releaseDetailId = null;
+        drawerView = null;
+        currentTab = "songs";
+        songsView = "detail";
+        selectedSongId = sid;
+        selectedVersionId = null;
+        render();
+        triggerForwardSlide();
+      });
+    });
+
+    activeScreenEl.querySelectorAll("[data-rel-song-more]").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openSongMenu(btn.getAttribute("data-rel-song-more"));
+      });
+    });
+  }
+
+  attachSongListeners();
+
+  /* ── Fade hero + actions to black, solid topbar as user scrolls ── */
+  const heroEl = activeScreenEl.querySelector(".pdHero");
+  const heroBgEl = heroEl?.querySelector(".pdHeroBg");
+  const heroContentEl = heroEl?.querySelector(".pdHeroContent");
+  const actionsEl = activeScreenEl.querySelector(".pdActions");
+  const stickyEl = activeScreenEl.querySelector(".pdSticky");
+  if (stickyEl && heroEl) {
+    let maxScroll = 0;
+    const FADE_PX = 200;
+    requestAnimationFrame(() => {
+      maxScroll = activeScreenEl.scrollHeight - activeScreenEl.clientHeight;
+    });
+
+    activeScreenEl.addEventListener("scroll", () => {
+      const scrolled = activeScreenEl.scrollTop;
+      if (maxScroll > 0) {
+        const remaining = maxScroll - scrolled;
+        const opacity = remaining < FADE_PX ? Math.max(0, remaining / FADE_PX) : 1;
+        if (heroBgEl) heroBgEl.style.opacity = opacity;
+        if (heroContentEl) heroContentEl.style.opacity = opacity;
+        if (actionsEl) actionsEl.querySelectorAll("button").forEach(b => b.style.opacity = opacity);
+      }
+      if (appEl) {
+        const heroBottom = heroEl.getBoundingClientRect().bottom;
+        const screenTop = activeScreenEl.getBoundingClientRect().top;
+        if (heroBottom - screenTop < 60) {
+          appEl.classList.add("pdScrolled");
+        } else {
+          appEl.classList.remove("pdScrolled");
+        }
+      }
+    }, { passive: true });
+  }
 }
 
 function renderEPs() {
@@ -6984,6 +7635,9 @@ function renderSongDetail(id) {
   }
 
   setHeader(song.title);
+  // Hide topbar title — the hero has its own large title
+  const _tbH1 = document.querySelector(".topbar h1");
+  if (_tbH1) _tbH1.textContent = "";
   const appEl = document.querySelector(".app");
   appEl?.classList.add("pdActive");
   appEl?.classList.remove("pdScrolled");
@@ -6992,10 +7646,7 @@ function renderSongDetail(id) {
   const topbarH = topbarEl ? topbarEl.offsetHeight : 0;
   activeScreenEl.style.setProperty("--pd-topbar-h", topbarH + "px");
 
-  if (activeScreenEl) {
-    activeScreenEl.scrollTop = 0;
-    activeScreenEl.style.overflowY = "scroll";
-  }
+  activeScreenEl.style.overflowY = "scroll";
 
   const fv = featuredVersion(song);
   const vCount = song.versions?.length || 0;
@@ -7078,6 +7729,9 @@ function renderSongDetail(id) {
       <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
     </button>
   `;
+
+  // Reset scroll AFTER innerHTML so the hero is visible on load
+  activeScreenEl.scrollTop = 0;
 
   /* ── Tab switching ── */
   const tabBody = $("#pdTabBody");
@@ -7172,9 +7826,6 @@ function renderSongDetail(id) {
     const FADE_PX = 200;
     requestAnimationFrame(() => {
       maxScroll = activeScreenEl.scrollHeight - activeScreenEl.clientHeight;
-      const tb = activeScreenEl.querySelector(".pdTabBody");
-      const sl = tb?.querySelector(".pdSongList, .pdPlaceholder");
-      if (tb && sl) sl.style.minHeight = (tb.clientHeight + 1) + "px";
     });
 
     activeScreenEl.addEventListener("scroll", () => {

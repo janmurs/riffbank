@@ -5,6 +5,19 @@
   "display": "standalone",
   "background_color": "#0b0b0f",
   "theme_color": "#0b0b0f",
+  "share_target": {
+    "action": "/?share-target",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "files": [
+        {
+          "name": "audio",
+          "accept": ["audio/*", ".wav", ".mp3", ".m4a", ".aac", ".aiff", ".flac", ".ogg", ".caf"]
+        }
+      ]
+    }
+  },
   "icons": [
     {
       "src": "icon-1024.png",

@@ -8,7 +8,7 @@
 
 // Type ./start.sh to start local server
 
-const CACHE_VERSION = "2026-03-12_40"; // <-- bump this when you deploy
+const CACHE_VERSION = "2026-03-12_63"; // <-- bump this when you deploy
 const STATIC_CACHE = `riffbank-static-${CACHE_VERSION}`;
 const RUNTIME_CACHE = `riffbank-runtime-${CACHE_VERSION}`;
 
@@ -78,10 +78,35 @@ async function cacheFirst(request) {
 
 self.addEventListener("fetch", (event) => {
   const req = event.request;
+  const url = new URL(req.url);
+
+  // Handle Web Share Target POST — stash the shared file, then redirect
+  if (req.method === "POST" && url.pathname === "/" && url.searchParams.has("share-target")) {
+    event.respondWith((async () => {
+      try {
+        const formData = await req.formData();
+        const file = formData.get("audio");
+        if (file && file.size > 0) {
+          // Store in a temporary cache so the app can pick it up
+          const cache = await caches.open("riffbank-share-target");
+          await cache.put("shared-audio-file", new Response(file, {
+            headers: {
+              "X-File-Name": encodeURIComponent(file.name || "audio"),
+              "X-File-Type": file.type || "audio/*",
+              "X-File-Size": String(file.size || 0),
+            }
+          }));
+        }
+      } catch (err) {
+        console.error("[SW] share-target error:", err);
+      }
+      // Redirect to app with a flag so the client knows to check for the file
+      return Response.redirect("/?shared=1", 303);
+    })());
+    return;
+  }
 
   if (req.method !== "GET") return;
-
-  const url = new URL(req.url);
 
   // Never intercept cross-origin requests (Google auth, APIs, CDNs, etc.)
   if (url.origin !== self.location.origin) return;
