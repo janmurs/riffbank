@@ -118,10 +118,13 @@ if (!view) {
 const screens = {
   home: document.getElementById("screen-home"),
   songs: document.getElementById("screen-songs"),
+  songDetail: document.getElementById("screen-song-detail"),
+  versionDetail: document.getElementById("screen-version-detail"),
   player: document.getElementById("screen-player"),
   settings: document.getElementById("screen-settings"),
   collab: document.getElementById("screen-collab"),
   drawer: document.getElementById("screen-drawer"),
+  projectDetail: document.getElementById("screen-project-detail"),
 };
 
 // ---------------------
@@ -140,8 +143,11 @@ class Nav {
     this.paddingStack = []; // computed padding at capture time
     this.tbRectStack = [];  // topbar rect at capture time
 
+    this.appStack = [];     // full-app captures for new transition system
+
     this.pendingBackState = null;
     this._isBackNav = false;
+    this._transitionActive = false;
     this._restoredScrollTop = 0;
 
     // Snapshot state (captured at render() time, before DOM mutations)
@@ -154,10 +160,6 @@ class Nav {
     this.topbarRect = null;
     this.prevState = null;
 
-    // Swipe overlay references
-    this.swipeAceEl = null;
-    this.swipeQueenEl = null;
-
     this.ACE_PARALLAX = 30;
   }
 
@@ -166,6 +168,7 @@ class Nav {
   // Capture current screen so back transitions can show it as the ace.
   // Call at the start of render() before any DOM mutations.
   snapshot(screenEl) {
+    if (this._transitionActive) return; // slideTransition handles captures
     if (!screenEl?.innerHTML) return;
     this.peekNode = this._cloneDeep(screenEl);
     // Strip touch artifacts so snapshot shows natural (untouched) state
@@ -243,6 +246,7 @@ class Nav {
     this.rectStack = [];
     this.paddingStack = [];
     this.tbRectStack = [];
+    this.appStack = [];
   }
 
   // --- Shared helpers ---
@@ -346,8 +350,216 @@ class Nav {
     return clone;
   }
 
-  // --- Forward slide ---
+  // --- New centralized transition system ---
+  // Captures the entire .app element as a pixel-perfect frozen clone.
+  // Because the clone IS .app with all its CSS classes (pdActive, collapseTitle, etc.),
+  // all context-dependent styles are automatically preserved — no manual baking needed
+  // for most properties.
+  _captureApp() {
+    const appEl = document.querySelector(".app");
+    if (!appEl) return null;
+
+    const rect = appEl.getBoundingClientRect();
+    const activeScreen = appEl.querySelector(".screen.is-active");
+    const scrollTop = activeScreen ? activeScreen.scrollTop : 0;
+
+    const clone = this._cloneDeep(appEl);
+
+    // Strip non-visible content to reduce memory
+    clone.querySelector("#drawer")?.remove();
+    clone.querySelector("#drawerOverlay")?.remove();
+    clone.querySelectorAll(".screen").forEach(s => {
+      if (!s.classList.contains("is-active") && !s.querySelector(".homeWrap")) {
+        s.innerHTML = "";
+      }
+    });
+
+    // Strip touch artifacts
+    clone.querySelectorAll(".hCard.is-touched").forEach(c => c.classList.remove("is-touched"));
+    clone.querySelectorAll(".hDarken").forEach(d => d.style.opacity = 0);
+    clone.querySelectorAll(".hArt").forEach(a => { a.style.transform = ""; a.style.scale = ""; });
+
+    // Freeze CSS animations so they don't restart from frame 0
+    if (activeScreen) {
+      const cloneActive = clone.querySelector(".screen.is-active");
+      if (cloneActive) this._freezeAnimations(activeScreen, cloneActive);
+    }
+
+    // Bake body-context-dependent styles that may change during mutations.
+    // The clone retains .app classes (collapseTitle, pdActive), so most CSS works.
+    // But body-level selectors (body.isHome, body.hasHeaderGrad, etc.) won't match
+    // when the clone is displayed from a different screen context.
+    const liveTb = appEl.querySelector(".topbar");
+    const cloneTb = clone.querySelector(".topbar");
+    if (liveTb && cloneTb) {
+      const cs = getComputedStyle(liveTb);
+      cloneTb.style.display = cs.display;
+      cloneTb.style.background = cs.background;
+      // Bake h1 styles (opacity is scroll-driven, may be lost)
+      const h1L = liveTb.querySelector("h1");
+      const h1C = cloneTb.querySelector("h1");
+      if (h1L && h1C) {
+        const h1cs = getComputedStyle(h1L);
+        h1C.style.opacity = h1cs.opacity;
+        h1C.style.transition = "none";
+      }
+    }
+
+    // Bake active screen's computed styles (body.isHome sets padding:0, overflow:hidden
+    // on #screen-home — these are lost when body class changes between screens)
+    if (activeScreen) {
+      const cloneActive = clone.querySelector(".screen.is-active");
+      if (cloneActive) {
+        const screenCS = getComputedStyle(activeScreen);
+        cloneActive.style.padding = screenCS.padding;
+        cloneActive.style.overflow = screenCS.overflow;
+        cloneActive.style.overflowX = screenCS.overflowX;
+        cloneActive.style.overflowY = screenCS.overflowY;
+      }
+    }
+
+    // Bake body background onto clone (body.hasHeaderGrad sets gradient background)
+    const bodyBg = getComputedStyle(document.body).background;
+    if (bodyBg && bodyBg !== "none") {
+      // Only bake if there's a meaningful gradient (not just the default solid bg)
+      const cloneView = clone.querySelector(".view");
+      if (cloneView && bodyBg.includes("gradient")) {
+        cloneView.style.background = bodyBg;
+      }
+    }
+
+    // Bake FAB from fixed → absolute position
+    const liveFab = appEl.querySelector(".sdFab");
+    const cloneFab = clone.querySelector(".sdFab");
+    if (liveFab && cloneFab) {
+      const fr = liveFab.getBoundingClientRect();
+      cloneFab.style.position = "absolute";
+      cloneFab.style.top = `${fr.top}px`;
+      cloneFab.style.left = `${fr.left}px`;
+      cloneFab.style.bottom = "auto";
+      cloneFab.style.right = "auto";
+    }
+
+    // Kill all CSS transitions on the clone so nothing animates
+    clone.style.transition = "none";
+    clone.querySelectorAll("*").forEach(el => {
+      if (getComputedStyle(el).transition !== "all 0s ease 0s") {
+        el.style.transition = "none";
+      }
+    });
+
+    return { clone, rect, scrollTop };
+  }
+
+  // Build a fixed-position overlay from a capture, ready for animation.
+  // The clone IS .app — append it directly to body so all CSS rules
+  // (body.isHome .topbar, etc.) work identically to the live DOM.
+  _buildOverlay(capture, zIndex) {
+    if (!capture) return null;
+    const { clone, rect, scrollTop } = capture;
+
+    // Position the clone exactly where .app sits, as a fixed overlay
+    clone.style.cssText += `;position:fixed;top:${rect.top}px;left:${rect.left}px;width:${rect.width}px;height:${rect.height}px;z-index:${zIndex};overflow:hidden;pointer-events:none;margin:0;background:var(--bg);`;
+
+    // Stash scrollTop so the caller can restore it AFTER appending to the DOM.
+    // scrollTop has no effect on detached nodes.
+    clone._deferredScrollTop = scrollTop;
+
+    return clone;
+  }
+
+  // Restore scroll on a clone built by _buildOverlay. Call AFTER appendChild.
+  _restoreOverlayScroll(clone) {
+    if (clone && clone._deferredScrollTop != null) {
+      const cloneScreen = clone.querySelector(".screen.is-active");
+      if (cloneScreen) cloneScreen.scrollTop = clone._deferredScrollTop;
+      delete clone._deferredScrollTop;
+    }
+  }
+
+  // Centralized slide transition using the View Transitions API.
+  // The browser captures pixel-perfect BITMAP screenshots of the before/after
+  // states — no DOM cloning, no CSS context issues.
+  //
+  // direction: "forward" | "back" | "jumpHome"
+  // mutate: function that performs all state changes + render()
+  slideTransition({ direction, mutate }) {
+    const vtClass = `vt-${direction}`;
+    const docEl = document.documentElement;
+
+    // Fallback for browsers without View Transitions API
+    const noVT = !document.startViewTransition;
+
+    if (direction === "forward") {
+      // Snapshot the current screen BEFORE setting _transitionActive,
+      // so that peekNode/topbarHTML/etc. are fresh when pushed to stacks.
+      // snapshot() temporarily bakes styles then restores them, so the DOM
+      // is clean by the time startViewTransition captures its bitmap.
+      const currentScreen = document.querySelector(".screen.is-active");
+      this.snapshot(currentScreen);
+
+      // Capture full app clone for swipe-back ace (pixel-perfect, no hand-building)
+      this.appStack.push(this._captureApp());
+
+      // Now prevent render()'s snapshot() from overwriting our fresh capture
+      this._transitionActive = true;
+      if (this.peekNode) this.stack.push(this.peekNode);
+      this.topbarStack.push(this.topbarHTML);
+      this.scrollStack.push(this.aceScrollTop);
+      this.rectStack.push(this.aceRect);
+      this.paddingStack.push(this.acePadding);
+      this.tbRectStack.push(this.topbarRect);
+      if (this.prevState) this.stateStack.push(this.prevState);
+
+      if (noVT) { this._transitionActive = false; mutate(); return; }
+
+      docEl.classList.add(vtClass);
+      const transition = document.startViewTransition(() => {
+        mutate();
+        this._transitionActive = false;
+      });
+      transition.finished.finally(() => docEl.classList.remove(vtClass));
+    }
+
+    else if (direction === "back") {
+      // Pop stacks
+      this.pendingBackState = this.stateStack.length > 0 ? this.stateStack.pop() : null;
+      if (this.stack.length > 0) this.stack.pop();
+      if (this.topbarStack.length > 0) this.topbarStack.pop();
+      const aceScrollTop = this.scrollStack.length > 0 ? this.scrollStack.pop() : 0;
+      if (this.rectStack.length > 0) this.rectStack.pop();
+      if (this.paddingStack.length > 0) this.paddingStack.pop();
+      if (this.tbRectStack.length > 0) this.tbRectStack.pop();
+      if (this.appStack.length > 0) this.appStack.pop();
+
+      if (noVT) { mutate(); return; }
+
+      docEl.classList.add(vtClass);
+      this._transitionActive = true;
+      const transition = document.startViewTransition(() => {
+        mutate();
+        this._transitionActive = false;
+        // Restore scroll so the API captures the correct scroll position
+        const screen = document.querySelector(".screen.is-active");
+        if (aceScrollTop && screen) screen.scrollTop = aceScrollTop;
+      });
+      transition.finished.finally(() => docEl.classList.remove(vtClass));
+    }
+
+    else if (direction === "jumpHome") {
+      this.clearStacks();
+
+      if (noVT) { mutate(); return; }
+
+      docEl.classList.add(vtClass);
+      const transition = document.startViewTransition(() => mutate());
+      transition.finished.finally(() => docEl.classList.remove(vtClass));
+    }
+  }
+
+  // --- Legacy forward slide ---
   // Slide new screen in from the right. Call AFTER render().
+  // Kept for swipe gesture compatibility.
 
   forward(screenEl) {
     const topbar = document.querySelector(".topbar");
@@ -512,7 +724,7 @@ class Nav {
     const screenWrap = document.createElement("div");
     screenWrap.style.cssText = `position:absolute;top:${viewRect.top}px;left:${viewRect.left}px;width:${viewRect.width}px;height:${viewRect.height}px;overflow:hidden;`;
     const queenClone = this._freeze(screenEl);
-    queenClone.scrollTop = screenEl.scrollTop;
+    const queenScrollTop = screenEl.scrollTop;
     screenWrap.appendChild(queenClone);
     queenEl.appendChild(screenWrap);
 
@@ -534,6 +746,8 @@ class Nav {
 
     // Queen goes on first — covers everything while we render + build ace
     document.body.appendChild(queenEl);
+    // scrollTop must be set AFTER appendChild — no effect on detached nodes
+    queenClone.scrollTop = queenScrollTop;
 
     // Hide live topbar — overlays have their own clones; prevents the live
     // topbar from peeking through the ace's parallax gap during animation.
@@ -639,7 +853,7 @@ class Nav {
     const screenWrap = document.createElement("div");
     screenWrap.style.cssText = `position:absolute;top:${viewRect.top}px;left:${viewRect.left}px;width:${viewRect.width}px;height:${viewRect.height}px;overflow:hidden;`;
     const queenClone = this._freeze(screenEl);
-    queenClone.scrollTop = screenEl.scrollTop;
+    const jumpScrollTop = screenEl.scrollTop;
     screenWrap.appendChild(queenClone);
     queenEl.appendChild(screenWrap);
 
@@ -659,6 +873,8 @@ class Nav {
     }
 
     document.body.appendChild(queenEl);
+    // scrollTop must be set AFTER appendChild — no effect on detached nodes
+    queenClone.scrollTop = jumpScrollTop;
 
     // Clear all stacks and render Home live underneath
     this.clearStacks();
@@ -682,6 +898,7 @@ class Nav {
     if (this.rectStack.length > 0) this.rectStack.pop();
     if (this.paddingStack.length > 0) this.paddingStack.pop();
     if (this.tbRectStack.length > 0) this.tbRectStack.pop();
+    if (this.appStack.length > 0) this.appStack.pop();
     return this.stateStack.length > 0 ? this.stateStack.pop() : null;
   }
 
@@ -692,152 +909,6 @@ class Nav {
     return s;
   }
 
-  // --- Swipe gesture helpers ---
-
-  swipeStart(screenEl) {
-    const navBottomOffset = this._bottomOffset();
-
-    const peekNode = this.stack.length > 0 ? this.stack[this.stack.length - 1] : this.peekNode;
-    const peekTopbarHTML = this.topbarStack.length > 0
-      ? this.topbarStack[this.topbarStack.length - 1]
-      : this.topbarHTML;
-    const peekRect = this.rectStack.length > 0
-      ? this.rectStack[this.rectStack.length - 1]
-      : this.aceRect;
-    const peekPadding = this.paddingStack.length > 0
-      ? this.paddingStack[this.paddingStack.length - 1]
-      : this.acePadding;
-    const peekTopbarRect = this.topbarRect;
-    const isHomeAce = peekNode && peekNode.querySelector(".homeWrap");
-    const swipeAceScrollTop = this.scrollStack.length > 0 ? this.scrollStack[this.scrollStack.length - 1] : this.aceScrollTop;
-
-    // ACE overlay (frozen previous screen using stored dimensions)
-    this.swipeAceEl = document.createElement("div");
-    this.swipeAceEl.style.cssText = `position:fixed;inset:0;bottom:${navBottomOffset};z-index:499;overflow:hidden;pointer-events:none;background:var(--bg);`;
-
-    if (peekTopbarHTML && peekTopbarRect && peekRect) {
-      const tbWrap = document.createElement("div");
-      tbWrap.innerHTML = peekTopbarHTML;
-      const tbEl = tbWrap.firstElementChild;
-      if (tbEl) {
-        tbEl.style.cssText = `display:flex;position:absolute;top:${peekTopbarRect.top}px;left:${peekRect.left}px;width:${peekRect.width}px;height:${peekTopbarRect.height}px;overflow:visible;pointer-events:none;box-sizing:border-box;`;
-        this.swipeAceEl.appendChild(tbEl);
-      }
-    }
-
-    if (peekNode && peekRect) {
-      const aceWrap = document.createElement("div");
-      aceWrap.style.cssText = `position:absolute;top:${peekRect.top}px;left:${peekRect.left}px;width:${peekRect.width}px;height:${peekRect.height}px;overflow:hidden;`;
-      const aceScreenClone = this._cloneDeep(peekNode);
-      aceScreenClone.style.width = `${peekRect.width}px`;
-      aceScreenClone.style.height = `${peekRect.height}px`;
-      aceScreenClone.style.padding = isHomeAce ? "0" : peekPadding;
-      aceScreenClone.style.margin = "0";
-      aceScreenClone.style.boxSizing = "border-box";
-      aceScreenClone.style.position = "relative";
-      aceScreenClone.style.inset = "auto";
-      aceWrap.appendChild(aceScreenClone);
-      this.swipeAceEl.appendChild(aceWrap);
-      document.body.appendChild(this.swipeAceEl);
-      aceScreenClone.scrollTop = swipeAceScrollTop;
-    } else {
-      document.body.appendChild(this.swipeAceEl);
-    }
-
-    // QUEEN overlay (current screen)
-    this.swipeQueenEl = document.createElement("div");
-    this.swipeQueenEl.style.cssText = `position:fixed;top:0;left:0;right:0;bottom:${navBottomOffset};z-index:500;overflow:hidden;pointer-events:none;background:var(--bg);`;
-
-    const swipeTb = document.querySelector(".topbar");
-    if (swipeTb) {
-      const tbRect = swipeTb.getBoundingClientRect();
-      const tbClone = swipeTb.cloneNode(true);
-      tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${tbRect.left}px;width:${tbRect.width}px;height:${tbRect.height}px;overflow:visible;pointer-events:none;`;
-      this._bakeTopbarStyles(tbClone, swipeTb);
-      this.swipeQueenEl.appendChild(tbClone);
-    }
-
-    let clonedScreen = null;
-    const savedScrollTop = screenEl ? screenEl.scrollTop : 0;
-    if (screenEl) {
-      const screenRect = screenEl.getBoundingClientRect();
-      const screenWrap = document.createElement("div");
-      screenWrap.style.cssText = `position:absolute;top:${screenRect.top}px;left:${screenRect.left}px;width:${screenRect.width}px;height:${screenRect.height}px;overflow:hidden;`;
-      clonedScreen = this._freeze(screenEl);
-      screenWrap.appendChild(clonedScreen);
-      this.swipeQueenEl.appendChild(screenWrap);
-    }
-
-    // Reposition FAB from fixed to absolute so it doesn't jump during swipe
-    const swipeFab = this.swipeQueenEl.querySelector('.sdFab');
-    if (swipeFab) {
-      const liveFab = screenEl?.querySelector('.sdFab');
-      if (liveFab) {
-        const fr = liveFab.getBoundingClientRect();
-        swipeFab.style.position = 'absolute';
-        swipeFab.style.top = `${fr.top}px`;
-        swipeFab.style.left = `${fr.left}px`;
-        swipeFab.style.bottom = 'auto';
-        swipeFab.style.right = 'auto';
-        this.swipeQueenEl.appendChild(swipeFab);
-      }
-    }
-
-    document.body.appendChild(this.swipeQueenEl);
-    if (clonedScreen) clonedScreen.scrollTop = savedScrollTop;
-
-    // Hide live topbar — overlays have their own clones
-    if (swipeTb) swipeTb.style.visibility = "hidden";
-
-    if (this.swipeAceEl) this.swipeAceEl.style.transform = `translateX(-${this.ACE_PARALLAX}px)`;
-  }
-
-  swipeMove(dx) {
-    const clamp = Math.max(0, dx);
-    if (this.swipeQueenEl) this.swipeQueenEl.style.transform = `translateX(${clamp}px)`;
-    if (this.swipeAceEl) {
-      const ratio = Math.min(clamp / window.innerWidth, 1);
-      this.swipeAceEl.style.transform = `translateX(${-this.ACE_PARALLAX * (1 - ratio)}px)`;
-    }
-  }
-
-  swipeCommit(goBackFn) {
-    if (this.swipeQueenEl) {
-      this.swipeQueenEl.style.transition = "transform 268ms ease-out";
-      this.swipeQueenEl.style.transform = `translateX(${window.innerWidth}px)`;
-    }
-    if (this.swipeAceEl) {
-      this.swipeAceEl.style.transition = "transform 268ms ease-out";
-      this.swipeAceEl.style.transform = "translateX(0)";
-    }
-    setTimeout(() => {
-      goBackFn();
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          this._cleanupSwipe();
-        });
-      });
-    }, 268);
-  }
-
-  swipeCancel() {
-    if (this.swipeQueenEl) {
-      this.swipeQueenEl.style.transition = "transform 236ms ease-out";
-      this.swipeQueenEl.style.transform = "translateX(0)";
-    }
-    if (this.swipeAceEl) {
-      this.swipeAceEl.style.transition = "transform 236ms ease-out";
-      this.swipeAceEl.style.transform = `translateX(-${this.ACE_PARALLAX}px)`;
-    }
-    setTimeout(() => this._cleanupSwipe(), 236);
-  }
-
-  _cleanupSwipe() {
-    if (this.swipeQueenEl) { this.swipeQueenEl.remove(); this.swipeQueenEl = null; }
-    if (this.swipeAceEl) { this.swipeAceEl.remove(); this.swipeAceEl = null; }
-    const tb = document.querySelector(".topbar");
-    if (tb) tb.style.visibility = "";
-  }
 }
 
 const nav = new Nav();
@@ -879,10 +950,28 @@ function captureNavState() {
   nav.captureState({
     currentTab, drawerView, projectDetailScreen, releaseDetailId,
     selectedSongId, selectedVersionId, songsView, overlayView,
-    songsBackTarget, headerTitle: headerTitle?.textContent ?? "RiffBank"
+    songsBackTarget, lyricsEditSongId, headerTitle: headerTitle?.textContent ?? "RiffBank"
   });
 }
 function triggerForwardSlide() { nav.forward(activeScreenEl); }
+
+// New centralized forward navigation: captures frozen snapshots before AND
+// after mutations, then animates between them. No live DOM leaks.
+function navigateForward(mutateFn) {
+  const captured = {
+    currentTab, drawerView, projectDetailScreen, releaseDetailId,
+    selectedSongId, selectedVersionId, songsView, overlayView,
+    songsBackTarget, lyricsEditSongId, headerTitle: headerTitle?.textContent ?? "RiffBank"
+  };
+  nav.captureState(captured);
+  nav.slideTransition({
+    direction: "forward",
+    mutate: () => {
+      mutateFn();
+      render();
+    }
+  });
+}
 
 const headerTitle = $("#headerTitle");
 const headerBackEl = document.getElementById("headerBack");
@@ -2036,14 +2125,30 @@ async function audioDelete(id) {
 // Pick audio from iOS Files picker
 function pickAudioFile() {
   return new Promise((resolve) => {
-    const input = document.createElement("input");
-    input.type = "file";
+    // Reuse the hidden input already in the DOM (iOS PWA needs a persistent element)
+    let input = document.getElementById("_audioPickerDynamic");
+    if (!input) {
+      input = document.createElement("input");
+      input.id = "_audioPickerDynamic";
+      input.type = "file";
+      input.style.position = "fixed";
+      input.style.left = "-9999px";
+      input.style.top = "-9999px";
+      input.style.opacity = "0";
+      input.style.pointerEvents = "none";
+      document.body.appendChild(input);
+    }
 
-    // iOS/Safari sometimes mislabels audio MIME types, so don't over-filter
-    input.accept = ""; // allow all
+    // Reset so the same file can be re-picked
+    input.value = "";
 
-    input.onchange = () => {
+    // Only file extensions — avoids iOS showing camera/photo options
+    input.accept = ".wav,.mp3,.m4a,.aac,.aiff,.flac,.ogg,.caf";
+
+    const handler = () => {
+      input.removeEventListener("change", handler);
       const f = input.files?.[0] || null;
+
       if (!f) return resolve(null);
 
       const name = (f.name || "").toLowerCase();
@@ -2058,7 +2163,10 @@ function pickAudioFile() {
       resolve(f);
     };
 
-    input.click();
+    input.addEventListener("change", handler);
+
+    // Small delay for iOS PWA — ensures the input is ready
+    setTimeout(() => input.click(), 50);
   });
 }
 
@@ -2452,8 +2560,6 @@ function setDrawerView(v) {
 }
 
 function setHeader(t) {
-  // During back-nav, goBack() already set the header — skip redundant DOM churn
-  if (nav._isBackNav) return;
   if (headerTitle) headerTitle.textContent = t;
   const appEl = document.querySelector(".app");
   appEl?.classList.remove("pdActive", "pdScrolled", "collapseTitle");
@@ -2979,7 +3085,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
 
     // If tapping home while deep in a nav stack, jump straight to home
     if (targetTab === "home" && nav.depth > 0) {
-      nav.jumpHome(activeScreenEl, () => {
+      nav.slideTransition({ direction: "jumpHome", mutate: () => {
         songsBackTarget = null;
         drawerView = null;
         overlayView = null;
@@ -2997,7 +3103,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
         syncTabs();
         setHeader("RiffBank");
         render();
-      });
+      }});
       return;
     }
 
@@ -3057,7 +3163,7 @@ headerTitle?.addEventListener("click", () => {
 
   // If on home tab with nav depth, jump straight to home; otherwise snap
   if (currentTab === "home" && nav.depth > 0) {
-    nav.jumpHome(activeScreenEl, resetToHome);
+    nav.slideTransition({ direction: "jumpHome", mutate: resetToHome });
   } else {
     resetToHome();
   }
@@ -3109,14 +3215,16 @@ audioPickerEl?.addEventListener("change", async (e) => {
 // iOS slide-back animation (back button)
 // ---------------------
 function slideBackTransition(renderUnderneath) {
-  nav.back(activeScreenEl, renderUnderneath);
+  nav.slideTransition({ direction: "back", mutate: renderUnderneath });
 }
 
 function goBack({ animate = false } = {}) {
+  // Prevent double-back while a View Transition is still in flight
+  if (nav._transitionActive) return;
   const doRender = () => {
     if (drawerOpen) { closeDrawer(); return; }
 
-    // Resolve the state to restore: animated backs already popped in nav.back()
+    // Resolve the state to restore: animated backs already popped in slideTransition/nav.back()
     // (pendingBackState), non-animated backs pop here.
     let restoreState = animate ? nav.consumePendingState() : nav.popStacks();
 
@@ -3130,6 +3238,7 @@ function goBack({ animate = false } = {}) {
       songsView = restoreState.songsView;
       overlayView = restoreState.overlayView;
       songsBackTarget = restoreState.songsBackTarget;
+      lyricsEditSongId = restoreState.lyricsEditSongId ?? null;
       // Going back to home resets songs scroll so next visit starts fresh
       if (restoreState.currentTab === "home" && !restoreState.drawerView) songsListScrollTop = 0;
       setHeader(restoreState.headerTitle);
@@ -3188,6 +3297,12 @@ let touchStartY = 0;
 let touchTracking = false;
 let touchMode = null;
 
+// Swipe-back state — purely visual overlays, no state changes during gesture
+let swipeQueenEl = null;    // frozen clone of current screen (follows finger)
+let swipeAceEl = null;      // frozen clone of previous screen (parallaxes underneath)
+let swipeShadow = null;     // dimming overlay between ace and queen
+let swipeActive = false;    // whether a swipe-back gesture is in progress
+
 document.addEventListener("touchstart", (e) => {
   const t = e.changedTouches?.[0];
   if (!t) return;
@@ -3203,9 +3318,70 @@ if (!drawerOpen && t.clientX <= 24) {
   touchMode = onHomeRoot ? "open" : "back";
   touchStartX = t.clientX;
   touchStartY = t.clientY;
-
   if (touchMode === "back") {
-    nav.swipeStart(activeScreenEl);
+    // Guard: no transition during flight, must have state to go back to
+    if (nav._transitionActive || nav.stateStack.length === 0) {
+      touchTracking = false; touchMode = null; return;
+    }
+
+    const navBottomOffset = nav._bottomOffset();
+    const appRect = document.querySelector(".app")?.getBoundingClientRect();
+    const appTop = appRect?.top ?? 0;
+    const appLeft = appRect?.left ?? 0;
+    const appWidth = appRect?.width ?? window.innerWidth;
+
+    // Helper: position a full-app clone as a fixed overlay
+    function positionAppClone(clone, zIndex) {
+      clone.querySelector("#bottomNav")?.remove();
+      clone.querySelector("#sheetOverlay")?.remove();
+      clone.querySelector("#createSheet")?.remove();
+      const s = clone.style;
+      s.position = "fixed";
+      s.top = `${appTop}px`;
+      s.left = `${appLeft}px`;
+      s.width = `${appWidth}px`;
+      s.height = "auto";
+      s.bottom = navBottomOffset;
+      s.zIndex = String(zIndex);
+      s.overflow = "hidden";
+      s.pointerEvents = "none";
+      s.margin = "0";
+      s.background = "var(--bg)";
+      return clone;
+    }
+
+    // Restore scrollTop on a clone's active screen — must be called AFTER
+    // the clone is in the DOM, because scrollTop has no effect on detached nodes.
+    function restoreCloneScroll(clone, scrollTop) {
+      const cloneScreen = clone.querySelector(".screen.is-active");
+      if (cloneScreen) cloneScreen.scrollTop = scrollTop;
+    }
+
+    // 1. Queen: frozen clone of the CURRENT app state (follows finger)
+    const capture = nav._captureApp();
+    if (capture) {
+      swipeQueenEl = positionAppClone(capture.clone, 501);
+      document.body.appendChild(swipeQueenEl);
+      restoreCloneScroll(swipeQueenEl, capture.scrollTop);
+    }
+
+    // 2. Ace: frozen clone of the PREVIOUS app state (captured during forward nav)
+    //    Same technique as queen — full _captureApp() clone, pixel-perfect
+    const aceCapture = nav.appStack.length > 0 ? nav.appStack[nav.appStack.length - 1] : null;
+    if (aceCapture) {
+      const aceClone = nav._cloneDeep(aceCapture.clone);
+      swipeAceEl = positionAppClone(aceClone, 499);
+      swipeAceEl.style.transform = `translateX(-${nav.ACE_PARALLAX}px)`;
+      document.body.appendChild(swipeAceEl);
+      restoreCloneScroll(swipeAceEl, aceCapture.scrollTop);
+    }
+
+    // 3. Shadow between ace and queen for depth
+    swipeShadow = document.createElement("div");
+    swipeShadow.style.cssText = "position:fixed;inset:0;z-index:500;background:rgba(0,0,0,.35);pointer-events:none;";
+    document.body.appendChild(swipeShadow);
+
+    swipeActive = true;
   }
   return;
 }
@@ -3236,7 +3412,14 @@ document.addEventListener("touchmove", (e) => {
   }
 
   if (touchMode === "back") {
-    nav.swipeMove(dx);
+    const clamp = Math.max(0, dx);
+    const ratio = Math.min(clamp / window.innerWidth, 1);
+    // Queen (frozen clone): follow finger
+    if (swipeQueenEl) swipeQueenEl.style.transform = `translateX(${clamp}px)`;
+    // Ace (frozen clone): parallax from -ACE_PARALLAX toward 0
+    if (swipeAceEl) swipeAceEl.style.transform = `translateX(${-nav.ACE_PARALLAX * (1 - ratio)}px)`;
+    // Shadow fades as queen reveals ace
+    if (swipeShadow) swipeShadow.style.opacity = 1 - ratio;
     return;
   }
 
@@ -3247,6 +3430,13 @@ document.addEventListener("touchmove", (e) => {
   }
 }, { passive: true });
 
+function cleanupSwipe() {
+  if (swipeQueenEl) { swipeQueenEl.remove(); swipeQueenEl = null; }
+  if (swipeAceEl) { swipeAceEl.remove(); swipeAceEl = null; }
+  if (swipeShadow) { swipeShadow.remove(); swipeShadow = null; }
+  swipeActive = false;
+}
+
 document.addEventListener("touchend", (e) => {
   if (!touchTracking) return;
   const t = e.changedTouches?.[0];
@@ -3255,10 +3445,25 @@ document.addEventListener("touchend", (e) => {
     const dx = t ? t.clientX - touchStartX : 0;
     const threshold = window.innerWidth * 0.38;
 
-    if (dx >= threshold) {
-      nav.swipeCommit(() => goBack({ animate: false }));
+    if (dx >= threshold && swipeActive) {
+      // Commit: animate overlays, then goBack() handles actual navigation
+      const dur = 250;
+      const ease = "cubic-bezier(.4,0,.2,1)";
+      if (swipeQueenEl) { swipeQueenEl.style.transition = `transform ${dur}ms ${ease}`; swipeQueenEl.style.transform = `translateX(${window.innerWidth}px)`; }
+      if (swipeAceEl) { swipeAceEl.style.transition = `transform ${dur}ms ${ease}`; swipeAceEl.style.transform = "translateX(0)"; }
+      if (swipeShadow) { swipeShadow.style.transition = `opacity ${dur}ms ${ease}`; swipeShadow.style.opacity = "0"; }
+      setTimeout(() => {
+        cleanupSwipe();
+        // Same door, different handle — goBack() does the real navigation
+        goBack({ animate: false });
+      }, dur);
     } else {
-      nav.swipeCancel();
+      // Cancel: spring queen back, remove overlays — no state to restore
+      const dur = swipeActive ? 200 : 0;
+      if (swipeQueenEl) { swipeQueenEl.style.transition = `transform ${dur}ms ease-out`; swipeQueenEl.style.transform = "translateX(0)"; }
+      if (swipeAceEl) { swipeAceEl.style.transition = `transform ${dur}ms ease-out`; swipeAceEl.style.transform = `translateX(-${nav.ACE_PARALLAX}px)`; }
+      if (swipeShadow) { swipeShadow.style.transition = `opacity ${dur}ms ease-out`; swipeShadow.style.opacity = "1"; }
+      setTimeout(() => cleanupSwipe(), dur);
     }
     touchTracking = false;
     touchMode = null;
@@ -3739,6 +3944,7 @@ function renderSheet() {
       setHeader("Song");
       syncTabs();
       render();
+      autoGenerateArt(song);
     });
 
     setTimeout(() => $("#sheetSongTitle")?.focus(), 0);
@@ -3746,29 +3952,13 @@ function renderSheet() {
   }
 
   if (sheetMode === "lyrics") {
-    const value = state.settings.lyricsScratch || "";
-    sheetContent.innerHTML = `
-      <div class="sheetTitle">New lyrics</div>
-
-      <div class="sheetForm">
-        <textarea id="sheetLyrics" placeholder="Write lyric ideas...">${escapeTextarea(value)}</textarea>
-      </div>
-
-      <div class="sheetActions">
-        <button class="sheetBtn ghost" id="sheetBack">Back</button>
-        <button class="sheetBtn primary" id="sheetSaveLyrics">Save</button>
-      </div>
-    `;
-
-    $("#sheetBack")?.addEventListener("click", () => openSheet("chooser"));
-    $("#sheetSaveLyrics")?.addEventListener("click", () => {
-      state.settings.lyricsScratch = $("#sheetLyrics")?.value || "";
-      saveState();
-      toast("Lyrics saved ✍️");
-      closeSheet();
-    });
-
-    setTimeout(() => $("#sheetLyrics")?.focus(), 0);
+    closeSheet();
+    lyricsEditSongId = null;
+    overlayView = "lyrics";
+    setHeader("Lyrics");
+    renderLyricsScratch();
+    openLyricsSongPicker();
+    return;
   }
 
   if (sheetMode === "release") {
@@ -3915,16 +4105,14 @@ function renderSheet() {
       if (!fv) {
         const first = createVersion(song);
         if (!first) return toast("Couldn't create version");
-        captureNavState();
-        selectedVersionId = first.id;
-        render();
-        triggerForwardSlide();
+        navigateForward(() => {
+          selectedVersionId = first.id;
+        });
         return;
       }
-      captureNavState();
-      selectedVersionId = fv.id;
-      render();
-      triggerForwardSlide();
+      navigateForward(() => {
+        selectedVersionId = fv.id;
+      });
     });
 
     $("#sdmQueue")?.addEventListener("click", () => {
@@ -4233,6 +4421,8 @@ let createGenreSearch = "";
 let createSelectedGenres = [];
 let createSelectedProject = "";
 let createGenreDropdownOpen = false;
+let createAudioFile = null; // optional audio file for first version
+let createTitleValue = ""; // preserve title across re-renders
 
 function openCreateOverlay() {
   if (createOverlayEl) return;
@@ -4242,6 +4432,8 @@ function openCreateOverlay() {
   createSelectedGenres = [];
   createSelectedProject = "";
   createGenreDropdownOpen = false;
+  createAudioFile = null;
+  createTitleValue = "";
 
   createOverlayEl = document.createElement("div");
   createOverlayEl.id = "createOverlay";
@@ -4306,6 +4498,10 @@ function getProjectCoverArt(projectName) {
 function renderCreateOverlay() {
   if (!createOverlayEl) return;
 
+  // Preserve title input across re-renders
+  const prevTitle = createOverlayEl.querySelector("#coTitle");
+  if (prevTitle) createTitleValue = prevTitle.value;
+
   const existingProjects = [...new Set(
     state.songs.map(s => (s.project || "").trim()).filter(Boolean)
   )].sort();
@@ -4353,10 +4549,28 @@ function renderCreateOverlay() {
         ).join("")}</div>`
       : "";
 
+    const hasFile = !!createAudioFile;
+    const fileDisplayName = hasFile ? escapeHtml(createAudioFile.name) : "";
+    const fileDisplaySize = hasFile ? `${(createAudioFile.size/1024/1024).toFixed(1)} MB` : "";
+
     contentHTML = `
+      <button class="coFileBtn${hasFile ? " picked" : ""}" id="coPickFile">
+        <div class="coFileIcon">
+          ${hasFile
+            ? `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>`
+            : `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`
+          }
+        </div>
+        <div class="coFileMeta">
+          <div class="coFileName">${hasFile ? fileDisplayName : "Add audio file"}</div>
+          <div class="coFileSub">${hasFile ? `${fileDisplaySize} · tap to change` : "Optional · or create a placeholder"}</div>
+        </div>
+        ${hasFile ? `<button class="coFileClear" id="coFileClear">&times;</button>` : ""}
+      </button>
+
       <div class="coField">
         <label class="coLabel">Title</label>
-        <input id="coTitle" class="coInput" type="text" placeholder="e.g. Dinosaur Uprising" autocomplete="off" />
+        <input id="coTitle" class="coInput" type="text" placeholder="e.g. Dinosaur Uprising" autocomplete="off" value="${escapeHtml(createTitleValue)}" />
       </div>
 
       <div class="coField">
@@ -4414,6 +4628,26 @@ function renderCreateOverlay() {
   });
 
   if (createTab === "song") {
+    // File pick
+    createOverlayEl.querySelector("#coPickFile")?.addEventListener("click", async (e) => {
+      if (e.target.closest("#coFileClear")) return;
+      const file = await pickAudioFile();
+      if (!file) return;
+      createAudioFile = file;
+      // Auto-populate title if empty
+      if (!createTitleValue.trim()) {
+        createTitleValue = (file.name || "").replace(/\.[^.]+$/, "").replace(/[-_]/g, " ").trim();
+      }
+      renderCreateOverlay();
+    });
+
+    // File clear
+    createOverlayEl.querySelector("#coFileClear")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      createAudioFile = null;
+      renderCreateOverlay();
+    });
+
     // Project selection
     createOverlayEl.querySelectorAll(".coProjCard").forEach(card => {
       card.addEventListener("click", () => {
@@ -4491,7 +4725,7 @@ function renderCreateOverlay() {
     });
 
     // Create button
-    createOverlayEl.querySelector("#coCreateSong")?.addEventListener("click", () => {
+    createOverlayEl.querySelector("#coCreateSong")?.addEventListener("click", async () => {
       const title = (createOverlayEl?.querySelector("#coTitle")?.value || "").trim();
       if (!title) return toast("Give it a title");
 
@@ -4522,8 +4756,16 @@ function renderCreateOverlay() {
       };
 
       state.songs.unshift(song);
-      saveState();
-      toast("Created");
+
+      // If user picked a file, create v1 with audio attached
+      if (createAudioFile) {
+        const v = createVersion(song);
+        await attachSharedAudio(song, v, createAudioFile, createAudioFile.name || "audio", createAudioFile.type || "audio/*", createAudioFile.size || 0);
+        toast("Created with audio 🎸");
+      } else {
+        saveState();
+        toast("Created");
+      }
 
       closeCreateOverlay();
       currentTab = "songs";
@@ -4532,6 +4774,7 @@ function renderCreateOverlay() {
       setHeader("Song");
       syncTabs();
       render();
+      autoGenerateArt(song);
     });
 
     // Focus title
@@ -4622,13 +4865,29 @@ function render() {
   const _isBack = nav._isBackNav;
 
   // Drawer screens
-  if (drawerView === "projects") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return projectDetailScreen ? renderProjectSongs(projectDetailScreen) : renderProjects(); }
+  if (drawerView === "projects") {
+    if (projectDetailScreen) {
+      setActiveScreen("projectDetail");
+      if (!_isBack) activeScreenEl.scrollTop = 0;
+      return renderProjectSongs(projectDetailScreen);
+    }
+    setActiveScreen("drawer");
+    if (!_isBack) activeScreenEl.scrollTop = 0;
+    return renderProjects();
+  }
   if (drawerView === "releases") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return releaseDetailId ? renderReleaseDetail(releaseDetailId) : renderReleases(); }
   if (drawerView === "eps") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderEPs(); }
   if (drawerView === "collabs") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderCollaborators(); }
   if (drawerView === "importExport") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderImportExport(); }
   if (drawerView === "about") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderAbout(); }
   if (drawerView === "globalSearch") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderGlobalSearch(); }
+
+  // Overlay screens (lyrics, next actions, etc.)
+  if (overlayView === "lyrics") {
+    setActiveScreen("home");
+    if (!_isBack) activeScreenEl.scrollTop = 0;
+    return renderLyricsScratch();
+  }
 
   // Normal screens
   if (currentTab === "home") {
@@ -4640,10 +4899,18 @@ function render() {
     return renderHome();
   }
   if (currentTab === "songs") {
+    if (selectedSongId && selectedVersionId) {
+      setActiveScreen("versionDetail");
+      if (!_isBack) activeScreenEl.scrollTop = 0;
+      return renderVersionDetail(selectedSongId, selectedVersionId);
+    }
+    if (selectedSongId) {
+      setActiveScreen("songDetail");
+      if (!_isBack) activeScreenEl.scrollTop = 0;
+      return renderSongDetail(selectedSongId);
+    }
     setActiveScreen("songs");
     if (!_isBack) activeScreenEl.scrollTop = 0;
-    if (selectedSongId && selectedVersionId) return renderVersionDetail(selectedSongId, selectedVersionId);
-    if (selectedSongId) return renderSongDetail(selectedSongId);
     if (songsView === "create") return renderSongCreate();
     return renderSongsList();
   }
@@ -4838,6 +5105,7 @@ function openShareNewSongSheet(blob, fileName, fileType, fileSize) {
     setHeader("Song");
     syncTabs();
     render();
+    autoGenerateArt(song);
   });
 
   setTimeout(() => $("#sheetSongTitle")?.focus(), 0);
@@ -5309,10 +5577,9 @@ function renderProjects() {
     }, 320);
     // Navigate after short delay so animation is visible
     setTimeout(() => {
-      captureNavState();
-      projectDetailScreen = projName;
-      render();
-      triggerForwardSlide();
+      navigateForward(() => {
+        projectDetailScreen = projName;
+      });
     }, 120);
   }
 
@@ -5498,16 +5765,15 @@ function renderProjectSongs(projectName) {
     activeScreenEl.querySelectorAll("[data-open-song]").forEach(row => {
       row.addEventListener("click", (e) => {
         if (e.target.closest("[data-proj-song-more]")) return;
-        captureNavState();
         const sid = row.getAttribute("data-open-song");
-        projectDetailScreen = null;
-        drawerView = null;
-        currentTab = "songs";
-        songsView = "detail";
-        selectedSongId = sid;
-        selectedVersionId = null;
-        render();
-        triggerForwardSlide();
+        navigateForward(() => {
+          projectDetailScreen = null;
+          drawerView = null;
+          currentTab = "songs";
+          songsView = "detail";
+          selectedSongId = sid;
+          selectedVersionId = null;
+        });
       });
     });
 
@@ -5641,10 +5907,9 @@ function renderReleases() {
 
   activeScreenEl.querySelectorAll(".songCard[data-rel-open]").forEach(el => {
     el.addEventListener("click", () => {
-      captureNavState();
-      releaseDetailId = el.getAttribute("data-rel-open");
-      render();
-      triggerForwardSlide();
+      navigateForward(() => {
+        releaseDetailId = el.getAttribute("data-rel-open");
+      });
     });
   });
 
@@ -5812,16 +6077,15 @@ function renderReleaseDetail(releaseId) {
     activeScreenEl.querySelectorAll("[data-open-song]").forEach(row => {
       row.addEventListener("click", (e) => {
         if (e.target.closest("[data-rel-song-more]")) return;
-        captureNavState();
         const sid = row.getAttribute("data-open-song");
-        releaseDetailId = null;
-        drawerView = null;
-        currentTab = "songs";
-        songsView = "detail";
-        selectedSongId = sid;
-        selectedVersionId = null;
-        render();
-        triggerForwardSlide();
+        navigateForward(() => {
+          releaseDetailId = null;
+          drawerView = null;
+          currentTab = "songs";
+          songsView = "detail";
+          selectedSongId = sid;
+          selectedVersionId = null;
+        });
       });
     });
 
@@ -5941,7 +6205,7 @@ function renderCollaborators() {
       selectedSongId = null;
       setHeader("Songs");
       syncTabs();
-      renderSongsList();
+      render();
       setTimeout(() => {
         const q = $("#q");
         if (q) {
@@ -6138,35 +6402,51 @@ function renderHome() {
     renderGlobalSearch();
   });
   activeScreenEl.querySelector("#htbSettings")?.addEventListener("click", () => {
-    captureNavState();
-    currentTab = "settings";
-    setHeader("Settings");
-    syncTabs();
-    render();
-    triggerForwardSlide();
+    navigateForward(() => {
+      currentTab = "settings";
+    });
   });
 
   // Card navigation
   activeScreenEl.querySelectorAll("[data-home]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const target = btn.getAttribute("data-home");
-      captureNavState();
       if (target === "songs") {
-        resetSongsFilters({ keepSort: true });
-        songsBackTarget = null;
-        songsListScrollTop = 0;
-        currentTab = "songs";
-        songsView = "list";
-        selectedSongId = null;
-        setHeader("Songs");
-        syncTabs();
-        render();
-        triggerForwardSlide();
+        navigateForward(() => {
+          resetSongsFilters({ keepSort: true });
+          songsBackTarget = null;
+          songsListScrollTop = 0;
+          currentTab = "songs";
+          songsView = "list";
+          selectedSongId = null;
+        });
         return;
       }
-      if (target === "projects") { setDrawerView("projects"); triggerForwardSlide(); return; }
-      if (target === "releases") { setDrawerView("releases"); triggerForwardSlide(); return; }
-      if (target === "lyrics") return renderLyricsScratch();
+      if (target === "projects") {
+        navigateForward(() => {
+          drawerView = "projects";
+          closeDrawer();
+          selectedSongId = null;
+        });
+        return;
+      }
+      if (target === "releases") {
+        navigateForward(() => {
+          drawerView = "releases";
+          closeDrawer();
+          selectedSongId = null;
+        });
+        return;
+      }
+      if (target === "lyrics") {
+        navigateForward(() => {
+          lyricsEditSongId = null;
+          overlayView = "lyrics";
+          setHeader("Lyrics");
+          renderLyricsScratch();
+        });
+        return;
+      }
       if (target === "next") return renderNextActions();
     });
   });
@@ -6871,7 +7151,7 @@ function renderSearchResults(q, container) {
       } else if (type === "project") {
         drawerView = "projects";
         projectDetailScreen = btn.dataset.id;
-        setActiveScreen("drawer");
+        setActiveScreen("projectDetail");
         renderProjectSongs(projectDetailScreen);
       } else if (type === "collab") {
         resetSongsFilters({ keepSort: true });
@@ -6924,34 +7204,221 @@ function iconPeople(){
   </svg>`;
 }
 
-// Lyrics scratch
+// ── Lyrics view ──
+let lyricsQuery = "";
+let lyricsEditSongId = null; // when set, we show the edit view
+
 function renderLyricsScratch() {
+  if (lyricsEditSongId) return renderLyricsEdit(lyricsEditSongId);
+
   overlayView = "lyrics";
   setHeader("Lyrics");
-  const value = state.settings.lyricsScratch || "";
+
+  // Collect songs that have lyrics
+  const lq = lyricsQuery.toLowerCase();
+  const songsWithLyrics = state.songs.filter(s => (s.lyrics || "").trim()).filter(s => {
+    if (!lq) return true;
+    return `${s.title} ${s.project} ${s.lyrics}`.toLowerCase().includes(lq);
+  });
+
   activeScreenEl.innerHTML = `
-    <div class="card">
-      <div class="row" style="justify-content:space-between; align-items:center">
-        <h2>Lyrics scratch</h2>
-        <button id="closeLyrics" class="ghost">Close</button>
+    <div class="lyricsHead">
+      <div class="lyricsTitleRow">
+        <div class="lyricsPageTitle">Lyrics</div>
       </div>
-      <textarea id="lyricsScratch" placeholder="Capture lyric ideas...">${escapeTextarea(value)}</textarea>
-      <div class="row" style="margin-top:10px">
-        <button id="saveLyricsScratch" class="btn primary">Save</button>
+      <input id="lyricsSearch" type="text" placeholder="Search lyrics..." value="${escapeHtml(lyricsQuery)}" />
+    </div>
+
+    <div class="lyricsList">
+      ${
+        songsWithLyrics.length
+          ? songsWithLyrics.map(s => {
+              const cover = coverSvg(s, { lite: true });
+              const preview = (s.lyrics || "").replace(/\n/g, " ").slice(0, 60) + ((s.lyrics || "").length > 60 ? "…" : "");
+              return `
+                <div class="lyricsRow" data-lyrics-song="${s.id}">
+                  <div class="lyricsCover" aria-hidden="true">${cover}</div>
+                  <div class="lyricsMain">
+                    <div class="lyricsName">${escapeHtml(s.title || "Untitled")}</div>
+                    <div class="lyricsMeta">${escapeHtml(preview)}</div>
+                  </div>
+                  <button class="lyricsMore" data-lmore="${s.id}" aria-label="More options">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+                  </button>
+                </div>
+              `;
+            }).join("")
+          + `<div style="text-align:center;padding:20px 0 8px;color:rgba(255,255,255,0.35);font-size:13px;">${songsWithLyrics.length} song${songsWithLyrics.length === 1 ? "" : "s"}</div>`
+          : `<div class="emptyState">No lyrics yet. Tap + to add lyrics for a song.</div>`
+      }
+    </div>
+
+    <button class="sdFab" id="lyricsAddFab" aria-label="Add lyrics">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+    </button>
+  `;
+
+  // Search
+  const searchInput = $("#lyricsSearch");
+  if (searchInput) {
+    searchInput.addEventListener("input", () => {
+      lyricsQuery = searchInput.value;
+      renderLyricsScratch();
+      const el = $("#lyricsSearch");
+      if (el) { el.focus(); el.selectionStart = el.selectionEnd = el.value.length; }
+    });
+  }
+
+  // Row tap → open lyrics editor
+  activeScreenEl.querySelectorAll(".lyricsRow").forEach(row => {
+    row.addEventListener("click", () => {
+      const sid = row.getAttribute("data-lyrics-song");
+      if (sid) {
+        lyricsEditSongId = sid;
+        navigateForward(() => renderLyricsEdit(sid));
+      }
+    });
+  });
+
+  // Kebab → action sheet (delete lyrics)
+  activeScreenEl.querySelectorAll(".lyricsMore").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const sid = btn.getAttribute("data-lmore");
+      const s = getSong(sid);
+      if (!s) return;
+      openLyricsActionSheet(s);
+    });
+  });
+
+  // FAB → pick a song to add lyrics
+  $("#lyricsAddFab")?.addEventListener("click", () => openLyricsSongPicker());
+}
+
+function openLyricsActionSheet(song) {
+  document.querySelectorAll(".actionSheetBackdrop, .actionSheet").forEach(el => el.remove());
+
+  const backdrop = document.createElement("div");
+  backdrop.className = "actionSheetBackdrop";
+  const sheet = document.createElement("div");
+  sheet.className = "actionSheet";
+  sheet.innerHTML = `
+    <div class="actionSheetHeader">
+      <div style="font-weight:900; font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+        ${escapeHtml(song.title || "Untitled")}
+      </div>
+      <div class="small" style="margin-top:4px;">Lyrics</div>
+    </div>
+    <button class="actionSheetBtn" data-act="edit">Edit Lyrics</button>
+    <button class="actionSheetBtn danger" data-act="clear">Clear Lyrics</button>
+    <button class="actionSheetBtn" data-act="cancel">Cancel</button>
+  `;
+
+  function close() { backdrop.remove(); sheet.remove(); }
+  backdrop.addEventListener("click", close);
+
+  sheet.querySelectorAll("[data-act]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const act = btn.getAttribute("data-act");
+      if (act === "edit") {
+        close();
+        lyricsEditSongId = song.id;
+        navigateForward(() => renderLyricsEdit(song.id));
+      } else if (act === "clear") {
+        close();
+        song.lyrics = "";
+        song.updatedAt = nowStamp();
+        saveState();
+        toast("Lyrics cleared");
+        renderLyricsScratch();
+      } else {
+        close();
+      }
+    });
+  });
+
+  document.body.appendChild(backdrop);
+  document.body.appendChild(sheet);
+}
+
+function renderLyricsEdit(songId) {
+  const song = getSong(songId);
+  if (!song) {
+    lyricsEditSongId = null;
+    return renderLyricsScratch();
+  }
+
+  overlayView = "lyrics";
+  lyricsEditSongId = songId;
+  setHeader("Edit Lyrics");
+
+  const cover = coverSvg(song, { lite: true });
+
+  activeScreenEl.innerHTML = `
+    <div class="lyricsEditHead">
+      <div class="lyricsEditCover">${cover}</div>
+      <div class="lyricsEditInfo">
+        <div class="lyricsEditTitle">${escapeHtml(song.title || "Untitled")}</div>
+        <div class="lyricsEditSub">${escapeHtml(song.project || "—")}</div>
       </div>
     </div>
+    <textarea id="lyricsEditArea" class="lyricsEditArea" placeholder="Write lyrics...">${escapeTextarea(song.lyrics || "")}</textarea>
+    <div class="lyricsEditActions">
+      <button id="lyricsSaveBtn" class="btn primary">Save</button>
+    </div>
   `;
-  $("#closeLyrics")?.addEventListener("click", () => {
-    overlayView = null;
-    currentTab = "home";
-    setHeader("RiffBank");
-    renderHome();
-  });
-  $("#saveLyricsScratch")?.addEventListener("click", () => {
-    state.settings.lyricsScratch = $("#lyricsScratch").value;
+
+  $("#lyricsSaveBtn")?.addEventListener("click", () => {
+    song.lyrics = $("#lyricsEditArea")?.value || "";
+    song.updatedAt = nowStamp();
     saveState();
-    toast("Lyrics saved ✍️");
+    toast("Lyrics saved");
   });
+
+  setTimeout(() => $("#lyricsEditArea")?.focus(), 100);
+}
+
+function openLyricsSongPicker() {
+  document.querySelectorAll(".actionSheetBackdrop, .actionSheet").forEach(el => el.remove());
+
+  // Songs that DON'T already have lyrics
+  const available = state.songs.filter(s => !(s.lyrics || "").trim());
+  const all = state.songs;
+
+  const backdrop = document.createElement("div");
+  backdrop.className = "actionSheetBackdrop";
+  const sheet = document.createElement("div");
+  sheet.className = "actionSheet";
+  sheet.style.maxHeight = "70vh";
+  sheet.style.overflowY = "auto";
+  sheet.innerHTML = `
+    <div class="actionSheetHeader">
+      <div style="font-weight:900; font-size:14px;">Add Lyrics</div>
+      <div class="small" style="margin-top:4px;">Pick a song</div>
+    </div>
+    ${(available.length ? available : all).map(s => `
+      <button class="actionSheetBtn" data-pick-song="${s.id}">${escapeHtml(s.title || "Untitled")}</button>
+    `).join("")}
+    ${!available.length && all.length ? `<div class="small" style="padding:8px 16px;color:var(--muted);">All songs already have lyrics</div>` : ""}
+    ${!all.length ? `<div class="small" style="padding:8px 16px;color:var(--muted);">No songs yet</div>` : ""}
+    <button class="actionSheetBtn" data-pick-song="cancel">Cancel</button>
+  `;
+
+  function close() { backdrop.remove(); sheet.remove(); }
+  backdrop.addEventListener("click", close);
+
+  sheet.querySelectorAll("[data-pick-song]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const sid = btn.getAttribute("data-pick-song");
+      close();
+      if (sid === "cancel") return;
+      lyricsEditSongId = sid;
+      navigateForward(() => renderLyricsEdit(sid));
+    });
+  });
+
+  document.body.appendChild(backdrop);
+  document.body.appendChild(sheet);
 }
 
 function renderNextActions() {
@@ -6986,12 +7453,10 @@ function renderNextActions() {
   });
   activeScreenEl.querySelectorAll("[data-open-song]").forEach((el) =>
     el.addEventListener("click", () => {
-      captureNavState();
-      currentTab = "songs";
-      selectedSongId = el.getAttribute("data-open-song");
-      setHeader("Song");
-      render();
-      triggerForwardSlide();
+      navigateForward(() => {
+        currentTab = "songs";
+        selectedSongId = el.getAttribute("data-open-song");
+      });
     })
   );
 }
@@ -7022,6 +7487,19 @@ function makeRng(seed){
 // --- Cover caching + iOS "lite" mode ---
 const coverCache = new Map();
 const generatingArtSongs = new Set(); // song IDs currently generating art
+
+// Auto-generate art for a newly created song (fire-and-forget)
+function autoGenerateArt(song) {
+  const apiKey = state.settings.replicateKey || "";
+  if (!apiKey || song.coverImageUrl || song.coverDriveFileId) return;
+  generatingArtSongs.add(song.id);
+  coverCache.clear();
+  render();
+  generateArtForSong(song, apiKey)
+    .then(() => { coverCache.clear(); saveState(); })
+    .catch(e => console.warn("Auto art generation failed:", e))
+    .finally(() => { generatingArtSongs.delete(song.id); coverCache.clear(); render(); });
+}
 
 // Global handler: refresh cover image from Drive when cached URL expires
 window._refreshCoverFromDrive = async (songId, driveFileId, imgEl) => {
@@ -7138,7 +7616,7 @@ function buildArtPrompt(song) {
 async function generateArtForSong(song, apiKey) {
   const prompt = buildArtPrompt(song);
   const ac = new AbortController();
-  const timeout = setTimeout(() => ac.abort(), 60000);
+  const timeout = setTimeout(() => ac.abort(), 20000);
   let res;
   try {
     res = await fetch("https://riffbank-art.riffbank.workers.dev", {
@@ -7148,7 +7626,7 @@ async function generateArtForSong(song, apiKey) {
       signal: ac.signal,
     });
   } catch (e) {
-    if (e.name === "AbortError") throw new Error("Request timed out — try again");
+    if (e.name === "AbortError") throw new Error("Art generation timed out — try again");
     throw e;
   } finally {
     clearTimeout(timeout);
@@ -7163,16 +7641,26 @@ async function generateArtForSong(song, apiKey) {
   // Download image and upload to Google Drive for persistence
   try {
     console.log("[ArtGen] Fetching image...");
-    const imgRes = await fetch(url);
+    const imgAc = new AbortController();
+    const imgTimeout = setTimeout(() => imgAc.abort(), 15000);
+    let imgRes;
+    try {
+      imgRes = await fetch(url, { signal: imgAc.signal });
+    } finally {
+      clearTimeout(imgTimeout);
+    }
     console.log("[ArtGen] Image fetch done:", imgRes.status);
     if (imgRes.ok) {
       const blob = await imgRes.blob();
       console.log("[ArtGen] Uploading to Drive...");
-      const driveResult = await gdriveUploadCoverArt({
-        blob,
-        project: song.project,
-        songTitle: song.title,
-      });
+      const driveResult = await Promise.race([
+        gdriveUploadCoverArt({
+          blob,
+          project: song.project,
+          songTitle: song.title,
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Drive upload timed out")), 15000)),
+      ]);
       console.log("[ArtGen] Drive upload result:", driveResult);
       if (driveResult.success) {
         song.coverDriveFileId = driveResult.driveFileId;
@@ -7576,11 +8064,10 @@ function renderSongsList() {
 
       el.addEventListener("click", () => {
         if (didLongPress) return;
-        captureNavState();
         songsListScrollTop = activeScreenEl.scrollTop;
-        selectedSongId = el.getAttribute("data-id");
-        render();
-        triggerForwardSlide();
+        navigateForward(() => {
+          selectedSongId = el.getAttribute("data-id");
+        });
       });
     });
 
@@ -7588,11 +8075,10 @@ function renderSongsList() {
       el.addEventListener("click", () => {
         const artist = el.getAttribute("data-artist");
         if (!artist) return;
-        captureNavState();
-        drawerView = "projects";
-        projectDetailScreen = artist;
-        render();
-        triggerForwardSlide();
+        navigateForward(() => {
+          drawerView = "projects";
+          projectDetailScreen = artist;
+        });
       });
     });
   };
@@ -7667,12 +8153,23 @@ function openSongDetailMenu(songId) {
   openSheet("songDetailMenu");
 }
 
+function songReleaseLabel(song) {
+  const rel = (state.releases || []).find(r => (r.songIds || []).includes(song.id));
+  if (!rel) {
+    const vCount = song.versions?.length || 0;
+    return `${vCount} version${vCount === 1 ? "" : "s"}`;
+  }
+  const today = new Date(); today.setHours(0,0,0,0);
+  const rd = rel.releaseDate ? new Date(rel.releaseDate + "T00:00:00") : null;
+  return rd && rd <= today ? "Released" : "Upcoming";
+}
+
 function renderSongDetail(id) {
   const song = getSong(id);
   if (!song) {
     selectedSongId = null;
     selectedVersionId = null;
-    return renderSongsList();
+    return render();
   }
 
   setHeader(song.title);
@@ -7690,7 +8187,6 @@ function renderSongDetail(id) {
   activeScreenEl.style.overflowY = "scroll";
 
   const fv = featuredVersion(song);
-  const vCount = song.versions?.length || 0;
   const heroCover = coverSvg(song);
   const rowCover = coverSvg(song, { lite: true });
 
@@ -7738,7 +8234,7 @@ function renderSongDetail(id) {
       <div class="pdHeroBg" aria-hidden="true">${heroCover}</div>
       <div class="pdHeroContent">
         <div class="pdHeroTitle">${escapeHtml(song.title)}</div>
-        <div class="pdHeroMeta">${escapeHtml(song.project || "—")} · ${vCount} version${vCount === 1 ? "" : "s"}</div>
+        <div class="pdHeroMeta">${escapeHtml(song.project || "—")} · ${songReleaseLabel(song)}</div>
       </div>
     </div>
 
@@ -7828,10 +8324,9 @@ function renderSongDetail(id) {
   $("#sdAddVersion")?.addEventListener("click", () => {
     const newV = createVersion(song);
     if (!newV) return toast("Couldn’t create version");
-    captureNavState();
-    selectedVersionId = newV.id;
-    render();
-    triggerForwardSlide();
+    navigateForward(() => {
+      selectedVersionId = newV.id;
+    });
   });
 
   /* ── Version row listeners ── */
@@ -7839,10 +8334,9 @@ function renderSongDetail(id) {
     activeScreenEl.querySelectorAll("[data-vrow]").forEach(row => {
       row.addEventListener("click", (e) => {
         if (e.target.closest("[data-vmore]")) return;
-        captureNavState();
-        selectedVersionId = row.getAttribute("data-vrow");
-        render();
-        triggerForwardSlide();
+        navigateForward(() => {
+          selectedVersionId = row.getAttribute("data-vrow");
+        });
       });
     });
 
@@ -8119,13 +8613,9 @@ function showEvoActionMenu(container, nodeEl, song, versionId) {
       selectedVersionId = newV.id;
       render();
     } else if (action === "rename") {
-      selectedVersionId = versionId;
-      render();
-      triggerForwardSlide();
+      navigateForward(() => { selectedVersionId = versionId; });
     } else if (action === "notes") {
-      selectedVersionId = versionId;
-      render();
-      triggerForwardSlide();
+      navigateForward(() => { selectedVersionId = versionId; });
     }
   });
 }
@@ -8136,7 +8626,7 @@ function renderVersionDetail(songId, versionId) {
 
   if (!song || !v) {
     selectedVersionId = null;
-    return renderSongDetail(songId);
+    return render();
   }
 
   setHeader("Version");
@@ -8424,7 +8914,7 @@ function renderVersionDetail(songId, versionId) {
     toast("Deleted 🗑️");
 
     selectedVersionId = null;
-    renderSongDetail(songId);
+    render();
   });
 }
 

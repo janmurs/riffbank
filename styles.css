@@ -38,6 +38,27 @@
 
 *{ box-sizing:border-box; -webkit-tap-highlight-color: transparent; }
 
+/* ── View Transitions (native bitmap captures) ─────────────────── */
+::view-transition-old(root),
+::view-transition-new(root){
+  animation-duration: 0.3s;
+  animation-timing-function: cubic-bezier(.4,0,.2,1);
+}
+/* Forward: new slides in from right, old parallax left */
+.vt-forward::view-transition-old(root){ animation-name: vt-ace-left; }
+.vt-forward::view-transition-new(root){ animation-name: vt-queen-from-right; }
+/* Back: old slides off right, new parallax in from left */
+.vt-back::view-transition-old(root){ animation-name: vt-queen-right; }
+.vt-back::view-transition-new(root){ animation-name: vt-ace-from-left; }
+/* Jump home: old slides off right, new instant */
+.vt-jumpHome::view-transition-old(root){ animation-name: vt-queen-right; }
+.vt-jumpHome::view-transition-new(root){ animation-name: none; }
+
+@keyframes vt-ace-left      { to   { transform: translateX(-30px); } }
+@keyframes vt-queen-from-right { from { transform: translateX(100%); } }
+@keyframes vt-queen-right   { to   { transform: translateX(100%); } }
+@keyframes vt-ace-from-left { from { transform: translateX(-30px); } }
+
 html,body{
   height:100%;
   background: linear-gradient(180deg, #0f1014 0%, #090a0d 100%) fixed;
@@ -3089,6 +3110,141 @@ body.splashing .app{
   color: rgba(255,255,255,.9);
 }
 
+/* ── Lyrics view ── */
+.lyricsHead{
+  padding: 22px 2px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.lyricsTitleRow{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.lyricsPageTitle{
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: -.2px;
+  color: rgba(255,255,255,.85);
+}
+.lyricsHead input[type="text"]{
+  width: 100%;
+}
+.lyricsList{
+  padding: 12px 2px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.lyricsRow{
+  display: grid;
+  grid-template-columns: 48px 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 2px;
+  border-radius: 10px;
+  cursor: pointer;
+  background: none;
+  border: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.lyricsRow:active{ opacity: .7; }
+.lyricsCover{
+  width: 48px;
+  height: 48px;
+  border-radius: 6px;
+  background: rgba(255,255,255,.08);
+  border: 1px solid rgba(255,255,255,.10);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.lyricsCover svg{ width: 100%; height: 100%; }
+.lyricsMain{ min-width: 0; }
+.lyricsName{
+  font-weight: 600;
+  font-size: 15px;
+  line-height: 1.25;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lyricsMeta{
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lyricsMore{
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  background: none;
+  border: none;
+  color: rgba(255,255,255,.45);
+  padding: 0;
+  flex-shrink: 0;
+}
+
+/* Lyrics edit view */
+.lyricsEditHead{
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 22px 2px 16px;
+}
+.lyricsEditCover{
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+  background: rgba(255,255,255,.08);
+  border: 1px solid rgba(255,255,255,.10);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.lyricsEditCover svg{ width: 100%; height: 100%; }
+.lyricsEditInfo{ min-width: 0; }
+.lyricsEditTitle{
+  font-weight: 700;
+  font-size: 18px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lyricsEditSub{
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.lyricsEditArea{
+  width: 100%;
+  min-height: 300px;
+  background: rgba(255,255,255,.06);
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.6;
+  padding: 14px;
+  resize: vertical;
+  font-family: inherit;
+}
+.lyricsEditArea::placeholder{ color: rgba(255,255,255,.3); }
+.lyricsEditActions{
+  padding: 14px 0;
+  display: flex;
+  gap: 10px;
+}
+
 /* Action sheet (long-press menu) */
 .actionSheetBackdrop{
   position: fixed;
@@ -4125,6 +4281,75 @@ body {
   cursor: pointer;
 }
 .coGenreOption:hover{ background: rgba(255,255,255,.08); }
+
+/* File pick button in create overlay */
+.coFileBtn{
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 16px;
+  border-radius: 14px;
+  border: 2px dashed rgba(255,255,255,.1);
+  background: rgba(255,255,255,.03);
+  color: rgba(255,255,255,.55);
+  cursor: pointer;
+  transition: all .25s;
+  text-align: left;
+  margin-bottom: 20px;
+  position: relative;
+}
+.coFileBtn:active{ transform: scale(.98); border-color: rgba(168,85,247,.4); }
+.coFileBtn.picked{
+  border-style: solid;
+  border-color: rgba(168,85,247,.3);
+  background: rgba(168,85,247,.06);
+}
+.coFileIcon{
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: rgba(168,85,247,.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: rgba(168,85,247,.75);
+}
+.coFileBtn.picked .coFileIcon{
+  background: rgba(30,215,96,.12);
+  color: rgba(30,215,96,.85);
+}
+.coFileMeta{ flex: 1; min-width: 0; }
+.coFileName{
+  font-size: 14px;
+  font-weight: 700;
+  color: rgba(255,255,255,.75);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.coFileBtn.picked .coFileName{ color: rgba(255,255,255,.95); }
+.coFileSub{
+  font-size: 12px;
+  color: rgba(255,255,255,.3);
+  margin-top: 2px;
+}
+.coFileClear{
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255,255,255,.08);
+  color: rgba(255,255,255,.5);
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.coFileClear:active{ background: rgba(255,60,60,.2); color: rgba(255,120,120,1); }
 
 /* Create button */
 .coCreateBtn{
