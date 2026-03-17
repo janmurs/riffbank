@@ -4878,18 +4878,26 @@ body {
 
 /* ── Auth Screen ─────────────────────────────────── */
 .authScreen {
-  position: fixed; inset: 0; z-index: 99999;
+  position: fixed;
+  left: 0; right: 0;
+  top: 0; bottom: 0;
+  z-index: 99999;
   background: var(--bg);
-  display: flex; align-items: center; justify-content: center;
+  display: flex; align-items: flex-start; justify-content: center;
   padding: 24px;
+  padding-top: max(env(safe-area-inset-top), 20px);
   transition: opacity .3s ease;
+  overflow: hidden;
+  touch-action: none;
+  overscroll-behavior: none;
 }
 .authScreen.authFadeOut { opacity: 0; pointer-events: none; }
 
 .authCard {
   width: 100%; max-width: 380px;
-  display: flex; flex-direction: column; gap: 24px;
+  display: flex; flex-direction: column; gap: 20px;
   align-items: center;
+  margin-top: auto; margin-bottom: auto;
 }
 
 .authSalWrap {
@@ -4938,6 +4946,37 @@ body {
 #authForm input::placeholder { color: var(--muted); }
 #authForm input:focus { border-color: #a78bfa; }
 
+/* Password field wrapper with eye toggle */
+.authPassWrap {
+  position: relative; width: 100%;
+}
+.authPassWrap input {
+  padding-right: 48px;
+}
+.authPassMasked {
+  -webkit-text-security: disc;
+  text-security: disc;
+}
+.authEyeBtn {
+  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  background: none; border: none; padding: 8px;
+  color: var(--muted); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: color .2s;
+}
+.authEyeBtn:active { color: var(--text); }
+.authEyeBtn svg { width: 20px; height: 20px; }
+.authEyeBtn .authEyeClosed { display: none; }
+.authEyeBtn.showing .authEyeOpen { display: none; }
+.authEyeBtn.showing .authEyeClosed { display: block; }
+
+.authInlineLink {
+  background: none; border: none; padding: 0;
+  color: #a78bfa; font-family: 'Montserrat', sans-serif;
+  font-size: 13px; font-weight: 700;
+  cursor: pointer; text-decoration: underline;
+}
+
 .authError {
   font-size: 13px; color: #f87171;
   min-height: 18px; text-align: center;
@@ -4954,3 +4993,116 @@ body {
 }
 .authSubmitBtn:disabled { opacity: .5; cursor: not-allowed; }
 .authSubmitBtn:active:not(:disabled) { opacity: .8; }
+
+/* OTP verification */
+.authOtpHint {
+  font-family: 'Montserrat', sans-serif;
+  font-size: 14px; color: var(--muted);
+  text-align: center; line-height: 1.6;
+}
+.authOtpHint strong { color: var(--text); }
+
+.authOtpRow {
+  display: flex; gap: 8px; justify-content: center;
+}
+.authOtpDigit {
+  width: 46px; height: 56px;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 12px; color: var(--text);
+  font-family: 'Montserrat', sans-serif;
+  font-size: 24px; font-weight: 700;
+  text-align: center; outline: none;
+  transition: border-color .2s;
+  -webkit-appearance: none;
+}
+.authOtpDigit:focus { border-color: #a78bfa; }
+
+.authOtpLinks {
+  display: flex; gap: 20px; justify-content: center;
+}
+.authLinkBtn {
+  background: none; border: none;
+  color: var(--muted); font-family: 'Montserrat', sans-serif;
+  font-size: 14px; font-weight: 600;
+  cursor: pointer; transition: color .2s;
+}
+.authLinkBtn:active { color: var(--text); }
+
+/* ── Collab Tab ──────────────────────────────────── */
+.collabWrap {
+  padding: 16px 16px 120px;
+  display: flex; flex-direction: column; gap: 28px;
+}
+.collabSection { display: flex; flex-direction: column; gap: 12px; }
+.collabSectionTitle {
+  font-family: 'Montserrat', sans-serif;
+  font-weight: 800; font-size: 18px;
+  color: var(--text); letter-spacing: -0.3px;
+}
+
+/* Invite card */
+.collabInviteCard {
+  background: var(--panel2);
+  border-radius: 16px;
+  padding: 18px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.collabInviteDesc {
+  font-size: 14px; color: var(--muted); line-height: 1.5;
+}
+.collabInviteRow {
+  display: flex; gap: 10px; align-items: center;
+}
+.collabProjectPick {
+  flex: 1; padding: 10px 12px;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; color: var(--text);
+  font-family: 'Montserrat', sans-serif;
+  font-size: 13px; font-weight: 600;
+  outline: none; -webkit-appearance: none;
+  appearance: none;
+}
+.collabInviteBtn {
+  display: flex; align-items: center; gap: 6px;
+  padding: 10px 16px;
+  background: linear-gradient(135deg, #a78bfa, #f472b6);
+  border: none; border-radius: 999px;
+  color: #fff; font-family: 'Montserrat', sans-serif;
+  font-weight: 700; font-size: 13px;
+  white-space: nowrap; cursor: pointer;
+  transition: opacity .2s;
+}
+.collabInviteBtn:active { opacity: .8; }
+
+/* Collaborator rows */
+.collabRow {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 14px;
+  background: var(--panel);
+  border-radius: 14px;
+  cursor: pointer;
+  transition: background .15s;
+}
+.collabRow:active { background: var(--panel2); }
+.collabAvatar {
+  width: 40px; height: 40px;
+  background: linear-gradient(135deg, #a78bfa, #f472b6);
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'Montserrat', sans-serif;
+  font-weight: 800; font-size: 16px; color: #fff;
+  flex-shrink: 0;
+}
+.collabInfo { display: flex; flex-direction: column; gap: 2px; }
+.collabName {
+  font-family: 'Montserrat', sans-serif;
+  font-weight: 700; font-size: 15px; color: var(--text);
+}
+.collabMeta {
+  font-family: 'Montserrat', sans-serif;
+  font-size: 12px; color: var(--muted); font-weight: 500;
+}
+.collabEmpty {
+  font-size: 14px; color: var(--muted);
+  line-height: 1.6; padding: 8px 0;
+}

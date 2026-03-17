@@ -27,7 +27,7 @@ window.toggleSyncDebug = () => {
 
 import { $ } from "./ui/dom.js";
 import { runSplashSequence, replaySplash } from "./splash/splash.js";
-import { supabase, signUp, signIn, signOut, getSession, onAuthChange } from "./supabase.js";
+import { supabase, signUp, signIn, signOut, getSession, onAuthChange, verifyOtp, resendConfirmation } from "./supabase.js";
 import {
   gdriveLoadGIS,
   gdriveIsConnected,
@@ -4309,10 +4309,15 @@ function renderSheet() {
     sheetContent.innerHTML = `
       <div class="sheetTitle">${escapeHtml(p)}</div>
       <div class="sheetForm" style="gap:10px; margin-top:12px">
+        <button class="sheetChoice" id="pmInvite">Invite to Project</button>
         <button class="sheetChoice" id="pmSetDefault" ${isDefault ? "disabled" : ""}>${isDefault ? "Default ✅" : "Set as default"}</button>
         <button class="sheetChoice" id="pmCancel">Cancel</button>
       </div>
     `;
+    $("#pmInvite")?.addEventListener("click", () => {
+      closeSheet();
+      shareInvite(p);
+    });
     $("#pmSetDefault")?.addEventListener("click", () => {
       state.settings.defaultProject = p;
       saveState();
@@ -5229,77 +5234,262 @@ async function attachSharedAudio(song, v, blob, fileName, fileType, fileSize) {
   }
 }
 
-// ── Auth screen (card layout + Sal) ───────────────────────────────
+// ── Auth screen (card layout + Sal + OTP verification) ────────────
 function showAuthScreen() {
   return new Promise((resolve) => {
     const el = document.createElement("div");
     el.id = "authScreen";
     el.className = "authScreen";
-    el.innerHTML = `
-      <div class="authCard">
-        <div class="authSalWrap">${salSvg(80)}</div>
-        <div class="authLogo">RiffBank</div>
-        <div class="authToggle">
-          <button class="authToggleBtn active" data-mode="login">Log In</button>
-          <button class="authToggleBtn" data-mode="signup">Sign Up</button>
+
+    // Step 1: Login / Signup form
+    function renderForm() {
+      el.innerHTML = `
+        <div class="authCard">
+          <div class="authSalWrap">${salSvg(80)}</div>
+          <div class="authLogo">RiffBank</div>
+          <div class="authToggle">
+            <button class="authToggleBtn active" data-mode="login">Log In</button>
+            <button class="authToggleBtn" data-mode="signup">Sign Up</button>
+          </div>
+          <form id="authForm" autocomplete="on">
+            <input id="authEmail" type="email" placeholder="Email" required autocomplete="email" />
+            <div class="authPassWrap">
+              <input id="authPass" type="text" class="authPassMasked" placeholder="Password" required autocomplete="off" />
+              <button type="button" class="authEyeBtn" id="authEye" aria-label="Show password">
+                <svg class="authEyeOpen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                <svg class="authEyeClosed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+              </button>
+            </div>
+            <div id="authError" class="authError"></div>
+            <button id="authSubmit" type="submit" class="authSubmitBtn">Log In</button>
+          </form>
         </div>
-        <form id="authForm" autocomplete="on">
-          <input id="authEmail" type="email" placeholder="Email" required autocomplete="email" />
-          <input id="authPass" type="password" placeholder="Password" required autocomplete="current-password" />
-          <div id="authError" class="authError"></div>
-          <button id="authSubmit" type="submit" class="authSubmitBtn">Log In</button>
-        </form>
-      </div>
-    `;
-    document.body.appendChild(el);
+      `;
+      wireForm();
+    }
 
-    let mode = "login";
-    const toggleBtns = el.querySelectorAll(".authToggleBtn");
-    const submitBtn = el.querySelector("#authSubmit");
-    const errorEl = el.querySelector("#authError");
-    const passInput = el.querySelector("#authPass");
+    // Step 2: OTP code entry (after signup)
+    function renderOtp(email) {
+      el.innerHTML = `
+        <div class="authCard">
+          <div class="authSalWrap">${salSvg(80)}</div>
+          <div class="authLogo">Check Your Email</div>
+          <div class="authOtpHint">
+            We sent a 6-digit code to<br><strong>${email}</strong>
+          </div>
+          <form id="otpForm">
+            <div class="authOtpRow">
+              <input class="authOtpDigit" type="text" inputmode="numeric" maxlength="1" autocomplete="one-time-code" />
+              <input class="authOtpDigit" type="text" inputmode="numeric" maxlength="1" />
+              <input class="authOtpDigit" type="text" inputmode="numeric" maxlength="1" />
+              <input class="authOtpDigit" type="text" inputmode="numeric" maxlength="1" />
+              <input class="authOtpDigit" type="text" inputmode="numeric" maxlength="1" />
+              <input class="authOtpDigit" type="text" inputmode="numeric" maxlength="1" />
+            </div>
+            <div id="authError" class="authError"></div>
+            <button id="otpSubmit" type="submit" class="authSubmitBtn">Verify</button>
+          </form>
+          <div class="authOtpLinks">
+            <button class="authLinkBtn" id="otpResend">Resend code</button>
+            <button class="authLinkBtn" id="otpBack">Back to login</button>
+          </div>
+        </div>
+      `;
+      wireOtp(email);
+    }
 
-    toggleBtns.forEach((btn) => {
-      btn.addEventListener("click", () => {
-        mode = btn.dataset.mode;
-        toggleBtns.forEach((b) => b.classList.toggle("active", b === btn));
-        submitBtn.textContent = mode === "login" ? "Log In" : "Create Account";
-        passInput.autocomplete = mode === "login" ? "current-password" : "new-password";
-        errorEl.textContent = "";
+    function wireForm() {
+      let mode = "login";
+      const toggleBtns = el.querySelectorAll(".authToggleBtn");
+      const submitBtn = el.querySelector("#authSubmit");
+      const errorEl = el.querySelector("#authError");
+      const passInput = el.querySelector("#authPass");
+      const eyeBtn = el.querySelector("#authEye");
+
+      // Password visibility toggle
+      eyeBtn.addEventListener("click", () => {
+        const showing = !passInput.classList.contains("authPassMasked");
+        passInput.classList.toggle("authPassMasked", !showing);
+        eyeBtn.classList.toggle("showing", !showing);
       });
-    });
 
-    el.querySelector("#authForm").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const email = el.querySelector("#authEmail").value.trim();
-      const pass = el.querySelector("#authPass").value;
-      errorEl.textContent = "";
-      errorEl.style.color = "";
-      submitBtn.disabled = true;
-      submitBtn.textContent = mode === "login" ? "Logging in..." : "Creating account...";
+      toggleBtns.forEach((btn) => {
+        btn.addEventListener("click", () => {
+          mode = btn.dataset.mode;
+          toggleBtns.forEach((b) => b.classList.toggle("active", b === btn));
+          submitBtn.textContent = mode === "login" ? "Log In" : "Create Account";
+          errorEl.textContent = "";
+        });
+      });
 
-      try {
-        if (mode === "signup") {
-          const data = await signUp(email, pass);
-          if (data.user && !data.session) {
-            errorEl.style.color = "#22c55e";
-            errorEl.textContent = "Check your email to confirm, then log in!";
-            submitBtn.disabled = false;
-            submitBtn.textContent = "Create Account";
-            return;
-          }
-        } else {
-          await signIn(email, pass);
-        }
-        el.classList.add("authFadeOut");
-        setTimeout(() => { el.remove(); resolve(); }, 300);
-      } catch (err) {
+      el.querySelector("#authForm").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const email = el.querySelector("#authEmail").value.trim();
+        const pass = el.querySelector("#authPass").value;
+        errorEl.textContent = "";
         errorEl.style.color = "";
-        errorEl.textContent = err.message || "Something went wrong";
-        submitBtn.disabled = false;
-        submitBtn.textContent = mode === "login" ? "Log In" : "Create Account";
-      }
-    });
+        submitBtn.disabled = true;
+        submitBtn.textContent = mode === "login" ? "Logging in..." : "Creating account...";
+
+        try {
+          if (mode === "signup") {
+            const data = await signUp(email, pass);
+            if (data.user && !data.session) {
+              // Email confirmation required — show OTP screen
+              renderOtp(email);
+              return;
+            }
+            // Supabase returns a user with a fake session if the email already
+            // exists but is unconfirmed — detect that and resend confirmation
+            if (data.user && data.user.identities?.length === 0) {
+              // User exists already — resend confirmation and go to OTP
+              try { await resendConfirmation(email); } catch {}
+              renderOtp(email);
+              return;
+            }
+          } else {
+            await signIn(email, pass);
+          }
+          el.classList.add("authFadeOut");
+          setTimeout(() => { el.remove(); document.body.style.overflow = ""; document.body.style.position = ""; document.body.style.width = ""; document.body.style.top = ""; resolve(); }, 300);
+        } catch (err) {
+          const msg = err.message || "Something went wrong";
+          // If login fails with "invalid credentials" it might be an unconfirmed account
+          if (mode === "login" && msg.toLowerCase().includes("invalid")) {
+            errorEl.style.color = "";
+            errorEl.innerHTML = `Invalid credentials. Haven't confirmed your email? <button class="authInlineLink" id="authResendFromError">Resend code</button>`;
+            const resendLink = el.querySelector("#authResendFromError");
+            if (resendLink) {
+              resendLink.addEventListener("click", async () => {
+                resendLink.textContent = "Sending...";
+                try {
+                  await resendConfirmation(email);
+                  renderOtp(email);
+                } catch (e2) {
+                  errorEl.textContent = e2.message || "Couldn't resend";
+                }
+              });
+            }
+          } else {
+            errorEl.style.color = "";
+            errorEl.textContent = msg;
+          }
+          submitBtn.disabled = false;
+          submitBtn.textContent = mode === "login" ? "Log In" : "Create Account";
+        }
+      });
+    }
+
+    function wireOtp(email) {
+      const digits = el.querySelectorAll(".authOtpDigit");
+      const submitBtn = el.querySelector("#otpSubmit");
+      const errorEl = el.querySelector("#authError");
+
+      // Auto-focus first input
+      digits[0].focus();
+
+      // Auto-advance on input, support paste
+      digits.forEach((input, i) => {
+        input.addEventListener("input", () => {
+          const val = input.value.replace(/\D/g, "");
+          input.value = val.slice(0, 1);
+          if (val && i < digits.length - 1) digits[i + 1].focus();
+        });
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Backspace" && !input.value && i > 0) {
+            digits[i - 1].focus();
+          }
+        });
+        input.addEventListener("paste", (e) => {
+          e.preventDefault();
+          const pasted = (e.clipboardData.getData("text") || "").replace(/\D/g, "").slice(0, 6);
+          pasted.split("").forEach((ch, j) => {
+            if (digits[j]) digits[j].value = ch;
+          });
+          if (pasted.length > 0) digits[Math.min(pasted.length, digits.length) - 1].focus();
+        });
+      });
+
+      el.querySelector("#otpForm").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const code = Array.from(digits).map(d => d.value).join("");
+        if (code.length !== 6) {
+          errorEl.textContent = "Enter all 6 digits";
+          return;
+        }
+        errorEl.textContent = "";
+        submitBtn.disabled = true;
+        submitBtn.textContent = "Verifying...";
+
+        try {
+          await verifyOtp(email, code);
+          el.classList.add("authFadeOut");
+          setTimeout(() => { el.remove(); document.body.style.overflow = ""; document.body.style.position = ""; document.body.style.width = ""; document.body.style.top = ""; resolve(); }, 300);
+        } catch (err) {
+          errorEl.textContent = err.message || "Invalid code — try again";
+          submitBtn.disabled = false;
+          submitBtn.textContent = "Verify";
+        }
+      });
+
+      // Resend code
+      const resendBtn = el.querySelector("#otpResend");
+      resendBtn.addEventListener("click", async () => {
+        resendBtn.disabled = true;
+        resendBtn.textContent = "Sending...";
+        try {
+          await resendConfirmation(email);
+          errorEl.style.color = "#22c55e";
+          errorEl.textContent = "New code sent!";
+          // Clear old digits
+          digits.forEach(d => { d.value = ""; });
+          digits[0].focus();
+        } catch (err) {
+          errorEl.style.color = "";
+          errorEl.textContent = err.message || "Couldn't resend — try again";
+        }
+        resendBtn.disabled = false;
+        resendBtn.textContent = "Resend code";
+      });
+
+      el.querySelector("#otpBack").addEventListener("click", () => renderForm());
+    }
+
+    // Lock body scroll while auth screen is up
+    document.body.style.overflow = "hidden";
+    document.body.style.position = "fixed";
+    document.body.style.width = "100%";
+    document.body.style.top = "0";
+
+    document.body.appendChild(el);
+    renderForm();
+
+    // Prevent iOS from scrolling the fixed auth screen when inputs focus
+    el.addEventListener("focus", () => {
+      requestAnimationFrame(() => {
+        window.scrollTo(0, 0);
+        el.scrollTop = 0;
+      });
+    }, true);
+
+    // Use visualViewport to resize the auth screen to visible area only
+    if (window.visualViewport) {
+      const onResize = () => {
+        const vv = window.visualViewport;
+        el.style.height = vv.height + "px";
+        el.style.top = vv.offsetTop + "px";
+        el.style.bottom = "auto";
+        window.scrollTo(0, 0);
+      };
+      window.visualViewport.addEventListener("resize", onResize);
+      const obs = new MutationObserver(() => {
+        if (!document.getElementById("authScreen")) {
+          window.visualViewport.removeEventListener("resize", onResize);
+          obs.disconnect();
+        }
+      });
+      obs.observe(document.body, { childList: true });
+    }
   });
 }
 
@@ -5314,11 +5504,15 @@ async function init() {
 
   // ── Auth gate: require login before loading app ──
   const session = await getSession();
-  if (!session) {
-    document.body.classList.remove("splashing");
+  let authed = !!session;
+  if (authed) {
+    // Verify session is still valid server-side (e.g. user deleted)
+    const { data, error } = await supabase.auth.getUser();
+    if (error || !data?.user) { await supabase.auth.signOut(); authed = false; }
+  }
+  document.body.classList.remove("splashing");
+  if (!authed) {
     await showAuthScreen();
-  } else {
-    document.body.classList.remove("splashing");
   }
 
   // Load Google Drive integration (non-blocking, still available alongside Supabase)
@@ -7023,15 +7217,148 @@ function renderHome() {
   }
 }
 
+function buildInviteUrl(projectName) {
+  const base = `${location.origin}/invite`;
+  const params = new URLSearchParams();
+  // Get current user's display name or email
+  const userEmail = supabase.auth.getUser?.()?.then?.(r => r.data?.user?.email) || "";
+  const fromName = state.settings?.displayName || "";
+  if (fromName) params.set("from", fromName);
+  if (projectName) params.set("project", projectName);
+  const qs = params.toString();
+  return qs ? `${base}?${qs}` : base;
+}
+
+async function getInviteUrl(projectName) {
+  const base = `${location.origin}/invite`;
+  const params = new URLSearchParams();
+  try {
+    const { data } = await supabase.auth.getUser();
+    const fromName = state.settings?.displayName || data?.user?.email?.split("@")[0] || "";
+    if (fromName) params.set("from", fromName);
+  } catch {}
+  if (projectName) params.set("project", projectName);
+  const qs = params.toString();
+  return qs ? `${base}?${qs}` : base;
+}
+
+async function shareInvite(projectName) {
+  const url = await getInviteUrl(projectName);
+  const text = projectName
+    ? `Join me on RiffBank to collaborate on "${projectName}"!`
+    : "Join me on RiffBank — the app for managing songs, versions, and releases!";
+
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: "RiffBank Invite", text, url });
+      return;
+    } catch (e) {
+      if (e.name === "AbortError") return;
+    }
+  }
+  // Fallback: copy to clipboard
+  try {
+    await navigator.clipboard.writeText(`${text}\n${url}`);
+    toast("Invite link copied!");
+  } catch {
+    toast("Couldn't copy — try manually");
+  }
+}
+
 function renderCollab() {
   setHeader("Collab");
+
+  // Gather collaborators from songs
+  const counts = {};
+  state.songs.forEach(s => {
+    const raw = (s.collaborators || "").split(",").map(x => x.trim()).filter(Boolean);
+    raw.forEach(name => { counts[name] = (counts[name] || 0) + 1; });
+  });
+
+  // Get unique projects for project-specific invites
+  const projects = [...new Set(state.songs.map(s => (s.project || "").trim()).filter(Boolean))].sort();
+
+  const collabRows = Object.entries(counts)
+    .sort((a,b) => b[1] - a[1])
+    .map(([name, count]) => `
+      <div class="collabRow">
+        <div class="collabAvatar">${escapeHtml(name.charAt(0).toUpperCase())}</div>
+        <div class="collabInfo">
+          <div class="collabName">${escapeHtml(name)}</div>
+          <div class="collabMeta">${count} song${count === 1 ? "" : "s"}</div>
+        </div>
+      </div>
+    `).join("");
+
+  const projectOptions = projects.map(p =>
+    `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`
+  ).join("");
+
   activeScreenEl.innerHTML = `
-    <div style="padding: 40px 24px; text-align: center;">
-      <div style="font-size: 48px; margin-bottom: 16px;">🤝</div>
-      <div style="font-size: 22px; font-weight: 800; color: #fff; margin-bottom: 8px;">Collab</div>
-      <div style="font-size: 14px; color: rgba(255,255,255,.5); line-height: 1.5;">Connect and collaborate with other artists.<br>Coming soon.</div>
+    <div class="collabWrap">
+      <!-- Invite Section -->
+      <div class="collabSection">
+        <div class="collabSectionTitle">Invite Someone</div>
+        <div class="collabInviteCard">
+          <div class="collabInviteDesc">
+            Send an invite link — they'll see how to install RiffBank and create an account.
+          </div>
+          <div class="collabInviteRow">
+            <select id="collabProjectPick" class="collabProjectPick">
+              <option value="">General invite</option>
+              ${projectOptions}
+            </select>
+            <button id="collabInviteBtn" class="collabInviteBtn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18">
+                <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+                <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+              </svg>
+              Share Invite
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Collaborators List -->
+      <div class="collabSection">
+        <div class="collabSectionTitle">Your Collaborators</div>
+        ${collabRows || `
+          <div class="collabEmpty">
+            No collaborators yet. Add names to the "Collaborators" field on any song, or send an invite!
+          </div>
+        `}
+      </div>
     </div>
   `;
+
+  // Wire invite button
+  activeScreenEl.querySelector("#collabInviteBtn").addEventListener("click", () => {
+    const project = activeScreenEl.querySelector("#collabProjectPick").value;
+    shareInvite(project || null);
+  });
+
+  // Wire collab row taps → filter songs
+  activeScreenEl.querySelectorAll(".collabRow").forEach(row => {
+    row.addEventListener("click", () => {
+      const name = row.querySelector(".collabName")?.textContent;
+      if (!name) return;
+      currentTab = "songs";
+      songsView = "list";
+      selectedSongId = null;
+      drawerView = null;
+      setHeader("Songs");
+      syncTabs();
+      render();
+      setTimeout(() => {
+        const q = $("#q");
+        if (q) {
+          q.value = name;
+          q.dispatchEvent(new Event("input"));
+          toast(`Showing: ${name}`);
+        }
+      }, 0);
+    });
+  });
 }
 
 function renderGlobalSearch() {

@@ -38,3 +38,21 @@ export function getUser() {
 export function onAuthChange(callback) {
   return supabase.auth.onAuthStateChange(callback);
 }
+
+export async function verifyOtp(email, token) {
+  const { data, error } = await supabase.auth.verifyOtp({
+    email,
+    token,
+    type: "signup",
+  });
+  if (error) throw error;
+  return data;
+}
+
+export async function resendConfirmation(email) {
+  const { error } = await supabase.auth.resend({
+    type: "signup",
+    email,
+  });
+  if (error) throw error;
+}

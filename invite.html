@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#0b0b0f" />
+  <title>You're invited to RiffBank</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@500;600;700;800;900&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0d0e12;
+      --panel: rgba(255,255,255,.06);
+      --panel2: rgba(255,255,255,.10);
+      --line: rgba(255,255,255,.12);
+      --text: rgba(255,255,255,.92);
+      --muted: rgba(255,255,255,.62);
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Montserrat', sans-serif;
+      background: var(--bg); color: var(--text);
+      min-height: 100dvh;
+      display: flex; flex-direction: column; align-items: center;
+      padding: 48px 24px env(safe-area-inset-bottom);
+      text-align: center;
+      overflow-x: hidden;
+    }
+
+    .inviteSal { margin-bottom: 16px; }
+    .inviteSal img { height: auto; }
+
+    .inviteTitle {
+      font-weight: 900; font-size: 32px;
+      background: linear-gradient(135deg, #a78bfa, #f472b6);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: 8px;
+    }
+    .inviteSub {
+      font-size: 15px; color: var(--muted); line-height: 1.6;
+      max-width: 320px; margin-bottom: 36px;
+    }
+    .inviteSub strong { color: var(--text); }
+
+    /* Install instructions */
+    .installCard {
+      background: var(--panel2);
+      border-radius: 18px;
+      padding: 24px 20px;
+      max-width: 360px; width: 100%;
+      margin-bottom: 28px;
+    }
+    .installTitle {
+      font-weight: 800; font-size: 16px;
+      margin-bottom: 16px;
+    }
+    .installStep {
+      display: flex; align-items: flex-start; gap: 12px;
+      text-align: left; margin-bottom: 14px;
+    }
+    .installStep:last-child { margin-bottom: 0; }
+    .installNum {
+      flex-shrink: 0;
+      width: 28px; height: 28px;
+      background: linear-gradient(135deg, #a78bfa, #f472b6);
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 800; font-size: 13px; color: #fff;
+    }
+    .installText {
+      font-size: 14px; line-height: 1.5; color: var(--muted);
+      padding-top: 3px;
+    }
+    .installText strong { color: var(--text); }
+
+    /* Share icon inline SVGs */
+    .iosShare {
+      display: inline-block; vertical-align: -3px;
+      width: 18px; height: 18px;
+    }
+
+    /* CTA */
+    .inviteBtn {
+      display: block; width: 100%; max-width: 360px;
+      padding: 16px 0;
+      background: linear-gradient(135deg, #a78bfa, #f472b6);
+      border: none; border-radius: 999px;
+      color: #fff; font-family: 'Montserrat', sans-serif;
+      font-weight: 800; font-size: 16px;
+      cursor: pointer; transition: opacity .2s;
+      text-decoration: none; text-align: center;
+    }
+    .inviteBtn:active { opacity: .8; }
+
+    .inviteNote {
+      font-size: 12px; color: var(--muted);
+      margin-top: 16px; max-width: 300px; line-height: 1.5;
+    }
+
+    /* Detect standalone (already installed) */
+    @media (display-mode: standalone) {
+      .installCard { display: none; }
+      .alreadyInstalled { display: block !important; }
+    }
+    .alreadyInstalled {
+      display: none;
+      font-size: 14px; color: #22c55e;
+      font-weight: 700; margin-bottom: 20px;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="inviteSal">
+    <img src="./sal.svg" alt="Sal" width="100">
+  </div>
+
+  <div class="inviteTitle">You're Invited!</div>
+  <div class="inviteSub" id="inviteSub">
+    Your bandmate wants to collaborate with you on <strong>RiffBank</strong> — the app for managing songs, versions, and releases.
+  </div>
+
+  <div class="alreadyInstalled" id="alreadyInstalled">
+    RiffBank is already installed! Open it to sign in.
+  </div>
+
+  <div class="installCard" id="installCard">
+    <div class="installTitle">Install RiffBank</div>
+    <div id="installSteps"></div>
+  </div>
+
+  <a class="inviteBtn" href="./" id="openBtn">Open RiffBank</a>
+
+  <div class="inviteNote">
+    After installing, open RiffBank and create your account. You'll enter a 6-digit code from your email to verify — no redirect needed.
+  </div>
+
+  <script>
+    const stepsEl = document.getElementById("installSteps");
+    const isIos = /iPad|iPhone|iPod/.test(navigator.userAgent);
+    const isAndroid = /Android/.test(navigator.userAgent);
+    const isStandalone = window.matchMedia("(display-mode: standalone)").matches
+      || navigator.standalone === true;
+
+    const shareSvg = `<svg class="iosShare" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>`;
+
+    if (isStandalone) {
+      // Already installed — just show the open button
+    } else if (isIos) {
+      stepsEl.innerHTML = `
+        <div class="installStep">
+          <div class="installNum">1</div>
+          <div class="installText">Tap the <strong>Share</strong> button ${shareSvg} at the bottom of Safari</div>
+        </div>
+        <div class="installStep">
+          <div class="installNum">2</div>
+          <div class="installText">Scroll down and tap <strong>"Add to Home Screen"</strong></div>
+        </div>
+        <div class="installStep">
+          <div class="installNum">3</div>
+          <div class="installText">Tap <strong>"Add"</strong> — RiffBank will appear on your home screen like a real app</div>
+        </div>
+      `;
+    } else if (isAndroid) {
+      stepsEl.innerHTML = `
+        <div class="installStep">
+          <div class="installNum">1</div>
+          <div class="installText">Tap the <strong>menu</strong> (three dots) in the top right of Chrome</div>
+        </div>
+        <div class="installStep">
+          <div class="installNum">2</div>
+          <div class="installText">Tap <strong>"Install app"</strong> or <strong>"Add to Home screen"</strong></div>
+        </div>
+        <div class="installStep">
+          <div class="installNum">3</div>
+          <div class="installText">Tap <strong>"Install"</strong> — RiffBank will appear in your app drawer</div>
+        </div>
+      `;
+    } else {
+      // Desktop
+      stepsEl.innerHTML = `
+        <div class="installStep">
+          <div class="installNum">1</div>
+          <div class="installText">Click the <strong>install icon</strong> in the address bar (or menu → "Install RiffBank")</div>
+        </div>
+        <div class="installStep">
+          <div class="installNum">2</div>
+          <div class="installText">Click <strong>"Install"</strong> — RiffBank opens as its own window</div>
+        </div>
+      `;
+    }
+
+    // Parse invite params
+    const params = new URLSearchParams(window.location.search);
+    const from = params.get("from");
+    const project = params.get("project");
+    if (from || project) {
+      const sub = document.getElementById("inviteSub");
+      let msg = "";
+      if (from && project) {
+        msg = `<strong>${from}</strong> wants to collaborate with you on <strong>"${project}"</strong> in RiffBank.`;
+      } else if (from) {
+        msg = `<strong>${from}</strong> invited you to collaborate on <strong>RiffBank</strong> — the app for managing songs, versions, and releases.`;
+      }
+      if (msg) sub.innerHTML = msg;
+    }
+  </script>
+</body>
+</html>
