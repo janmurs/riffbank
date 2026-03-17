@@ -1062,21 +1062,31 @@ async function getCoverBlobUrl(coverPath) {
 async function restoreCoverUrlsFromCache() {
   for (const song of (state.songs || [])) {
     if (song.coverPath) {
-      const url = await getCoverBlobUrl(song.coverPath);
-      if (url) {
-        song.coverImageUrl = url;
-      } else {
-        if (song.coverImageUrl) song.coverImageUrl = null;
+      let url = await getCoverBlobUrl(song.coverPath);
+      if (!url) {
+        // Try fetching from Supabase storage
+        const blob = await supabaseFetchCoverBlob(song.coverPath).catch(() => null);
+        if (blob) {
+          await putCoverBlob(song.coverPath, blob);
+          url = URL.createObjectURL(blob);
+          coverUrlCache.set(song.coverPath, url);
+        }
       }
+      song.coverImageUrl = url || null;
     }
     // Restore user-uploaded cover URLs
     if (song.userCoverPath) {
-      const userUrl = await getCoverBlobUrl(song.userCoverPath);
-      if (userUrl) {
-        song.userCoverImageUrl = userUrl;
-      } else {
-        if (song.userCoverImageUrl) song.userCoverImageUrl = null;
+      let userUrl = await getCoverBlobUrl(song.userCoverPath);
+      if (!userUrl) {
+        // Try fetching from Supabase storage
+        const blob = await supabaseFetchCoverBlob(song.userCoverPath).catch(() => null);
+        if (blob) {
+          await putCoverBlob(song.userCoverPath, blob);
+          userUrl = URL.createObjectURL(blob);
+          coverUrlCache.set(song.userCoverPath, userUrl);
+        }
       }
+      song.userCoverImageUrl = userUrl || null;
     }
   }
 }
@@ -5703,10 +5713,15 @@ async function incrementalSyncFromSupabase() {
       const localTime = new Date(local.updatedAt || 0).getTime();
       const cloudTime = new Date(cs.updatedAt || 0).getTime();
       if (cloudTime > localTime) {
-        const preserveFields = ["_coverResolving"];
+        const preserveFields = ["_coverResolving", "_userCoverResolving"];
         for (const f of preserveFields) {
           if (local[f] !== undefined) cs[f] = local[f];
         }
+        // Preserve local cover blob URLs (cloud doesn't store blob URLs)
+        if (local.userCoverImageUrl && !cs.userCoverImageUrl) cs.userCoverImageUrl = local.userCoverImageUrl;
+        if (local.coverImageUrl && !cs.coverImageUrl) cs.coverImageUrl = local.coverImageUrl;
+        // Keep user coverSource if local has a user cover
+        if (local.coverSource === "user" && local.userCoverPath) cs.coverSource = "user";
         Object.assign(local, cs);
         updated++;
       }
@@ -8342,8 +8357,18 @@ function showCropOverlay(songId, imageSrc) {
       render();
       toast("Cover photo saved");
 
-      // Upload to Supabase in background
-      supabaseUploadCover({ blob, songId: song.id, pathOverride: `user_cover` }).catch(() => {});
+      // Upload to Supabase in background and store the cloud path
+      supabaseUploadCover({ blob, songId: song.id, pathOverride: `user_cover` }).then((result) => {
+        if (result?.success && result.coverPath) {
+          // Also cache under the Supabase storage path so pull can find it
+          putCoverBlob(result.coverPath, blob).catch(() => {});
+          coverUrlCache.set(result.coverPath, url);
+          // Update song's userCoverPath to the cloud path for cross-device sync
+          song.userCoverPath = result.coverPath;
+          saveState();
+          supabaseSyncStateSoon(state);
+        }
+      }).catch(() => {});
 
       cleanup();
     }, "image/jpeg", 0.92);
@@ -10564,6 +10589,7 @@ function renderSettings() {
       // Build lookup of local versions' audio refs (fileId, audioPath, localAudioId)
       // so we can preserve them — cloud state has fileId:null by design
       const localAudioMap = new Map();
+      const localCoverMap = new Map();
       for (const s of (state.songs || [])) {
         for (const v of (s.versions || [])) {
           if (v.fileId || v.audioPath || v.localAudioId) {
@@ -10572,6 +10598,16 @@ function renderSettings() {
               fileName: v.fileName, fileType: v.fileType, fileSize: v.fileSize,
             });
           }
+        }
+        // Preserve local cover data (blob URLs don't survive cloud round-trip)
+        if (s.userCoverPath || s.userCoverImageUrl || s.coverImageUrl) {
+          localCoverMap.set(s.id, {
+            userCoverPath: s.userCoverPath,
+            userCoverImageUrl: s.userCoverImageUrl,
+            coverSource: s.coverSource,
+            coverPath: s.coverPath,
+            coverImageUrl: s.coverImageUrl,
+          });
         }
       }
       // Diagnostic: show what we have before merge
@@ -10598,6 +10634,15 @@ function renderSettings() {
           }
           if (!cv.audioPath && local.audioPath) { cv.audioPath = local.audioPath; restored++; }
           if (!cv.localAudioId && local.localAudioId) { cv.localAudioId = local.localAudioId; restored++; }
+        }
+        // Restore local cover blob URLs (cloud doesn't store blob URLs)
+        const localCover = localCoverMap.get(cs.id);
+        if (localCover) {
+          if (!cs.userCoverPath && localCover.userCoverPath) cs.userCoverPath = localCover.userCoverPath;
+          if (!cs.userCoverImageUrl && localCover.userCoverImageUrl) cs.userCoverImageUrl = localCover.userCoverImageUrl;
+          if (!cs.coverImageUrl && localCover.coverImageUrl) cs.coverImageUrl = localCover.coverImageUrl;
+          // Preserve coverSource — cloud defaults to "ai" even if user set it to "user"
+          if (localCover.coverSource === "user" && localCover.userCoverPath) cs.coverSource = "user";
         }
       }
 
