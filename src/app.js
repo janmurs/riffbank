@@ -27,6 +27,7 @@ window.toggleSyncDebug = () => {
 
 import { $ } from "./ui/dom.js";
 import { runSplashSequence, replaySplash } from "./splash/splash.js";
+import { supabase, signUp, signIn, signOut, getSession, onAuthChange } from "./supabase.js";
 import {
   gdriveLoadGIS,
   gdriveIsConnected,
@@ -2579,6 +2580,7 @@ function syncBackButton() {
   const onRoot =
     ROOT_TABS.has(currentTab) &&
     !drawerView &&
+    !overlayView &&
     !selectedSongId &&
     !selectedVersionId &&
     !projectDetailScreen &&
@@ -5227,6 +5229,80 @@ async function attachSharedAudio(song, v, blob, fileName, fileType, fileSize) {
   }
 }
 
+// ── Auth screen (card layout + Sal) ───────────────────────────────
+function showAuthScreen() {
+  return new Promise((resolve) => {
+    const el = document.createElement("div");
+    el.id = "authScreen";
+    el.className = "authScreen";
+    el.innerHTML = `
+      <div class="authCard">
+        <div class="authSalWrap">${salSvg(80)}</div>
+        <div class="authLogo">RiffBank</div>
+        <div class="authToggle">
+          <button class="authToggleBtn active" data-mode="login">Log In</button>
+          <button class="authToggleBtn" data-mode="signup">Sign Up</button>
+        </div>
+        <form id="authForm" autocomplete="on">
+          <input id="authEmail" type="email" placeholder="Email" required autocomplete="email" />
+          <input id="authPass" type="password" placeholder="Password" required autocomplete="current-password" />
+          <div id="authError" class="authError"></div>
+          <button id="authSubmit" type="submit" class="authSubmitBtn">Log In</button>
+        </form>
+      </div>
+    `;
+    document.body.appendChild(el);
+
+    let mode = "login";
+    const toggleBtns = el.querySelectorAll(".authToggleBtn");
+    const submitBtn = el.querySelector("#authSubmit");
+    const errorEl = el.querySelector("#authError");
+    const passInput = el.querySelector("#authPass");
+
+    toggleBtns.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        mode = btn.dataset.mode;
+        toggleBtns.forEach((b) => b.classList.toggle("active", b === btn));
+        submitBtn.textContent = mode === "login" ? "Log In" : "Create Account";
+        passInput.autocomplete = mode === "login" ? "current-password" : "new-password";
+        errorEl.textContent = "";
+      });
+    });
+
+    el.querySelector("#authForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const email = el.querySelector("#authEmail").value.trim();
+      const pass = el.querySelector("#authPass").value;
+      errorEl.textContent = "";
+      errorEl.style.color = "";
+      submitBtn.disabled = true;
+      submitBtn.textContent = mode === "login" ? "Logging in..." : "Creating account...";
+
+      try {
+        if (mode === "signup") {
+          const data = await signUp(email, pass);
+          if (data.user && !data.session) {
+            errorEl.style.color = "#22c55e";
+            errorEl.textContent = "Check your email to confirm, then log in!";
+            submitBtn.disabled = false;
+            submitBtn.textContent = "Create Account";
+            return;
+          }
+        } else {
+          await signIn(email, pass);
+        }
+        el.classList.add("authFadeOut");
+        setTimeout(() => { el.remove(); resolve(); }, 300);
+      } catch (err) {
+        errorEl.style.color = "";
+        errorEl.textContent = err.message || "Something went wrong";
+        submitBtn.disabled = false;
+        submitBtn.textContent = mode === "login" ? "Log In" : "Create Account";
+      }
+    });
+  });
+}
+
 async function init() {
   if (!DISABLE_SPLASH) {
     await runSplashSequence();
@@ -5236,54 +5312,17 @@ async function init() {
     await new Promise(r => requestAnimationFrame(r));
   }
 
-  // Welcome screen (after splash, before app loads)
-  if (!DISABLE_WELCOME) {
-    let welcomeAction = await showWelcomeScreen();
-
-    // "GET STARTED" → show Drive connect screen (handles sign-in + picker)
-    let driveConnected = false;
-    let driveFolderName = "";
-    if (welcomeAction === "getStarted") {
-      let driveResult = { action: "back" };
-      while (driveResult.action === "back") {
-        driveResult = await showDriveScreen();
-        if (driveResult.action === "back") {
-          welcomeAction = await showWelcomeScreen();
-          if (welcomeAction === "hasAccount") break;
-        }
-      }
-      if (driveResult.action === "connected") {
-        driveConnected = true;
-        driveFolderName = driveResult.homeFolderName || "RiffBank";
-      }
-    }
-
-    localStorage.setItem("salOnboardingDone", "1");
-    if (welcomeAction === "hasAccount" && !driveConnected) {
-      // "I already have an account" — use original connect flow
-      gdriveLoadGIS();
-      toast("Connecting to Google Drive…");
-      const result = await gdriveConnect();
-      if (result.success) {
-        state.settings.driveRoot = result.homeFolderName || "RiffBank";
-        saveState();
-        toast("Connected! Syncing your library…");
-      }
-    } else if (driveConnected) {
-      // Already connected via drive screen
-      state.settings.driveRoot = driveFolderName;
-      saveState();
-      toast("Connected! Syncing your library…");
-      gdriveLoadGIS();
-    } else {
-      gdriveLoadGIS();
-    }
-  } else {
-    // No welcome screen — remove splashing class so app shell is visible
+  // ── Auth gate: require login before loading app ──
+  const session = await getSession();
+  if (!session) {
     document.body.classList.remove("splashing");
-    // Load Google Identity Services (non-blocking, for Drive integration)
-    gdriveLoadGIS();
+    await showAuthScreen();
+  } else {
+    document.body.classList.remove("splashing");
   }
+
+  // Load Google Drive integration (non-blocking, still available alongside Supabase)
+  gdriveLoadGIS();
 
   // Seed example release if none exist yet
   if (!state.releases.length) {
@@ -5437,7 +5476,6 @@ function renderProjects() {
     .map((p, i) => {
       const projSongs = state.songs.filter(s => (s.project || "").trim() === p);
       const count = projSongs.length;
-      const isDefault = (state.settings.defaultProject || "").trim() === p;
       const repSong = projSongs.slice().sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))[0]
         || { id: p, title: p, project: p, genre: "" };
       // Build mini song list for sleeve reveal (up to 4 songs)
@@ -5461,7 +5499,6 @@ function renderProjects() {
               <div class="pName">${escapeHtml(p)}</div>
               <div class="pMeta">
                 <span>${count} song${count === 1 ? "" : "s"}</span>
-                ${isDefault ? `<span class="pill good">Default</span>` : ""}
               </div>
             </div>
           </div>
@@ -5764,17 +5801,18 @@ function renderProjectSongs(projectName) {
   /* ── Song row listeners ── */
   function attachSongListeners() {
     activeScreenEl.querySelectorAll("[data-open-song]").forEach(row => {
-      row.addEventListener("click", (e) => {
+      row.addEventListener("click", async (e) => {
         if (e.target.closest("[data-proj-song-more]")) return;
         const sid = row.getAttribute("data-open-song");
-        navigateForward(() => {
-          projectDetailScreen = null;
-          drawerView = null;
-          currentTab = "songs";
-          songsView = "detail";
-          selectedSongId = sid;
-          selectedVersionId = null;
-        });
+        // Play from this song onwards (active version of each)
+        const idx = items.findIndex(it => it.songId === sid);
+        if (idx < 0) return toast("No playable version");
+        const fromHere = [...items.slice(idx), ...items.slice(0, idx)];
+        state.player.nowPlaying = fromHere[0];
+        state.player.queue = fromHere.slice(1);
+        state.player.repeatQueue = fromHere;
+        saveState();
+        await playNowPlaying({ autoplay: true });
       });
     });
 
@@ -7214,6 +7252,10 @@ function renderLyricsScratch() {
 
   overlayView = "lyrics";
   setHeader("Lyrics");
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("collapseTitle");
+  const h1 = appEl?.querySelector(".titleblock h1");
+  if (h1) h1.style.opacity = "0";
 
   // Collect songs that have lyrics
   const lq = lyricsQuery.toLowerCase();
@@ -7223,10 +7265,8 @@ function renderLyricsScratch() {
   });
 
   activeScreenEl.innerHTML = `
+    <div class="songsPageTitle">Lyrics</div>
     <div class="lyricsHead">
-      <div class="lyricsTitleRow">
-        <div class="lyricsPageTitle">Lyrics</div>
-      </div>
       <input id="lyricsSearch" type="text" placeholder="Search lyrics..." value="${escapeHtml(lyricsQuery)}" />
     </div>
 
@@ -7294,6 +7334,30 @@ function renderLyricsScratch() {
 
   // FAB → pick a song to add lyrics
   $("#lyricsAddFab")?.addEventListener("click", () => openLyricsSongPicker());
+
+  // Collapsing title scroll listener
+  const _screen = activeScreenEl;
+  const _sm = document.querySelector(".app.collapseTitle .titleblock h1");
+  if (_sm) {
+    requestAnimationFrame(() => {
+      const bt = _screen.querySelector(".songsPageTitle");
+      if (!bt) return;
+      const topbarEl = document.querySelector(".topbar");
+      const screenTop = _screen.getBoundingClientRect().top;
+      const topbarBottom = topbarEl ? topbarEl.getBoundingClientRect().bottom : 80;
+      const fadeStart = bt.offsetTop - (topbarBottom - screenTop);
+      const fadeEnd = fadeStart + (bt.offsetHeight || 40);
+      const range = fadeEnd - fadeStart;
+
+      const onScroll = () => {
+        const progress = Math.min(1, Math.max(0, (_screen.scrollTop - fadeStart) / range));
+        _sm.style.opacity = progress;
+      };
+      _screen._collapseTitleScroll = onScroll;
+      _screen.addEventListener("scroll", onScroll, { passive: true });
+      onScroll();
+    });
+  }
 }
 
 function openLyricsActionSheet(song) {

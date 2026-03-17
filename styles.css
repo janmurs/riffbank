@@ -4875,3 +4875,82 @@ body {
 .syncDot--green  { background: #4ade80; color: #4ade80; }
 .syncDot--yellow { background: #facc15; color: #facc15; }
 .syncDot--red    { background: #f87171; color: #f87171; }
+
+/* ── Auth Screen ─────────────────────────────────── */
+.authScreen {
+  position: fixed; inset: 0; z-index: 99999;
+  background: var(--bg);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  transition: opacity .3s ease;
+}
+.authScreen.authFadeOut { opacity: 0; pointer-events: none; }
+
+.authCard {
+  width: 100%; max-width: 380px;
+  display: flex; flex-direction: column; gap: 24px;
+  align-items: center;
+}
+
+.authSalWrap {
+  display: flex; justify-content: center;
+}
+
+.authLogo {
+  font-family: 'Montserrat', sans-serif;
+  font-weight: 900; font-size: 36px;
+  text-align: center;
+  background: linear-gradient(135deg, #a78bfa, #f472b6);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.authToggle {
+  display: flex; gap: 0; width: 100%;
+  background: var(--panel); border-radius: var(--rPill);
+  padding: 4px; overflow: hidden;
+}
+.authToggleBtn {
+  flex: 1; padding: 10px 0;
+  background: none; border: none; color: var(--muted);
+  font-family: 'Montserrat', sans-serif;
+  font-weight: 700; font-size: 14px;
+  border-radius: var(--rPill); cursor: pointer;
+  transition: all .2s ease;
+}
+.authToggleBtn.active {
+  background: rgba(255,255,255,.12); color: var(--text);
+}
+
+#authForm {
+  display: flex; flex-direction: column; gap: 14px;
+  width: 100%;
+}
+#authForm input {
+  width: 100%; padding: 14px 16px;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 12px; color: var(--text);
+  font-family: 'Montserrat', sans-serif;
+  font-size: 15px; font-weight: 500;
+  outline: none; transition: border-color .2s;
+  box-sizing: border-box;
+}
+#authForm input::placeholder { color: var(--muted); }
+#authForm input:focus { border-color: #a78bfa; }
+
+.authError {
+  font-size: 13px; color: #f87171;
+  min-height: 18px; text-align: center;
+  font-family: 'Montserrat', sans-serif;
+}
+
+.authSubmitBtn {
+  width: 100%; padding: 14px 0;
+  background: linear-gradient(135deg, #a78bfa, #f472b6);
+  border: none; border-radius: var(--rPill);
+  color: #fff; font-family: 'Montserrat', sans-serif;
+  font-weight: 800; font-size: 16px;
+  cursor: pointer; transition: opacity .2s;
+}
+.authSubmitBtn:disabled { opacity: .5; cursor: not-allowed; }
+.authSubmitBtn:active:not(:disabled) { opacity: .8; }
