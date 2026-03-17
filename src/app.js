@@ -4684,6 +4684,7 @@ function renderCreateOverlay() {
       }
     });
     genreInput?.addEventListener("focus", () => {
+      if (createGenreDropdownOpen) return;
       createGenreDropdownOpen = true;
       renderCreateOverlay();
       const newInput = createOverlayEl?.querySelector("#coGenreSearch");
