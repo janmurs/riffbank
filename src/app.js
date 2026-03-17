@@ -1,11 +1,10 @@
-// RiffBank v1.3 (Local-first PWA + Google Drive sync)
+// RiffBank v1.4 (Local-first PWA + Supabase cloud sync)
 // - Song creation + editing
-// - Upload Helper (suggested filename + Drive path)
 // - Version history + Best flag
 // - Best-only Player (plays links)
 // - Dashboard + Settings
 // - Export / Import
-// - Google Drive integration (auto-sync uploads, stream playback)
+// - Supabase integration (auth, cloud sync, audio/cover storage)
 
 window.onerror = (m, src, line, col) => alert(`JS ERROR:\n${m}\n${line}:${col}`);
 
@@ -22,34 +21,15 @@ window.toggleSyncDebug = () => {
   render();
 };
 
-// console.log("RIFFBANK APP.JS LOADED ✅", new Date().toISOString());
-// alert("RIFFBANK APP.JS LOADED ✅ " + new Date().toISOString());
-
 import { $ } from "./ui/dom.js";
 import { runSplashSequence, replaySplash } from "./splash/splash.js";
-import { supabase, signUp, signIn, signOut, getSession, onAuthChange } from "./supabase.js";
 import {
-  gdriveLoadGIS,
-  gdriveIsConnected,
-  gdriveHasValidToken,
-  gdriveGetConfig,
-  gdriveConnect,
-  gdriveSignIn,
-  gdrivePickHome,
-  gdriveConnectNewFolder,
-  gdriveDisconnect,
-  gdriveUploadAudio,
-  gdriveFetchBlob,
-  gdriveDeleteFile,
-  gdriveSyncStateSoon,
-  gdriveSyncStateNow,
-  gdrivePullState,
-  gdrivePullStateSilent,
-  gdriveRebuildFromFolders,
-  gdriveUploadCoverArt,
-  gdriveFindExisting,
-  gdriveConnectToFolder,
-} from "./gdrive.js";
+  SUPABASE_URL, SUPABASE_ANON_KEY,
+  supabase, signUp, signIn, signOut, getSession, onAuthChange, verifyOtp, resendConfirmation,
+  supabaseSyncStateSoon, supabasePushState, supabasePullState, supabasePullStateSilent,
+  supabaseUploadAudio, supabaseFetchAudioBlob, supabaseDeleteAudio, supabaseDiscoverAudioPaths,
+  supabaseUploadCover, supabaseFetchCoverBlob,
+} from "./supabase.js";
 
 const LS_KEY = "riffbank_v1";
 const HAS_SAVED_STATE = !!localStorage.getItem(LS_KEY); // used to detect first-run seeding
@@ -984,7 +964,7 @@ const toastEl = $("#toast");
 const AUDIO_DB = "riffbank_audio_v1";
 const AUDIO_STORE = "files";
 const audioUrlCache = new Map(); // localAudioId -> objectURL
-const coverUrlCache = new Map(); // coverDriveFileId -> blob objectURL (persists via IndexedDB)
+const coverUrlCache = new Map(); // coverPath -> blob objectURL (persists via IndexedDB)
 
 // ---------------------
 // iOS audio unlock (required if you do async before play())
@@ -1060,19 +1040,19 @@ async function getAudioBlob(id) {
 // ---------------------
 // Cover art cache (IndexedDB) — survives app restarts
 // ---------------------
-async function putCoverBlob(driveFileId, blob) {
-  if (!driveFileId || !blob) return;
-  const id = `cover:${driveFileId}`;
+async function putCoverBlob(coverPath, blob) {
+  if (!coverPath || !blob) return;
+  const id = `cover:${coverPath}`;
   await putAudioBlob({ id, blob, name: "cover", type: blob.type || "image/jpeg", size: blob.size });
 }
 
-async function getCoverBlobUrl(driveFileId) {
-  if (!driveFileId) return null;
-  if (coverUrlCache.has(driveFileId)) return coverUrlCache.get(driveFileId);
-  const rec = await getAudioBlob(`cover:${driveFileId}`);
+async function getCoverBlobUrl(coverPath) {
+  if (!coverPath) return null;
+  if (coverUrlCache.has(coverPath)) return coverUrlCache.get(coverPath);
+  const rec = await getAudioBlob(`cover:${coverPath}`);
   if (rec?.blob) {
     const url = URL.createObjectURL(rec.blob);
-    coverUrlCache.set(driveFileId, url);
+    coverUrlCache.set(coverPath, url);
     return url;
   }
   return null;
@@ -1081,13 +1061,22 @@ async function getCoverBlobUrl(driveFileId) {
 // Restore cover URLs from IndexedDB for all songs (call on startup, before render)
 async function restoreCoverUrlsFromCache() {
   for (const song of (state.songs || [])) {
-    if (!song.coverDriveFileId) continue;
-    const url = await getCoverBlobUrl(song.coverDriveFileId);
-    if (url) {
-      song.coverImageUrl = url;
-    } else {
-      // Blob URL from previous session is dead — clear it so SVG shows instead of broken img
-      if (song.coverImageUrl) song.coverImageUrl = null;
+    if (song.coverPath) {
+      const url = await getCoverBlobUrl(song.coverPath);
+      if (url) {
+        song.coverImageUrl = url;
+      } else {
+        if (song.coverImageUrl) song.coverImageUrl = null;
+      }
+    }
+    // Restore user-uploaded cover URLs
+    if (song.userCoverPath) {
+      const userUrl = await getCoverBlobUrl(song.userCoverPath);
+      if (userUrl) {
+        song.userCoverImageUrl = userUrl;
+      } else {
+        if (song.userCoverImageUrl) song.userCoverImageUrl = null;
+      }
     }
   }
 }
@@ -1457,7 +1446,7 @@ let _miniDisplayedKey = "";
 let _miniCarouselDir = 0;
 
 function isPlayable(v){
-  return !!(v?.link || v?.fileId || v?.localAudioId || v?.driveFileId);
+  return !!(v?.link || v?.fileId || v?.localAudioId || v?.audioPath);
 }
 
 async function syncMiniPlayerUI() {
@@ -1623,7 +1612,7 @@ async function playNowPlaying({ autoplay = true } = {}){
 
   const url = await getPlayableUrlForVersion(now.songId, now.versionId);
   if (!url) return toast("No playable audio 😅");
-  if (url === "drive-auth-required") return toast("Sign in to Google Drive to stream this file — tap Settings > Drive to reconnect 🔑");
+  if (url === "drive-auth-required") return toast("Could not load audio — check your connection");
 
   // Mark that this session has begun playback (so mini player can appear)
   hasPlayedThisSession = true;
@@ -1744,7 +1733,6 @@ function loadState() {
   return {
     version: 1,
     settings: {
-      driveRoot: "RiffBank",
       defaultProject: "SkeletonDanceParty",
       defaultGenre: "Metalcore",
       defaultSprint: "Unsorted",
@@ -1774,9 +1762,9 @@ function normalizeState() {
 
       if (v.localAudioId === undefined) v.localAudioId = null;
       if (v.originalFileName === undefined) v.originalFileName = "";
-      // Google Drive support
-      if (v.driveFileId === undefined) v.driveFileId = null;
-      if (v.driveWebViewLink === undefined) v.driveWebViewLink = "";
+      // Supabase cloud storage
+      if (v.driveFileId && !v.audioPath) v.audioPath = null; // migrate: driveFileId no longer used
+      if (v.audioPath === undefined) v.audioPath = null;
       // Player playlist flags
       if (typeof v.playerYes !== "boolean") v.playerYes = false;
       if (typeof v.favorite !== "boolean") v.favorite = false;
@@ -1790,14 +1778,20 @@ function normalizeState() {
       );
       newest.isActive = true;
     } else if (activeVs.length > 1) {
-      // Multiple active (e.g. corrupted Drive state) — keep most recently updated, clear the rest
+      // Multiple active — keep most recently updated, clear the rest
       const newest = activeVs.reduce((a, b) =>
         new Date(a.updatedAt || a.createdAt || 0) >= new Date(b.updatedAt || b.createdAt || 0) ? a : b
       );
       song.versions.forEach(v => { v.isActive = (v.id === newest.id); });
     }
     if (song.coverImageUrl === undefined) song.coverImageUrl = null;
-    if (song.coverDriveFileId === undefined) song.coverDriveFileId = null;
+    // Migrate coverDriveFileId → coverPath
+    if (song.coverDriveFileId && !song.coverPath) song.coverPath = null;
+    if (song.coverPath === undefined) song.coverPath = null;
+    // User-uploaded cover art
+    if (song.userCoverImageUrl === undefined) song.userCoverImageUrl = null;
+    if (song.userCoverPath === undefined) song.userCoverPath = null;
+    if (!song.coverSource) song.coverSource = song.userCoverPath ? "user" : "ai";
   });
   // Player state (queue)
   state.player = state.player || {};
@@ -1814,8 +1808,8 @@ normalizeState();
 
 function saveState() {
   localStorage.setItem(LS_KEY, JSON.stringify(state));
-  // Auto-sync to Google Drive (debounced — pushes 5s after last save)
-  gdriveSyncStateSoon(state);
+  // Auto-sync to Supabase (debounced — pushes 5s after last save)
+  supabaseSyncStateSoon(state);
 }
 
 // ---------------------
@@ -2076,6 +2070,80 @@ async function seedDefaultLibraryIfNeeded({ force = false } = {}) {
 }
 
 // ---------------------
+// ---------------------
+// Audio compression — shrink WAVs for cloud upload
+// Decodes to AudioBuffer, mixes to mono, re-encodes as 16-bit WAV
+// ---------------------
+const COMPRESS_THRESHOLD = 40 * 1024 * 1024; // only compress files > 40MB
+
+async function compressAudioForUpload(blob) {
+  if (blob.size <= COMPRESS_THRESHOLD) return blob;
+
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const arrayBuf = await blob.arrayBuffer();
+    const audioBuffer = await ctx.decodeAudioData(arrayBuf);
+    ctx.close();
+
+    // Render as mono at 44.1kHz
+    const sampleRate = Math.min(audioBuffer.sampleRate, 44100);
+    const length = Math.ceil(audioBuffer.duration * sampleRate);
+    const offline = new OfflineAudioContext(1, length, sampleRate);
+    const source = offline.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(offline.destination);
+    source.start(0);
+    const rendered = await offline.startRendering();
+
+    // Encode as 16-bit PCM WAV
+    const pcm = rendered.getChannelData(0);
+    const wavBlob = encodeWav(pcm, sampleRate);
+    console.log(`[Compress] ${(blob.size / 1e6).toFixed(1)}MB → ${(wavBlob.size / 1e6).toFixed(1)}MB`);
+    return wavBlob;
+  } catch (e) {
+    console.warn("[Compress] Failed, uploading original:", e);
+    return blob;
+  }
+}
+
+function encodeWav(samples, sampleRate) {
+  const numSamples = samples.length;
+  const bytesPerSample = 2; // 16-bit
+  const numChannels = 1;
+  const dataSize = numSamples * bytesPerSample;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  // WAV header
+  writeStr(view, 0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeStr(view, 8, "WAVE");
+  writeStr(view, 12, "fmt ");
+  view.setUint32(16, 16, true);            // chunk size
+  view.setUint16(20, 1, true);             // PCM format
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * numChannels * bytesPerSample, true);
+  view.setUint16(32, numChannels * bytesPerSample, true);
+  view.setUint16(34, bytesPerSample * 8, true);
+  writeStr(view, 36, "data");
+  view.setUint32(40, dataSize, true);
+
+  // PCM data: float32 → int16
+  let offset = 44;
+  for (let i = 0; i < numSamples; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    offset += 2;
+  }
+
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+function writeStr(view, offset, str) {
+  for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+}
+
 // Local audio store (IndexedDB) — iPhone-friendly
 // ---------------------
 
@@ -2122,6 +2190,154 @@ async function audioDelete(id) {
     tx.onerror = () => { db.close(); reject(tx.error); };
   });
 }
+
+// List all blobs in IndexedDB (for recovery)
+async function audioGetAll() {
+  const db = await openAudioDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(AUDIO_STORE, "readonly");
+    const req = tx.objectStore(AUDIO_STORE).getAll();
+    req.onsuccess = () => { db.close(); resolve(req.result || []); };
+    req.onerror = () => { db.close(); reject(req.error); };
+  });
+}
+
+// Delete a song from Supabase (DB rows + storage files) — fire-and-forget
+function deleteSongEverywhere(song) {
+  if (!song) return;
+  // Delete versions, then song row from DB
+  supabase.from("versions").delete().eq("song_id", song.id)
+    .then(() => supabase.from("songs").delete().eq("id", song.id))
+    .catch(e => console.warn("[Supabase] delete song rows:", e));
+  // Delete audio files from storage
+  for (const v of (song.versions || [])) {
+    if (v.audioPath) supabaseDeleteAudio(v.audioPath).catch(() => {});
+  }
+  // Delete cover from storage
+  if (song.coverPath) {
+    supabase.storage.from("covers").remove([song.coverPath]).catch(() => {});
+  }
+}
+
+// Recover lost audio refs: scan IndexedDB blobs, match to versions by filename,
+// re-link fileId, and upload to Supabase Storage
+async function recoverAndUploadAudio() {
+  const allBlobs = await audioGetAll();
+  if (!allBlobs.length) { toast("No audio blobs found in local storage"); return; }
+
+  // Build lookups (skip supa: cached entries)
+  const blobByName = new Map();
+  const blobById = new Map();
+  for (const rec of allBlobs) {
+    if (rec.id.startsWith("supa:")) continue;
+    if (rec.name) blobByName.set(rec.name, rec);
+    blobById.set(rec.id, rec);
+  }
+
+  let relinked = 0, uploaded = 0, failed = 0;
+  const errors = [];
+  toast(`Found ${blobByName.size} local audio blobs — recovering…`);
+
+  for (const song of (state.songs || [])) {
+    for (const v of (song.versions || [])) {
+      // Skip if already fully synced (has local audio AND cloud backup)
+      if (v.audioPath && (v.fileId || v.localAudioId)) continue;
+
+      // Find the blob: try bulk lookup first, then direct IndexedDB fetch by fileId
+      let rec = blobById.get(v.fileId) || blobByName.get(v.fileName);
+      if (!rec && v.fileId) {
+        try { rec = await audioGet(v.fileId); } catch {}
+      }
+      if (!rec?.blob) continue;
+
+      // Re-link fileId if missing
+      if (!v.fileId) {
+        v.fileId = rec.id;
+        v.fileType = v.fileType || rec.type || "";
+        v.fileSize = v.fileSize || rec.size || 0;
+        relinked++;
+      }
+
+      // Upload to Supabase Storage if not already backed up
+      if (v.audioPath) continue;
+      try {
+        toast(`Compressing ${song.title}…`);
+        const uploadBlob = await compressAudioForUpload(rec.blob);
+        const fileName = v.fileName || rec.name || "audio";
+        const result = await supabaseUploadAudio({
+          blob: new File([uploadBlob], fileName, { type: uploadBlob.type || rec.type || "audio/*" }),
+          songId: song.id,
+          versionId: v.id,
+          fileName,
+        });
+        if (result.success) {
+          v.audioPath = result.audioPath;
+          uploaded++;
+        } else {
+          errors.push(`${song.title}: ${result.error}`);
+          failed++;
+        }
+      } catch (e) {
+        errors.push(`${song.title}: ${e.message || e}`);
+        failed++;
+      }
+      toast(`Recovering: ${uploaded} uploaded, ${failed} failed…`);
+    }
+  }
+
+  if (relinked || uploaded) {
+    saveState();
+    // Push immediately so audioPath makes it to DB
+    await supabasePushState(state).catch(console.warn);
+    render();
+  }
+
+  let msg = uploaded || failed
+    ? `Recovery: ${uploaded} uploaded, ${failed} failed` + (relinked ? `, ${relinked} re-linked` : "")
+    : "Recovery: nothing to do (all synced or no blobs found)";
+  if (errors.length) msg += "\n\nErrors:\n" + errors.slice(0, 5).join("\n");
+  alert(msg);
+}
+
+// Debug: run `debugRecovery()` in browser console or tap "Debug Recovery" in Settings
+window.debugRecovery = async () => {
+  const allBlobs = await audioGetAll();
+  const nonSupa = allBlobs.filter(r => !String(r.id).startsWith("supa:"));
+  const lines = [];
+  lines.push(`IndexedDB: ${allBlobs.length} total, ${nonSupa.length} non-supa`);
+  lines.push("");
+
+  // Show first few blob IDs/names
+  for (const r of nonSupa.slice(0, 3)) {
+    lines.push(`Blob: id=${String(r.id).slice(0,12)}… name="${r.name}" hasBlob=${!!r.blob}`);
+  }
+  if (nonSupa.length > 3) lines.push(`…and ${nonSupa.length - 3} more`);
+  lines.push("");
+
+  // Check each version
+  let needsUpload = 0, hasBlob = 0, noBlob = 0;
+  const details = [];
+  for (const song of (state.songs || [])) {
+    for (const v of (song.versions || [])) {
+      if (v.audioPath) continue; // already synced
+      needsUpload++;
+      let blobFound = false;
+      if (v.fileId) {
+        try {
+          const r = await audioGet(v.fileId);
+          blobFound = !!r?.blob;
+        } catch {}
+      }
+      if (blobFound) hasBlob++; else noBlob++;
+      details.push(`${song.title} / ${v.label}: fileId=${v.fileId ? "yes" : "NO"} blob=${blobFound ? "YES" : "NO"} fileName="${v.fileName || ""}"`);
+    }
+  }
+  lines.push(`Need upload: ${needsUpload} (${hasBlob} have blobs, ${noBlob} missing)`);
+  lines.push("");
+  for (const d of details) lines.push(d);
+
+  alert(lines.join("\n"));
+};
 
 // Pick audio from iOS Files picker
 function pickAudioFile() {
@@ -2218,12 +2434,12 @@ async function getPlayableUrlForVersion(songId, versionId) {
     if (url) return url;
   }
 
-  // Priority 3a: IndexedDB-cached Drive blob — instant, zero auth required
-  if (v.driveFileId) {
-    const cacheKey = `drive:${v.driveFileId}`;
+  // Priority 3a: IndexedDB-cached cloud blob — instant, no network
+  if (v.audioPath) {
+    const cacheKey = `supa:${v.audioPath}`;
     if (audioUrlCache.has(cacheKey)) return audioUrlCache.get(cacheKey);
 
-    const cached = await audioGet(`gdrive:${v.driveFileId}`);
+    const cached = await audioGet(`supa:${v.audioPath}`);
     if (cached?.blob) {
       const url = URL.createObjectURL(cached.blob);
       audioUrlCache.set(cacheKey, url);
@@ -2231,16 +2447,15 @@ async function getPlayableUrlForVersion(songId, versionId) {
     }
   }
 
-  // Priority 3b: Live fetch from Drive (gdriveFetchBlob handles silent token refresh)
-  if (v.driveFileId && gdriveIsConnected()) {
-    const blob = await gdriveFetchBlob(v.driveFileId);
+  // Priority 3b: Live fetch from Supabase Storage
+  if (v.audioPath) {
+    const blob = await supabaseFetchAudioBlob(v.audioPath);
     if (blob) {
       const url = URL.createObjectURL(blob);
-      audioUrlCache.set(`drive:${v.driveFileId}`, url);
-      putAudioBlob({ id: `gdrive:${v.driveFileId}`, blob, name: v.fileName || v.label || "audio", type: v.fileType || blob.type || "audio/*", size: blob.size }).catch(() => {});
+      audioUrlCache.set(`supa:${v.audioPath}`, url);
+      putAudioBlob({ id: `supa:${v.audioPath}`, blob, name: v.fileName || v.label || "audio", type: v.fileType || blob.type || "audio/*", size: blob.size }).catch(() => {});
       return url;
     }
-    if (!v.link) return "drive-auth-required";
   }
 
   // Priority 4: Direct URL link
@@ -2250,48 +2465,46 @@ async function getPlayableUrlForVersion(songId, versionId) {
   return null;
 }
 
-// In-memory set of driveFileIds known to be cached in IndexedDB
-const _cachedDriveIds = new Set();
+// In-memory set of audioPaths known to be cached in IndexedDB
+const _cachedAudioPaths = new Set();
 
-// Cache all Drive-only audio blobs into IndexedDB so they play offline forever.
-// Called automatically after pull/rebuild. Shows progress toasts.
-async function cacheAllDriveAudio() {
-  const driveVersions = [];
+// Cache all cloud-only audio blobs into IndexedDB for offline playback.
+async function cacheAllCloudAudio() {
+  const cloudVersions = [];
   for (const song of (state.songs || [])) {
     for (const v of (song.versions || [])) {
-      if (!v.driveFileId) continue;
-      // Skip if already cached locally
+      if (!v.audioPath) continue;
       if (v.fileId || v.localAudioId) continue;
-      if (_cachedDriveIds.has(v.driveFileId)) continue;
+      if (_cachedAudioPaths.has(v.audioPath)) continue;
       try {
-        const existing = await audioGet(`gdrive:${v.driveFileId}`);
-        if (existing?.blob) { _cachedDriveIds.add(v.driveFileId); continue; }
+        const existing = await audioGet(`supa:${v.audioPath}`);
+        if (existing?.blob) { _cachedAudioPaths.add(v.audioPath); continue; }
       } catch {}
-      driveVersions.push({ song, v });
+      cloudVersions.push({ song, v });
     }
   }
 
-  if (!driveVersions.length) {
-    toast("All audio already cached locally ✅");
+  if (!cloudVersions.length) {
+    toast("All audio already cached locally");
     return;
   }
 
   let done = 0;
   let failed = 0;
-  toast(`Caching audio: 0/${driveVersions.length}…`);
+  toast(`Caching audio: 0/${cloudVersions.length}…`);
 
-  for (const { song, v } of driveVersions) {
+  for (const { song, v } of cloudVersions) {
     try {
-      const blob = await gdriveFetchBlob(v.driveFileId);
+      const blob = await supabaseFetchAudioBlob(v.audioPath);
       if (blob) {
         await audioPut({
-          id: `gdrive:${v.driveFileId}`,
+          id: `supa:${v.audioPath}`,
           blob,
           name: v.fileName || v.label || "audio",
           type: v.fileType || blob.type || "audio/*",
           size: blob.size,
         });
-        _cachedDriveIds.add(v.driveFileId);
+        _cachedAudioPaths.add(v.audioPath);
         done++;
       } else {
         failed++;
@@ -2299,45 +2512,45 @@ async function cacheAllDriveAudio() {
     } catch {
       failed++;
     }
-    toast(`Caching audio: ${done + failed}/${driveVersions.length}…`);
+    toast(`Caching audio: ${done + failed}/${cloudVersions.length}…`);
   }
 
   const msg = failed
-    ? `Cached ${done}/${driveVersions.length} (${failed} failed)`
-    : `All ${done} tracks cached locally ✅`;
+    ? `Cached ${done}/${cloudVersions.length} (${failed} failed)`
+    : `All ${done} tracks cached locally`;
   toast(msg);
 }
 
-// Sync debug: check each version's audio availability (sync, not async — metadata only)
-// Returns "green" (has local blob), "yellow" (Drive-only, needs network), "red" (no source)
+// Sync debug: check each version's audio availability
+// Returns "green" (local + synced to cloud), "yellow" (local only, not backed up), "red" (no audio)
 function getVersionSyncColor(v) {
   if (!v) return "red";
-  if (v.fileId || v.localAudioId) return "green";
-  if (v.driveFileId) {
-    if (_cachedDriveIds.has(v.driveFileId)) return "green";
-    return "yellow";
-  }
-  if (v.link) return "green";
+  const hasLocal = !!(v.fileId || v.localAudioId || v.link || _cachedAudioPaths.has(v.audioPath));
+  const hasClouds = !!v.audioPath;
+  if (hasLocal && hasClouds) return "green";
+  if (hasLocal || hasClouds) return "yellow";
   return "red";
 }
 
-// Returns worst-case sync color across all versions of a song
+// Returns best-case sync color across versions that have audio.
+// Versions with no audio at all are ignored (they're empty, not broken).
+// Only returns "red" if NO version has any audio source.
 function getSongSyncColor(song) {
   if (!song?.versions?.length) return "red";
-  let worst = "green"; // green > yellow > red
+  let best = "red";
   for (const v of song.versions) {
     const c = getVersionSyncColor(v);
-    if (c === "red") return "red";
-    if (c === "yellow") worst = "yellow";
+    if (c === "green") return "green";
+    if (c === "yellow") best = "yellow";
   }
-  return worst;
+  return best;
 }
 
 // Returns an HTML dot string for debug overlay (empty string if debug off)
 function syncDot(song) {
   if (!window.RIFFBANK_DEBUG_SYNC) return "";
   const color = getSongSyncColor(song);
-  const label = color === "green" ? "Local" : color === "yellow" ? "Drive-only" : "No audio";
+  const label = color === "green" ? "Synced" : color === "yellow" ? "Local only" : "No audio";
   return `<span class="syncDot syncDot--${color}" title="${label}"></span>`;
 }
 
@@ -2351,10 +2564,10 @@ window.auditSync = async () => {
         version: v.label || v.id,
         fileId: v.fileId ? "yes" : "",
         localAudioId: v.localAudioId ? "yes" : "",
-        driveFileId: v.driveFileId ? "yes" : "",
+        audioPath: v.audioPath ? "yes" : "",
         link: v.link ? "yes" : "",
         localBlobOk: "",
-        driveCacheOk: "",
+        cloudCacheOk: "",
         status: getVersionSyncColor(v),
       };
       // Check if local blob actually exists in IndexedDB
@@ -2364,11 +2577,11 @@ window.auditSync = async () => {
       }
       if (v.localAudioId) {
         try { const r = await getAudioBlob(v.localAudioId); row.localBlobOk = r?.blob ? "yes" : "MISSING"; } catch { row.localBlobOk = "ERROR"; }
-        if (row.localBlobOk === "MISSING" && !v.fileId) row.status = v.driveFileId ? "yellow" : "red";
+        if (row.localBlobOk === "MISSING" && !v.fileId) row.status = v.audioPath ? "yellow" : "red";
       }
-      // Check if Drive blob is cached locally
-      if (v.driveFileId) {
-        try { const r = await audioGet(`gdrive:${v.driveFileId}`); row.driveCacheOk = r?.blob ? "yes" : "no"; } catch { row.driveCacheOk = "no"; }
+      // Check if cloud blob is cached locally
+      if (v.audioPath) {
+        try { const r = await audioGet(`supa:${v.audioPath}`); row.cloudCacheOk = r?.blob ? "yes" : "no"; } catch { row.cloudCacheOk = "no"; }
       }
       results.push(row);
     }
@@ -2376,7 +2589,7 @@ window.auditSync = async () => {
   console.table(results);
   const reds = results.filter(r => r.status === "red");
   const yellows = results.filter(r => r.status === "yellow");
-  console.log(`[RiffBank Sync Audit] ${results.length} versions: ${reds.length} broken, ${yellows.length} Drive-only, ${results.length - reds.length - yellows.length} local`);
+  console.log(`[RiffBank Sync Audit] ${results.length} versions: ${reds.length} broken, ${yellows.length} cloud-only, ${results.length - reds.length - yellows.length} local`);
   if (reds.length) console.warn("Broken versions (no playable audio):", reds.map(r => `${r.song} / ${r.version}`));
   return results;
 };
@@ -2639,7 +2852,7 @@ function featuredVersion(song){
 function playVersion(songId, versionId, { goPlayer = true } = {}) {
   const song = getSong(songId);
   const v = getVersion(song, versionId);
-  if (!song || !v || (!v.link && !v.fileId && !v.localAudioId && !v.driveFileId))
+  if (!song || !v || (!v.link && !v.fileId && !v.localAudioId && !v.audioPath))
     return toast("No playable audio for that version 😅");
 
   state.player.nowPlaying = { songId, versionId };
@@ -2672,7 +2885,7 @@ function playVersion(songId, versionId, { goPlayer = true } = {}) {
 function addToQueue(songId, versionId) {
   const song = getSong(songId);
   const v = getVersion(song, versionId);
-  if (!song || !v || (!v.link && !v.fileId && !v.localAudioId && !v.driveFileId))
+  if (!song || !v || (!v.link && !v.fileId && !v.localAudioId && !v.audioPath))
   return toast("No playable audio for that version 😅");
 
   state.player.queue.push({ songId, versionId });
@@ -2824,7 +3037,7 @@ function showDriveScreen() {
       </button>
       <div class="driveBubbleArea">
         <div class="driveBubble">
-          <strong>RiffBank</strong> uses your <strong>Google Drive</strong> to store, manage, and release all of your in-progress songs.
+          <strong>RiffBank</strong> stores, manages, and releases all of your in-progress songs in the cloud.
         </div>
         <div class="driveSalWrap">${salSvg(120)}</div>
       </div>
@@ -2848,124 +3061,9 @@ function showDriveScreen() {
         return;
       }
 
-      if (action === "connect") {
-        // ── Sign in to Google ──
-        btn.textContent = "SIGNING IN…";
-        btn.style.pointerEvents = "none";
-        btn.style.opacity = "0.6";
-
-        await gdriveLoadGIS();
-        const signIn = await gdriveSignIn();
-        if (!signIn.success) {
-          btn.textContent = "CONNECT GOOGLE DRIVE";
-          btn.style.pointerEvents = "";
-          btn.style.opacity = "";
-          toast(signIn.error || "Sign-in failed — try again!");
-          return;
-        }
-
-        _signedInEmail = signIn.email || "";
-
-        // Check if there's already a RiffBank folder on Drive
-        el.querySelector(".driveBubble").innerHTML =
-          `Checking your <strong>Google Drive</strong>…`;
-        btn.textContent = "CHECKING…";
-
-        const existing = await gdriveFindExisting();
-
-        if (existing.found) {
-          // Existing RiffBank folder found!
-          _existingFolderId = existing.folderId;
-          el.querySelector(".driveBubble").innerHTML =
-            `Hey, I found a <strong>RiffBank</strong> folder on your Drive! Want me to connect to it?`;
-          btn.textContent = "CONNECT TO MY RIFFBANK";
-          btn.style.pointerEvents = "";
-          btn.style.opacity = "";
-          btn.dataset.action = "connectExisting";
-
-          const skipBtn = el.querySelector('[data-action="skip"]');
-          if (skipBtn) {
-            skipBtn.textContent = "Pick a different folder";
-            skipBtn.dataset.action = "pick";
-          }
-        } else {
-          // No existing folder — let user pick
-          el.querySelector(".driveBubble").innerHTML =
-            `Nice! Now pick a spot for your <strong>RiffBank</strong> folder — this is where all your songs, versions, and projects will live.`;
-          btn.textContent = "PICK A FOLDER";
-          btn.style.pointerEvents = "";
-          btn.style.opacity = "";
-          btn.dataset.action = "pick";
-
-          const skipBtn = el.querySelector('[data-action="skip"]');
-          if (skipBtn) skipBtn.textContent = "Skip for now";
-        }
-        return;
-      }
-
-      if (action === "connectExisting") {
-        // ── Connect to the found RiffBank folder ──
-        btn.textContent = "CONNECTING…";
-        btn.style.pointerEvents = "none";
-        btn.style.opacity = "0.6";
-
-        const result = await gdriveConnectToFolder(_existingFolderId, "RiffBank", _signedInEmail);
-        if (result.success) {
-          resolve({ action: "connected", homeFolderName: result.homeFolderName });
-        } else {
-          btn.textContent = "CONNECT TO MY RIFFBANK";
-          btn.style.pointerEvents = "";
-          btn.style.opacity = "";
-          toast(result.error || "Connection failed — try again!");
-        }
-        return;
-      }
-
-      if (action === "pick") {
-        // ── Open folder picker (full screen) ──
-        btn.textContent = "OPENING PICKER…";
-        btn.style.pointerEvents = "none";
-        btn.style.opacity = "0.6";
-
-        // Hide ALL overlays + app chrome so picker is full screen
-        const welcomeEl = document.getElementById("welcomeScreen");
-        const topBar = document.querySelector(".topBar");
-        const bottomNav = document.querySelector(".bottomNav");
-        el.style.display = "none";
-        if (welcomeEl) welcomeEl.style.display = "none";
-        if (topBar) topBar.style.display = "none";
-        if (bottomNav) bottomNav.style.display = "none";
-
-        // Show Sal PiP floating overlay while picker is open
-        const pip = document.createElement("div");
-        pip.className = "salPip";
-        pip.innerHTML = `
-          <div class="salPipBubble">Pick a folder for <strong>RiffBank</strong>!</div>
-          ${salSvg(56)}
-        `;
-        document.body.appendChild(pip);
-        requestAnimationFrame(() => pip.classList.add("salPipIn"));
-
-        const result = await gdrivePickHome(_signedInEmail);
-
-        // Restore everything
-        el.style.display = "";
-        if (welcomeEl) welcomeEl.style.display = "";
-        if (topBar) topBar.style.display = "";
-        if (bottomNav) bottomNav.style.display = "";
-
-        // Remove PiP
-        pip.classList.add("salPipOut");
-        pip.addEventListener("animationend", () => pip.remove(), { once: true });
-
-        if (result.success) {
-          resolve({ action: "connected", homeFolderName: result.homeFolderName });
-        } else {
-          // User cancelled picker — let them try again
-          btn.textContent = "PICK A FOLDER";
-          btn.style.pointerEvents = "";
-          btn.style.opacity = "";
-        }
+      if (action === "connect" || action === "connectExisting" || action === "pick") {
+        // Cloud auth handled by Supabase auth screen — skip legacy Drive flow
+        resolve({ action: "skip" });
       }
     });
 
@@ -3036,39 +3134,18 @@ function openSalOnboarding() {
       <div style="font-size:24px;font-weight:900;color:#fff;letter-spacing:-0.4px;">Welcome to RiffBank!</div>
       <div style="font-size:15px;color:rgba(255,255,255,.55);text-align:center;line-height:1.7;max-width:290px;">
         Hey, I'm <strong style="color:#fff;">Sal</strong>! I'll be your guide around here.<br><br>
-        RiffBank keeps all your songs, versions, and projects safe in <strong style="color:#fff;">Google Drive</strong> — record on any device and access your music anywhere.
+        RiffBank keeps all your songs, versions, and projects safe in the <strong style="color:#fff;">cloud</strong> — record on any device and access your music anywhere.
       </div>
     </div>
     <div style="height:1px;background:rgba(255,255,255,.08);margin:0 16px;"></div>
     <div style="padding:8px 0 6px;display:flex;flex-direction:column;">
-      <button class="actionSheetBtn" id="salConnectDrive" style="font-weight:700;">Hi Sal! Yes, connect my Google Drive!</button>
-      <button class="actionSheetBtn" id="salDismiss" style="color:rgba(255,255,255,.4);font-size:13px;">Hi Sal! I don't need you, I can do this MYSELF</button>
+      <button class="actionSheetBtn" id="salDismiss" style="font-weight:700;">Got it, let's go!</button>
     </div>
   `;
 
   function close() { backdrop.remove(); sheet.remove(); localStorage.setItem("salOnboardingDone", "1"); }
 
   backdrop.addEventListener("click", close);
-
-  sheet.querySelector("#salConnectDrive")?.addEventListener("click", async () => {
-    toast("Connecting to Google Drive…");
-    const result = await gdriveConnect();
-    if (result.success) {
-      state.settings.driveRoot = result.homeFolderName || "RiffBank";
-      saveState();
-      toast("Connected to Google Drive! Sal approves.");
-      close();
-      // Kick off sync now that we're connected
-      incrementalSyncFromDrive().then(() => {
-        render();
-        syncMiniPlayerUI();
-        preFetchDriveAudio().catch(console.warn);
-      }).catch(console.warn);
-    } else {
-      toast(result.error || "Connection failed — try again!");
-    }
-  });
-
   sheet.querySelector("#salDismiss")?.addEventListener("click", close);
 
   document.body.appendChild(backdrop);
@@ -4059,6 +4136,7 @@ function renderSheet() {
     $("#songMenuDelete")?.addEventListener("click", () => {
       if (!song) return closeSheet();
       if (!confirm(`Delete "${song.title}"?`)) return;
+      deleteSongEverywhere(song);
       state.songs = state.songs.filter(s => s.id !== song.id);
       saveState();
       toast("Deleted 🗑️");
@@ -4085,15 +4163,23 @@ function renderSheet() {
     const title = song?.title || "Song";
     const canGenArt = !generatingArtSongs.has(song.id) && Date.now() >= artCooldownUntil;
     const artLabel = generatingArtSongs.has(song.id) ? "Generating..." : song.coverImageUrl ? "Regen Art" : "Gen Art";
-    const hasApiKey = !!(state.settings.replicateKey || "");
-
+    const hasUserCover = !!(song.userCoverImageUrl || song.userCoverPath);
+    const hasAiCover = !!(song.coverImageUrl || song.coverPath);
+    const toggleLabel = song.coverSource === "user"
+      ? (hasAiCover ? "Use AI Art" : "")
+      : (hasUserCover ? "Use My Photo" : "");
     sheetContent.innerHTML = `
       <div class="sheetTitle">${escapeHtml(title)}</div>
 
       <div class="sheetForm" style="gap:10px">
         <button class="sheetChoice" id="sdmDetails">Details</button>
-        <button class="sheetChoice" id="sdmQueue" ${(fv?.link || fv?.fileId || fv?.localAudioId || fv?.driveFileId) ? "" : "disabled"}>Add to Queue</button>
-        <button class="sheetChoice" id="sdmGenArt" ${canGenArt && hasApiKey ? "" : "disabled"}>${escapeHtml(artLabel)}</button>
+        <button class="sheetChoice" id="sdmQueue" ${(fv?.link || fv?.fileId || fv?.localAudioId || fv?.audioPath) ? "" : "disabled"}>Add to Queue</button>
+        <button class="sheetChoice" id="sdmUploadCover">
+          Upload Cover
+          <span class="sub">use your own photo</span>
+        </button>
+        ${toggleLabel ? `<button class="sheetChoice" id="sdmToggleCover">${escapeHtml(toggleLabel)}</button>` : ""}
+        <button class="sheetChoice" id="sdmGenArt" ${canGenArt ? "" : "disabled"}>${escapeHtml(artLabel)}</button>
         <button class="sheetChoice" id="sdmDelete" style="background: rgba(255,92,119,.12); border-color: rgba(255,92,119,.25);">
           Delete song
           <span class="sub">this can't be undone</span>
@@ -4124,9 +4210,6 @@ function renderSheet() {
 
     $("#sdmGenArt")?.addEventListener("click", async () => {
       if (!canGenArt) return;
-      const apiKey = state.settings.replicateKey || "";
-      if (!apiKey) { toast("Add your Replicate API key in Settings first"); return; }
-
       closeSheet();
       generatingArtSongs.add(song.id);
       artCooldownUntil = Date.now() + 10000;
@@ -4134,7 +4217,7 @@ function renderSheet() {
       render();
 
       try {
-        await generateArtForSong(song, apiKey);
+        await generateArtForSong(song);
         coverCache.clear();
         saveState();
         toast("Art generated");
@@ -4150,8 +4233,23 @@ function renderSheet() {
       }
     });
 
+    $("#sdmUploadCover")?.addEventListener("click", () => {
+      closeSheet();
+      openCoverCropOverlay(song.id);
+    });
+
+    $("#sdmToggleCover")?.addEventListener("click", () => {
+      song.coverSource = song.coverSource === "user" ? "ai" : "user";
+      coverCache.clear();
+      saveState();
+      closeSheet();
+      render();
+      toast(song.coverSource === "user" ? "Using your photo" : "Using AI art");
+    });
+
     $("#sdmDelete")?.addEventListener("click", () => {
       if (!confirm(`Delete "${song.title}"?`)) return;
+      deleteSongEverywhere(song);
       state.songs = state.songs.filter(s => s.id !== song.id);
       saveState();
       toast("Deleted");
@@ -4232,7 +4330,7 @@ function renderSheet() {
       return;
     }
 
-    const playable = !!(v.link || v.fileId || v.localAudioId || v.driveFileId);
+    const playable = !!(v.link || v.fileId || v.localAudioId || v.audioPath);
 
     sheetContent.innerHTML = `
       <div class="sheetTitle">${escapeHtml(song.title)}</div>
@@ -4309,10 +4407,15 @@ function renderSheet() {
     sheetContent.innerHTML = `
       <div class="sheetTitle">${escapeHtml(p)}</div>
       <div class="sheetForm" style="gap:10px; margin-top:12px">
+        <button class="sheetChoice" id="pmInvite">Invite to Project</button>
         <button class="sheetChoice" id="pmSetDefault" ${isDefault ? "disabled" : ""}>${isDefault ? "Default ✅" : "Set as default"}</button>
         <button class="sheetChoice" id="pmCancel">Cancel</button>
       </div>
     `;
+    $("#pmInvite")?.addEventListener("click", () => {
+      closeSheet();
+      shareInvite(p);
+    });
     $("#pmSetDefault")?.addEventListener("click", () => {
       state.settings.defaultProject = p;
       saveState();
@@ -4929,19 +5032,17 @@ function render() {
 scheduleDockSpaceSync();
 
 // Pre-fetch the active version's Drive audio for every song so first play is instant.
-// Runs in the background after init — caches blobs in IndexedDB keyed by driveFileId.
-async function preFetchDriveAudio() {
-  // Only run when a token is already in memory — never triggers a sign-in popup
-  if (!gdriveIsConnected() || !gdriveHasValidToken()) return;
+// Pre-fetch cloud audio into IndexedDB for offline playback.
+async function preFetchCloudAudio() {
   for (const song of (state.songs || [])) {
     for (const v of (song.versions || [])) {
-      if (!v.driveFileId || v.fileId) continue; // no Drive file, or local copy already exists
-      const dbKey = `gdrive:${v.driveFileId}`;
+      if (!v.audioPath || v.fileId) continue;
+      const dbKey = `supa:${v.audioPath}`;
       const existing = await audioGet(dbKey);
-      if (existing?.blob) { _cachedDriveIds.add(v.driveFileId); continue; }
-      const blob = await gdriveFetchBlob(v.driveFileId);
+      if (existing?.blob) { _cachedAudioPaths.add(v.audioPath); continue; }
+      const blob = await supabaseFetchAudioBlob(v.audioPath);
       if (blob) {
-        _cachedDriveIds.add(v.driveFileId);
+        _cachedAudioPaths.add(v.audioPath);
         await putAudioBlob({
           id: dbKey,
           blob,
@@ -5206,100 +5307,288 @@ async function attachSharedAudio(song, v, blob, fileName, fileType, fileSize) {
   song.updatedAt = nowStamp();
   saveState();
 
-  // Upload to Google Drive in background if connected
-  if (gdriveIsConnected()) {
-    toast("Uploading to Drive… ☁️");
-    const file = new File([blob], fileName, { type: fileType });
-    const suggested = suggestedFileName(song, fileName);
-    gdriveUploadAudio({
-      file,
-      fileName: suggested,
-      project: song.project,
-      songTitle: song.title,
-    }).then(result => {
-      if (result.success) {
-        v.driveFileId = result.driveFileId;
-        v.driveWebViewLink = result.driveWebViewLink || "";
-        saveState();
-        toast("Synced to Drive ✅ ☁️");
-      } else {
-        toast("Local saved, Drive failed 😅");
-      }
-    }).catch(() => toast("Local saved, Drive failed 😅"));
-  }
+  // Upload to Supabase Storage in background (compress large files first)
+  toast("Syncing to cloud…");
+  compressAudioForUpload(blob).then(compressed => supabaseUploadAudio({
+    blob: new File([compressed], fileName, { type: compressed.type || fileType }),
+    songId: song.id,
+    versionId: v.id,
+    fileName,
+  })).then(async result => {
+    if (result.success) {
+      v.audioPath = result.audioPath;
+      localStorage.setItem(LS_KEY, JSON.stringify(state));
+      // Push immediately — don't rely on 5s debounce (iOS kills bg timers)
+      await supabasePushState(state).catch(console.warn);
+      toast("Synced to cloud");
+    } else {
+      toast("Local saved, cloud sync failed");
+    }
+  }).catch(() => toast("Local saved, cloud sync failed"));
 }
 
-// ── Auth screen (card layout + Sal) ───────────────────────────────
+// ── Auth screen (card layout + Sal + OTP verification) ────────────
 function showAuthScreen() {
   return new Promise((resolve) => {
     const el = document.createElement("div");
     el.id = "authScreen";
     el.className = "authScreen";
-    el.innerHTML = `
-      <div class="authCard">
-        <div class="authSalWrap">${salSvg(80)}</div>
-        <div class="authLogo">RiffBank</div>
-        <div class="authToggle">
-          <button class="authToggleBtn active" data-mode="login">Log In</button>
-          <button class="authToggleBtn" data-mode="signup">Sign Up</button>
+
+    // Step 1: Login / Signup form
+    // Render shell first WITHOUT inputs — iOS scans DOM on first paint for autofill.
+    // Inputs are injected after a delay so iOS never sees a "login form".
+    function renderForm() {
+      el.innerHTML = `
+        <div class="authCard">
+          <div class="authSalWrap">${salSvg(80)}</div>
+          <div class="authLogo">RiffBank</div>
+          <div class="authToggle">
+            <button class="authToggleBtn active" data-mode="login">Log In</button>
+            <button class="authToggleBtn" data-mode="signup">Sign Up</button>
+          </div>
+          <form id="authForm" autocomplete="off">
+            <div id="authInputs"></div>
+            <div id="authError" class="authError"></div>
+            <button id="authSubmit" type="submit" class="authSubmitBtn">Log In</button>
+          </form>
         </div>
-        <form id="authForm" autocomplete="on">
-          <input id="authEmail" type="email" placeholder="Email" required autocomplete="email" />
-          <input id="authPass" type="password" placeholder="Password" required autocomplete="current-password" />
-          <div id="authError" class="authError"></div>
-          <button id="authSubmit" type="submit" class="authSubmitBtn">Log In</button>
-        </form>
-      </div>
-    `;
-    document.body.appendChild(el);
+      `;
+      // Inject inputs after iOS autofill scan completes
+      setTimeout(() => {
+        const slot = el.querySelector("#authInputs");
+        if (!slot) return;
+        slot.innerHTML = `
+          <input id="authEmail" type="text" inputmode="email" placeholder="Email" required autocomplete="off" />
+          <div class="authPassWrap">
+            <input id="authPass" type="text" class="authPassMasked" placeholder="Password" required autocomplete="off" />
+            <button type="button" class="authEyeBtn" id="authEye" aria-label="Show password">
+              <svg class="authEyeOpen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              <svg class="authEyeClosed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+            </button>
+          </div>
+        `;
+        wireForm();
+      }, 500);
+    }
 
-    let mode = "login";
-    const toggleBtns = el.querySelectorAll(".authToggleBtn");
-    const submitBtn = el.querySelector("#authSubmit");
-    const errorEl = el.querySelector("#authError");
-    const passInput = el.querySelector("#authPass");
+    // Step 2: OTP code entry (after signup)
+    function renderOtp(email) {
+      el.innerHTML = `
+        <div class="authCard">
+          <div class="authSalWrap">${salSvg(80)}</div>
+          <div class="authLogo">Check Your Email</div>
+          <div class="authOtpHint">
+            We sent a 6-digit code to<br><strong>${email}</strong>
+          </div>
+          <form id="otpForm">
+            <div class="authOtpRow">
+              <input class="authOtpDigit" type="text" inputmode="numeric" maxlength="1" autocomplete="one-time-code" />
+              <input class="authOtpDigit" type="text" inputmode="numeric" maxlength="1" />
+              <input class="authOtpDigit" type="text" inputmode="numeric" maxlength="1" />
+              <input class="authOtpDigit" type="text" inputmode="numeric" maxlength="1" />
+              <input class="authOtpDigit" type="text" inputmode="numeric" maxlength="1" />
+              <input class="authOtpDigit" type="text" inputmode="numeric" maxlength="1" />
+            </div>
+            <div id="authError" class="authError"></div>
+            <button id="otpSubmit" type="submit" class="authSubmitBtn">Verify</button>
+          </form>
+          <div class="authOtpLinks">
+            <button class="authLinkBtn" id="otpResend">Resend code</button>
+            <button class="authLinkBtn" id="otpBack">Back to login</button>
+          </div>
+        </div>
+      `;
+      wireOtp(email);
+    }
 
-    toggleBtns.forEach((btn) => {
-      btn.addEventListener("click", () => {
-        mode = btn.dataset.mode;
-        toggleBtns.forEach((b) => b.classList.toggle("active", b === btn));
-        submitBtn.textContent = mode === "login" ? "Log In" : "Create Account";
-        passInput.autocomplete = mode === "login" ? "current-password" : "new-password";
-        errorEl.textContent = "";
+    function wireForm() {
+      let mode = "login";
+      const toggleBtns = el.querySelectorAll(".authToggleBtn");
+      const submitBtn = el.querySelector("#authSubmit");
+      const errorEl = el.querySelector("#authError");
+      const passInput = el.querySelector("#authPass");
+      const eyeBtn = el.querySelector("#authEye");
+
+      // Password visibility toggle
+      eyeBtn.addEventListener("click", () => {
+        const showing = !passInput.classList.contains("authPassMasked");
+        passInput.classList.toggle("authPassMasked", !showing);
+        eyeBtn.classList.toggle("showing", !showing);
       });
-    });
 
-    el.querySelector("#authForm").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const email = el.querySelector("#authEmail").value.trim();
-      const pass = el.querySelector("#authPass").value;
-      errorEl.textContent = "";
-      errorEl.style.color = "";
-      submitBtn.disabled = true;
-      submitBtn.textContent = mode === "login" ? "Logging in..." : "Creating account...";
+      toggleBtns.forEach((btn) => {
+        btn.addEventListener("click", () => {
+          mode = btn.dataset.mode;
+          toggleBtns.forEach((b) => b.classList.toggle("active", b === btn));
+          submitBtn.textContent = mode === "login" ? "Log In" : "Create Account";
+          errorEl.textContent = "";
+        });
+      });
 
-      try {
-        if (mode === "signup") {
-          const data = await signUp(email, pass);
-          if (data.user && !data.session) {
-            errorEl.style.color = "#22c55e";
-            errorEl.textContent = "Check your email to confirm, then log in!";
-            submitBtn.disabled = false;
-            submitBtn.textContent = "Create Account";
-            return;
-          }
-        } else {
-          await signIn(email, pass);
-        }
-        el.classList.add("authFadeOut");
-        setTimeout(() => { el.remove(); resolve(); }, 300);
-      } catch (err) {
+      el.querySelector("#authForm").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const email = el.querySelector("#authEmail").value.trim();
+        const pass = el.querySelector("#authPass").value;
+        errorEl.textContent = "";
         errorEl.style.color = "";
-        errorEl.textContent = err.message || "Something went wrong";
-        submitBtn.disabled = false;
-        submitBtn.textContent = mode === "login" ? "Log In" : "Create Account";
-      }
-    });
+        submitBtn.disabled = true;
+        submitBtn.textContent = mode === "login" ? "Logging in..." : "Creating account...";
+
+        try {
+          if (mode === "signup") {
+            const data = await signUp(email, pass);
+            if (data.user && !data.session) {
+              // Email confirmation required — show OTP screen
+              renderOtp(email);
+              return;
+            }
+            // Supabase returns a user with a fake session if the email already
+            // exists but is unconfirmed — detect that and resend confirmation
+            if (data.user && data.user.identities?.length === 0) {
+              // User exists already — resend confirmation and go to OTP
+              try { await resendConfirmation(email); } catch {}
+              renderOtp(email);
+              return;
+            }
+          } else {
+            await signIn(email, pass);
+          }
+          el.classList.add("authFadeOut");
+          setTimeout(() => { el.remove(); resolve(); }, 300);
+        } catch (err) {
+          const msg = err.message || "Something went wrong";
+          // If login fails with "invalid credentials" it might be an unconfirmed account
+          if (mode === "login" && msg.toLowerCase().includes("invalid")) {
+            errorEl.style.color = "";
+            errorEl.innerHTML = `Invalid credentials. Haven't confirmed your email? <button class="authInlineLink" id="authResendFromError">Resend code</button>`;
+            const resendLink = el.querySelector("#authResendFromError");
+            if (resendLink) {
+              resendLink.addEventListener("click", async () => {
+                resendLink.textContent = "Sending...";
+                try {
+                  await resendConfirmation(email);
+                  renderOtp(email);
+                } catch (e2) {
+                  errorEl.textContent = e2.message || "Couldn't resend";
+                }
+              });
+            }
+          } else {
+            errorEl.style.color = "";
+            errorEl.textContent = msg;
+          }
+          submitBtn.disabled = false;
+          submitBtn.textContent = mode === "login" ? "Log In" : "Create Account";
+        }
+      });
+    }
+
+    function wireOtp(email) {
+      const digits = el.querySelectorAll(".authOtpDigit");
+      const submitBtn = el.querySelector("#otpSubmit");
+      const errorEl = el.querySelector("#authError");
+
+      // Auto-focus first input
+      digits[0].focus();
+
+      // Auto-advance on input, support paste
+      digits.forEach((input, i) => {
+        input.addEventListener("input", () => {
+          const val = input.value.replace(/\D/g, "");
+          input.value = val.slice(0, 1);
+          if (val && i < digits.length - 1) digits[i + 1].focus();
+        });
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Backspace" && !input.value && i > 0) {
+            digits[i - 1].focus();
+          }
+        });
+        input.addEventListener("paste", (e) => {
+          e.preventDefault();
+          const pasted = (e.clipboardData.getData("text") || "").replace(/\D/g, "").slice(0, 6);
+          pasted.split("").forEach((ch, j) => {
+            if (digits[j]) digits[j].value = ch;
+          });
+          if (pasted.length > 0) digits[Math.min(pasted.length, digits.length) - 1].focus();
+        });
+      });
+
+      el.querySelector("#otpForm").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const code = Array.from(digits).map(d => d.value).join("");
+        if (code.length !== 6) {
+          errorEl.textContent = "Enter all 6 digits";
+          return;
+        }
+        errorEl.textContent = "";
+        submitBtn.disabled = true;
+        submitBtn.textContent = "Verifying...";
+
+        try {
+          await verifyOtp(email, code);
+          el.classList.add("authFadeOut");
+          setTimeout(() => { el.remove(); resolve(); }, 300);
+        } catch (err) {
+          errorEl.textContent = err.message || "Invalid code — try again";
+          submitBtn.disabled = false;
+          submitBtn.textContent = "Verify";
+        }
+      });
+
+      // Resend code
+      const resendBtn = el.querySelector("#otpResend");
+      resendBtn.addEventListener("click", async () => {
+        resendBtn.disabled = true;
+        resendBtn.textContent = "Sending...";
+        try {
+          await resendConfirmation(email);
+          errorEl.style.color = "#22c55e";
+          errorEl.textContent = "New code sent!";
+          // Clear old digits
+          digits.forEach(d => { d.value = ""; });
+          digits[0].focus();
+        } catch (err) {
+          errorEl.style.color = "";
+          errorEl.textContent = err.message || "Couldn't resend — try again";
+        }
+        resendBtn.disabled = false;
+        resendBtn.textContent = "Resend code";
+      });
+
+      el.querySelector("#otpBack").addEventListener("click", () => renderForm());
+    }
+
+    document.body.appendChild(el);
+    renderForm();
+
+    // Prevent iOS from scrolling behind the auth overlay on any input focus
+    el.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+
+    if (window.visualViewport) {
+      let lastH = window.visualViewport.height;
+      const onResize = () => {
+        const vv = window.visualViewport;
+        lastH = vv.height;
+        el.style.height = vv.height + "px";
+        el.style.top = vv.offsetTop + "px";
+        el.style.bottom = "auto";
+        window.scrollTo(0, 0);
+      };
+      const onScroll = () => {
+        const vv = window.visualViewport;
+        el.style.top = vv.offsetTop + "px";
+      };
+      window.visualViewport.addEventListener("resize", onResize);
+      window.visualViewport.addEventListener("scroll", onScroll);
+      const obs = new MutationObserver(() => {
+        if (!document.getElementById("authScreen")) {
+          window.visualViewport.removeEventListener("resize", onResize);
+          window.visualViewport.removeEventListener("scroll", onScroll);
+          obs.disconnect();
+        }
+      });
+      obs.observe(document.body, { childList: true });
+    }
   });
 }
 
@@ -5314,15 +5603,16 @@ async function init() {
 
   // ── Auth gate: require login before loading app ──
   const session = await getSession();
-  if (!session) {
-    document.body.classList.remove("splashing");
-    await showAuthScreen();
-  } else {
-    document.body.classList.remove("splashing");
+  let authed = !!session;
+  if (authed) {
+    // Verify session is still valid server-side (e.g. user deleted)
+    const { data, error } = await supabase.auth.getUser();
+    if (error || !data?.user) { await supabase.auth.signOut(); authed = false; }
   }
-
-  // Load Google Drive integration (non-blocking, still available alongside Supabase)
-  gdriveLoadGIS();
+  document.body.classList.remove("splashing");
+  if (!authed) {
+    await showAuthScreen();
+  }
 
   // Seed example release if none exist yet
   if (!state.releases.length) {
@@ -5350,48 +5640,47 @@ async function init() {
   // Now that the home screen is painted, fade out any remaining onboarding overlays
   dismissOnboarding();
 
-  // Background: restore cover art, scan cached blobs, sync Drive (non-blocking)
+  // Background: restore cover art, scan cached blobs, sync from Supabase (non-blocking)
   restoreCoverUrlsFromCache().then(() => render()).catch(() => {});
 
   (async () => {
     for (const song of (state.songs || [])) {
       for (const v of (song.versions || [])) {
-        if (!v.driveFileId || v.fileId || v.localAudioId) continue;
+        if (!v.audioPath || v.fileId || v.localAudioId) continue;
         try {
-          const rec = await audioGet(`gdrive:${v.driveFileId}`);
-          if (rec?.blob) _cachedDriveIds.add(v.driveFileId);
+          const rec = await audioGet(`supa:${v.audioPath}`);
+          if (rec?.blob) _cachedAudioPaths.add(v.audioPath);
         } catch {}
       }
     }
   })();
 
-  if (gdriveIsConnected()) {
-    incrementalSyncFromDrive().then(() => {
-      preFetchDriveAudio().catch(console.warn);
-    }).catch(console.warn);
-  }
+  // Incremental sync from Supabase
+  incrementalSyncFromSupabase().then(() => {
+    preFetchCloudAudio().catch(console.warn);
+  }).catch(console.warn);
 
   // Check for Web Share Target file
   checkSharedAudioFile();
 }
 
-// Incremental sync: pull Drive state JSON and merge only new/changed songs
-async function incrementalSyncFromDrive() {
-  const driveState = await gdrivePullStateSilent();
-  if (!driveState?.songs?.length) return;
+// Incremental sync: pull Supabase state and merge only new/changed songs
+async function incrementalSyncFromSupabase() {
+  const cloudState = await supabasePullStateSilent();
+  if (!cloudState?.songs?.length) return;
 
   const localHasSongs = state.songs && state.songs.length > 0;
 
   if (!localHasSongs) {
-    // Local is empty — adopt Drive state wholesale
-    state.songs = driveState.songs;
-    state.releases = driveState.releases || state.releases;
+    // Local is empty — adopt cloud state wholesale
+    state.songs = cloudState.songs;
+    state.releases = cloudState.releases || state.releases;
     normalizeState();
     await restoreCoverUrlsFromCache();
     saveState();
     coverCache.clear();
     render();
-    toast("Loaded library from Drive");
+    toast("Loaded library from cloud");
     return;
   }
 
@@ -5403,30 +5692,26 @@ async function incrementalSyncFromDrive() {
 
   let added = 0, updated = 0;
 
-  for (const ds of driveState.songs) {
-    const key = `${(ds.title || "").trim()}|${(ds.project || "").trim()}`;
+  for (const cs of cloudState.songs) {
+    const key = `${(cs.title || "").trim()}|${(cs.project || "").trim()}`;
     const local = localByKey.get(key);
 
     if (!local) {
-      // New song from Drive — add it
-      state.songs.push(ds);
+      state.songs.push(cs);
       added++;
     } else {
-      // Existing song — check if Drive version is newer
       const localTime = new Date(local.updatedAt || 0).getTime();
-      const driveTime = new Date(ds.updatedAt || 0).getTime();
-      if (driveTime > localTime) {
-        // Merge: update metadata but preserve local-only fields
+      const cloudTime = new Date(cs.updatedAt || 0).getTime();
+      if (cloudTime > localTime) {
         const preserveFields = ["_coverResolving"];
         for (const f of preserveFields) {
-          if (local[f] !== undefined) ds[f] = local[f];
+          if (local[f] !== undefined) cs[f] = local[f];
         }
-        Object.assign(local, ds);
+        Object.assign(local, cs);
         updated++;
       }
-      // Merge cover art if local is missing it
-      if (!local.coverDriveFileId && ds.coverDriveFileId) {
-        local.coverDriveFileId = ds.coverDriveFileId;
+      if (!local.coverPath && cs.coverPath) {
+        local.coverPath = cs.coverPath;
         updated++;
       }
     }
@@ -5434,7 +5719,6 @@ async function incrementalSyncFromDrive() {
 
   if (added || updated) {
     normalizeState();
-    // Restore covers for any newly added songs
     await restoreCoverUrlsFromCache();
     saveState();
     coverCache.clear();
@@ -7023,15 +7307,148 @@ function renderHome() {
   }
 }
 
+function buildInviteUrl(projectName) {
+  const base = `${location.origin}/invite`;
+  const params = new URLSearchParams();
+  // Get current user's display name or email
+  const userEmail = supabase.auth.getUser?.()?.then?.(r => r.data?.user?.email) || "";
+  const fromName = state.settings?.displayName || "";
+  if (fromName) params.set("from", fromName);
+  if (projectName) params.set("project", projectName);
+  const qs = params.toString();
+  return qs ? `${base}?${qs}` : base;
+}
+
+async function getInviteUrl(projectName) {
+  const base = `${location.origin}/invite`;
+  const params = new URLSearchParams();
+  try {
+    const { data } = await supabase.auth.getUser();
+    const fromName = state.settings?.displayName || data?.user?.email?.split("@")[0] || "";
+    if (fromName) params.set("from", fromName);
+  } catch {}
+  if (projectName) params.set("project", projectName);
+  const qs = params.toString();
+  return qs ? `${base}?${qs}` : base;
+}
+
+async function shareInvite(projectName) {
+  const url = await getInviteUrl(projectName);
+  const text = projectName
+    ? `Join me on RiffBank to collaborate on "${projectName}"!`
+    : "Join me on RiffBank — the app for managing songs, versions, and releases!";
+
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: "RiffBank Invite", text, url });
+      return;
+    } catch (e) {
+      if (e.name === "AbortError") return;
+    }
+  }
+  // Fallback: copy to clipboard
+  try {
+    await navigator.clipboard.writeText(`${text}\n${url}`);
+    toast("Invite link copied!");
+  } catch {
+    toast("Couldn't copy — try manually");
+  }
+}
+
 function renderCollab() {
   setHeader("Collab");
+
+  // Gather collaborators from songs
+  const counts = {};
+  state.songs.forEach(s => {
+    const raw = (s.collaborators || "").split(",").map(x => x.trim()).filter(Boolean);
+    raw.forEach(name => { counts[name] = (counts[name] || 0) + 1; });
+  });
+
+  // Get unique projects for project-specific invites
+  const projects = [...new Set(state.songs.map(s => (s.project || "").trim()).filter(Boolean))].sort();
+
+  const collabRows = Object.entries(counts)
+    .sort((a,b) => b[1] - a[1])
+    .map(([name, count]) => `
+      <div class="collabRow">
+        <div class="collabAvatar">${escapeHtml(name.charAt(0).toUpperCase())}</div>
+        <div class="collabInfo">
+          <div class="collabName">${escapeHtml(name)}</div>
+          <div class="collabMeta">${count} song${count === 1 ? "" : "s"}</div>
+        </div>
+      </div>
+    `).join("");
+
+  const projectOptions = projects.map(p =>
+    `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`
+  ).join("");
+
   activeScreenEl.innerHTML = `
-    <div style="padding: 40px 24px; text-align: center;">
-      <div style="font-size: 48px; margin-bottom: 16px;">🤝</div>
-      <div style="font-size: 22px; font-weight: 800; color: #fff; margin-bottom: 8px;">Collab</div>
-      <div style="font-size: 14px; color: rgba(255,255,255,.5); line-height: 1.5;">Connect and collaborate with other artists.<br>Coming soon.</div>
+    <div class="collabWrap">
+      <!-- Invite Section -->
+      <div class="collabSection">
+        <div class="collabSectionTitle">Invite Someone</div>
+        <div class="collabInviteCard">
+          <div class="collabInviteDesc">
+            Send an invite link — they'll see how to install RiffBank and create an account.
+          </div>
+          <div class="collabInviteRow">
+            <select id="collabProjectPick" class="collabProjectPick">
+              <option value="">General invite</option>
+              ${projectOptions}
+            </select>
+            <button id="collabInviteBtn" class="collabInviteBtn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18">
+                <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+                <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+              </svg>
+              Share Invite
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Collaborators List -->
+      <div class="collabSection">
+        <div class="collabSectionTitle">Your Collaborators</div>
+        ${collabRows || `
+          <div class="collabEmpty">
+            No collaborators yet. Add names to the "Collaborators" field on any song, or send an invite!
+          </div>
+        `}
+      </div>
     </div>
   `;
+
+  // Wire invite button
+  activeScreenEl.querySelector("#collabInviteBtn").addEventListener("click", () => {
+    const project = activeScreenEl.querySelector("#collabProjectPick").value;
+    shareInvite(project || null);
+  });
+
+  // Wire collab row taps → filter songs
+  activeScreenEl.querySelectorAll(".collabRow").forEach(row => {
+    row.addEventListener("click", () => {
+      const name = row.querySelector(".collabName")?.textContent;
+      if (!name) return;
+      currentTab = "songs";
+      songsView = "list";
+      selectedSongId = null;
+      drawerView = null;
+      setHeader("Songs");
+      syncTabs();
+      render();
+      setTimeout(() => {
+        const q = $("#q");
+        if (q) {
+          q.value = name;
+          q.dispatchEvent(new Event("input"));
+          toast(`Showing: ${name}`);
+        }
+      }, 0);
+    });
+  });
 }
 
 function renderGlobalSearch() {
@@ -7555,28 +7972,25 @@ const generatingArtSongs = new Set(); // song IDs currently generating art
 
 // Auto-generate art for a newly created song (fire-and-forget)
 function autoGenerateArt(song) {
-  const apiKey = state.settings.replicateKey || "";
-  if (!apiKey || song.coverImageUrl || song.coverDriveFileId) return;
+  if (song.coverImageUrl || song.coverPath) return;
   generatingArtSongs.add(song.id);
   coverCache.clear();
   render();
-  generateArtForSong(song, apiKey)
+  generateArtForSong(song)
     .then(() => { coverCache.clear(); saveState(); })
     .catch(e => console.warn("Auto art generation failed:", e))
     .finally(() => { generatingArtSongs.delete(song.id); coverCache.clear(); render(); });
 }
 
-// Global handler: refresh cover image from Drive when cached URL expires
-window._refreshCoverFromDrive = async (songId, driveFileId, imgEl) => {
-  // Try IndexedDB cache first (no auth needed)
-  let url = await getCoverBlobUrl(driveFileId);
-  // Fall back to fetching from Drive and caching
+// Global handler: refresh cover image from cloud when cached URL expires
+window._refreshCoverFromCloud = async (songId, coverPath, imgEl) => {
+  let url = await getCoverBlobUrl(coverPath);
   if (!url) {
-    const blob = await gdriveFetchBlob(driveFileId);
+    const blob = await supabaseFetchCoverBlob(coverPath);
     if (blob) {
-      await putCoverBlob(driveFileId, blob);
+      await putCoverBlob(coverPath, blob);
       url = URL.createObjectURL(blob);
-      coverUrlCache.set(driveFileId, url);
+      coverUrlCache.set(coverPath, url);
     }
   }
   if (url && imgEl) {
@@ -7602,7 +8016,7 @@ window._refreshCoverFromDrive = async (songId, driveFileId, imgEl) => {
     }
   }
 };
-// Fallback: if cover URL is broken (expired Replicate URL, no Drive backup), clear it so SVG art shows
+// Fallback: if cover URL is broken (expired URL, no cloud backup), clear it so SVG art shows
 window._clearBrokenCover = (songId, imgEl) => {
   const song = state.songs.find(s => s.id === songId);
   if (song) {
@@ -7614,6 +8028,328 @@ window._clearBrokenCover = (songId, imgEl) => {
     imgEl.parentElement.innerHTML = coverSvg(song || { id: songId, title: "", project: "", genre: "" }, { lite: true });
   }
 };
+window._refreshUserCoverFromCloud = async (songId, userCoverPath, imgEl) => {
+  let url = await getCoverBlobUrl(userCoverPath);
+  if (!url) {
+    const blob = await supabaseFetchCoverBlob(userCoverPath);
+    if (blob) {
+      await putCoverBlob(userCoverPath, blob);
+      url = URL.createObjectURL(blob);
+      coverUrlCache.set(userCoverPath, url);
+    }
+  }
+  if (url && imgEl) {
+    imgEl.onerror = () => {
+      imgEl.onerror = null;
+      window._clearBrokenUserCover && window._clearBrokenUserCover(songId, imgEl);
+    };
+    imgEl.src = url;
+    const song = state.songs.find(s => s.id === songId);
+    if (song) {
+      song.userCoverImageUrl = url;
+      coverCache.clear();
+      saveState();
+    }
+  } else if (imgEl) {
+    const song = state.songs.find(s => s.id === songId);
+    if (song) {
+      song.coverSource = "ai"; // fall back to AI art
+      song.userCoverImageUrl = null;
+      coverCache.clear();
+      saveState();
+    }
+    if (imgEl.parentElement) {
+      imgEl.parentElement.innerHTML = coverSvg(song || { id: songId, title: "", project: "", genre: "" }, { lite: true });
+    }
+  }
+};
+window._clearBrokenUserCover = (songId, imgEl) => {
+  const song = state.songs.find(s => s.id === songId);
+  if (song) {
+    song.coverSource = "ai";
+    song.userCoverImageUrl = null;
+    coverCache.clear();
+    saveState();
+  }
+  if (imgEl?.parentElement) {
+    imgEl.parentElement.innerHTML = coverSvg(song || { id: songId, title: "", project: "", genre: "" }, { lite: true });
+  }
+};
+// ── Cover crop overlay ──────────────────────────────
+function openCoverCropOverlay(songId) {
+  const song = getSong(songId);
+  if (!song) return;
+
+  // Show action sheet: Choose from Gallery / Take Photo
+  document.querySelectorAll(".actionSheetBackdrop, .actionSheet").forEach(el => el.remove());
+
+  const backdrop = document.createElement("div");
+  backdrop.className = "actionSheetBackdrop";
+  const sheet = document.createElement("div");
+  sheet.className = "actionSheet";
+  sheet.innerHTML = `
+    <div class="actionSheetHeader">Cover Photo</div>
+    <button class="actionSheetBtn" data-act="gallery">Choose from Gallery</button>
+    <button class="actionSheetBtn" data-act="camera">Take Photo</button>
+    <button class="actionSheetBtn" data-act="cancel">Cancel</button>
+  `;
+  document.body.append(backdrop, sheet);
+  requestAnimationFrame(() => { backdrop.classList.add("show"); sheet.classList.add("show"); });
+
+  function dismiss() {
+    backdrop.classList.remove("show");
+    sheet.classList.remove("show");
+    setTimeout(() => { backdrop.remove(); sheet.remove(); }, 300);
+  }
+
+  function pickFile(useCamera) {
+    dismiss();
+    const fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.accept = "image/*";
+    if (useCamera) fileInput.setAttribute("capture", "environment");
+    fileInput.style.display = "none";
+    document.body.appendChild(fileInput);
+
+    fileInput.addEventListener("change", () => {
+      const file = fileInput.files?.[0];
+      fileInput.remove();
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => showCropOverlay(songId, reader.result);
+      reader.readAsDataURL(file);
+    });
+
+    fileInput.click();
+  }
+
+  sheet.querySelector('[data-act="gallery"]').addEventListener("click", () => pickFile(false));
+  sheet.querySelector('[data-act="camera"]').addEventListener("click", () => pickFile(true));
+  sheet.querySelector('[data-act="cancel"]').addEventListener("click", dismiss);
+  backdrop.addEventListener("click", dismiss);
+}
+
+function showCropOverlay(songId, imageSrc) {
+  // Remove any existing overlay
+  document.querySelector(".cropOverlay")?.remove();
+
+  const overlay = document.createElement("div");
+  overlay.className = "cropOverlay";
+  overlay.innerHTML = `
+    <div class="cropHeader">
+      <button class="cropCancel">Cancel</button>
+      <span class="cropTitle">Crop Cover</span>
+      <button class="cropDone">Done</button>
+    </div>
+    <div class="cropArea">
+      <div class="cropFrame">
+        <img class="cropImg" src="${imageSrc}" draggable="false" />
+      </div>
+    </div>
+    <div class="cropControls">
+      <svg class="cropZoomIcon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
+      <input type="range" class="cropZoom" min="100" max="400" value="100" />
+      <svg class="cropZoomIcon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
+    </div>
+  `;
+
+  document.body.appendChild(overlay);
+  requestAnimationFrame(() => overlay.classList.add("cropVisible"));
+
+  const img = overlay.querySelector(".cropImg");
+  const frame = overlay.querySelector(".cropFrame");
+  const zoomSlider = overlay.querySelector(".cropZoom");
+
+  // baseScale: fits image to "cover" the square frame. userZoom: extra zoom [1..4]
+  let baseScale = 1;
+  let userZoom = 1;
+  let tx = 0, ty = 0;
+  let isDragging = false;
+  let startX = 0, startY = 0, startTx = 0, startTy = 0;
+
+  function totalScale() { return baseScale * userZoom; }
+
+  function applyTransform() {
+    const s = totalScale();
+    img.style.width = img.naturalWidth + "px";
+    img.style.height = img.naturalHeight + "px";
+    img.style.transform = `translate(${tx}px, ${ty}px) scale(${s})`;
+  }
+
+  function initLayout() {
+    const fw = frame.clientWidth;
+    const fh = frame.clientHeight;
+    const nw = img.naturalWidth;
+    const nh = img.naturalHeight;
+    if (!nw || !nh || !fw || !fh) return;
+    baseScale = Math.max(fw / nw, fh / nh);
+    tx = (fw - nw * totalScale()) / 2;
+    ty = (fh - nh * totalScale()) / 2;
+    applyTransform();
+  }
+
+  function clampPosition() {
+    const fw = frame.clientWidth;
+    const fh = frame.clientHeight;
+    const s = totalScale();
+    const imgW = img.naturalWidth * s;
+    const imgH = img.naturalHeight * s;
+    // Image must always cover the frame
+    if (imgW >= fw) {
+      tx = Math.min(0, Math.max(fw - imgW, tx));
+    } else {
+      tx = (fw - imgW) / 2;
+    }
+    if (imgH >= fh) {
+      ty = Math.min(0, Math.max(fh - imgH, ty));
+    } else {
+      ty = (fh - imgH) / 2;
+    }
+  }
+
+  img.onload = () => initLayout();
+  if (img.complete && img.naturalWidth) initLayout();
+
+  // Zoom slider
+  zoomSlider.addEventListener("input", () => {
+    const oldZoom = userZoom;
+    userZoom = parseInt(zoomSlider.value) / 100;
+    // Zoom toward center of frame
+    const fw = frame.clientWidth;
+    const fh = frame.clientHeight;
+    const ratio = userZoom / oldZoom;
+    tx = fw / 2 - ratio * (fw / 2 - tx);
+    ty = fh / 2 - ratio * (fh / 2 - ty);
+    clampPosition();
+    applyTransform();
+  });
+
+  // Mouse/touch drag
+  function onPointerDown(e) {
+    if (e.touches && e.touches.length > 1) return;
+    isDragging = true;
+    const pt = e.touches ? e.touches[0] : e;
+    startX = pt.clientX;
+    startY = pt.clientY;
+    startTx = tx;
+    startTy = ty;
+    e.preventDefault();
+  }
+  function onPointerMove(e) {
+    if (!isDragging) return;
+    if (e.touches && e.touches.length > 1) return;
+    const pt = e.touches ? e.touches[0] : e;
+    tx = startTx + (pt.clientX - startX);
+    ty = startTy + (pt.clientY - startY);
+    clampPosition();
+    applyTransform();
+    e.preventDefault();
+  }
+  function onPointerUp() {
+    isDragging = false;
+  }
+
+  frame.addEventListener("mousedown", onPointerDown);
+  frame.addEventListener("touchstart", onPointerDown, { passive: false });
+  window.addEventListener("mousemove", onPointerMove);
+  window.addEventListener("touchmove", onPointerMove, { passive: false });
+  window.addEventListener("mouseup", onPointerUp);
+  window.addEventListener("touchend", onPointerUp);
+
+  // Pinch to zoom
+  let pinchStartDist = 0;
+  let pinchStartZoom = 1;
+  frame.addEventListener("touchstart", (e) => {
+    if (e.touches.length === 2) {
+      isDragging = false;
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      pinchStartDist = Math.hypot(dx, dy);
+      pinchStartZoom = userZoom;
+    }
+  }, { passive: true });
+  frame.addEventListener("touchmove", (e) => {
+    if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      const dist = Math.hypot(dx, dy);
+      const oldZoom = userZoom;
+      userZoom = Math.max(1, Math.min(4, pinchStartZoom * (dist / pinchStartDist)));
+      zoomSlider.value = Math.round(userZoom * 100);
+      // Zoom toward pinch center
+      const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+      const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+      const frameRect = frame.getBoundingClientRect();
+      const px = midX - frameRect.left;
+      const py = midY - frameRect.top;
+      const ratio = userZoom / oldZoom;
+      tx = px - ratio * (px - tx);
+      ty = py - ratio * (py - ty);
+      clampPosition();
+      applyTransform();
+    }
+  }, { passive: true });
+
+  function cleanup() {
+    window.removeEventListener("mousemove", onPointerMove);
+    window.removeEventListener("touchmove", onPointerMove);
+    window.removeEventListener("mouseup", onPointerUp);
+    window.removeEventListener("touchend", onPointerUp);
+    overlay.classList.remove("cropVisible");
+    setTimeout(() => overlay.remove(), 250);
+  }
+
+  // Cancel
+  overlay.querySelector(".cropCancel").addEventListener("click", cleanup);
+
+  // Done — crop and save
+  overlay.querySelector(".cropDone").addEventListener("click", async () => {
+    const fw = frame.clientWidth;
+    const fh = frame.clientHeight;
+    const s = totalScale();
+
+    const canvas = document.createElement("canvas");
+    const SIZE = 800; // output resolution
+    canvas.width = SIZE;
+    canvas.height = SIZE;
+    const ctx = canvas.getContext("2d");
+
+    // tx, ty = pixel offset of scaled image top-left relative to frame top-left
+    const sx = -tx / s;
+    const sy = -ty / s;
+    const sw = fw / s;
+    const sh = fh / s;
+
+    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, SIZE, SIZE);
+
+    canvas.toBlob(async (blob) => {
+      if (!blob) { cleanup(); return; }
+
+      const song = getSong(songId);
+      if (!song) { cleanup(); return; }
+
+      // Save to IndexedDB + Supabase
+      const userCoverPath = `user_${song.id}_cover.jpg`;
+      await putCoverBlob(userCoverPath, blob);
+      const url = URL.createObjectURL(blob);
+      coverUrlCache.set(userCoverPath, url);
+
+      song.userCoverImageUrl = url;
+      song.userCoverPath = userCoverPath;
+      song.coverSource = "user";
+      coverCache.clear();
+      saveState();
+      render();
+      toast("Cover photo saved");
+
+      // Upload to Supabase in background
+      supabaseUploadCover({ blob, songId: song.id, pathOverride: `user_cover` }).catch(() => {});
+
+      cleanup();
+    }, "image/jpeg", 0.92);
+  });
+}
+
 let artCooldownUntil = 0; // timestamp — global 10s cooldown after any art request
 const bulkArtState = { running: false, done: 0, total: 0 }; // bulk art gen progress
 
@@ -7678,15 +8414,21 @@ function buildArtPrompt(song) {
   ].filter(Boolean).join(", ");
 }
 
-async function generateArtForSong(song, apiKey) {
+async function generateArtForSong(song) {
+  const session = await getSession();
+  if (!session?.access_token) throw new Error("Sign in to generate art");
   const prompt = buildArtPrompt(song);
   const ac = new AbortController();
   const timeout = setTimeout(() => ac.abort(), 20000);
   let res;
   try {
-    res = await fetch("https://riffbank-art.riffbank.workers.dev", {
+    res = await fetch(`${SUPABASE_URL}/functions/v1/generate-art`, {
       method: "POST",
-      headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      headers: {
+        "Authorization": `Bearer ${session.access_token}`,
+        "Content-Type": "application/json",
+        "apikey": SUPABASE_ANON_KEY,
+      },
       body: JSON.stringify({ input: { prompt, aspect_ratio: "1:1" } }),
       signal: ac.signal,
     });
@@ -7703,9 +8445,8 @@ async function generateArtForSong(song, apiKey) {
   let url = Array.isArray(data.output) ? data.output[0] : data.output;
   console.log("[ArtGen] Image URL:", url);
 
-  // Download image and upload to Google Drive for persistence
+  // Download image and upload to Supabase Storage for persistence
   try {
-    console.log("[ArtGen] Fetching image...");
     const imgAc = new AbortController();
     const imgTimeout = setTimeout(() => imgAc.abort(), 15000);
     let imgRes;
@@ -7714,30 +8455,22 @@ async function generateArtForSong(song, apiKey) {
     } finally {
       clearTimeout(imgTimeout);
     }
-    console.log("[ArtGen] Image fetch done:", imgRes.status);
     if (imgRes.ok) {
       const blob = await imgRes.blob();
-      console.log("[ArtGen] Uploading to Drive...");
-      const driveResult = await Promise.race([
-        gdriveUploadCoverArt({
-          blob,
-          project: song.project,
-          songTitle: song.title,
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("Drive upload timed out")), 15000)),
+      const coverResult = await Promise.race([
+        supabaseUploadCover({ blob, songId: song.id }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Cover upload timed out")), 15000)),
       ]);
-      console.log("[ArtGen] Drive upload result:", driveResult);
-      if (driveResult.success) {
-        song.coverDriveFileId = driveResult.driveFileId;
-        // Cache the blob locally so it persists across restarts
-        await putCoverBlob(driveResult.driveFileId, blob);
+      if (coverResult.success) {
+        song.coverPath = coverResult.coverPath;
+        await putCoverBlob(coverResult.coverPath, blob);
         const cachedUrl = URL.createObjectURL(blob);
-        coverUrlCache.set(driveResult.driveFileId, cachedUrl);
+        coverUrlCache.set(coverResult.coverPath, cachedUrl);
         url = cachedUrl;
       }
     }
   } catch (e) {
-    console.warn("Cover art Drive upload failed (art still saved as URL):", e);
+    console.warn("Cover art cloud upload failed (art still saved as URL):", e);
   }
 
   song.coverImageUrl = url;
@@ -7746,9 +8479,6 @@ async function generateArtForSong(song, apiKey) {
 
 async function startBulkGenArt(onlyMissing) {
   if (bulkArtState.running) { toast("Bulk art generation already in progress"); return; }
-
-  const apiKey = state.settings.replicateKey || "";
-  if (!apiKey) { toast("Add your Replicate API key first"); return; }
 
   const songs = onlyMissing
     ? state.songs.filter(s => !s.coverImageUrl)
@@ -7771,7 +8501,7 @@ async function startBulkGenArt(onlyMissing) {
 
   for (const song of songs) {
     try {
-      await generateArtForSong(song, apiKey);
+      await generateArtForSong(song);
       succeeded++;
     } catch (e) {
       console.error(`Art gen failed for "${song.title}":`, e);
@@ -7825,7 +8555,7 @@ function isIOSDevice(){
 
 function coverSvg(song, { lite = false } = {}) {
   const forceLite = lite || isIOSDevice();
-  const key = `${song.id}|${song.title}|${song.project}|${song.genre}|${song.coverImageUrl || ""}|${forceLite ? "lite" : "full"}`;
+  const key = `${song.id}|${song.title}|${song.project}|${song.genre}|${song.coverImageUrl || ""}|${song.userCoverImageUrl || ""}|${song.coverSource || "ai"}|${forceLite ? "lite" : "full"}`;
 
   if (generatingArtSongs.has(song.id)) {
     return `<div style="width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;background:linear-gradient(135deg,#1a1a2e,#16213e);border-radius:inherit;color:#888;font-size:13px;gap:8px">
@@ -7838,9 +8568,43 @@ function coverSvg(song, { lite = false } = {}) {
 
   if (coverCache.has(key)) return coverCache.get(key);
 
+  // User-uploaded cover takes priority when coverSource is "user"
+  if (song.coverSource === "user" && song.userCoverImageUrl) {
+    const errHandler = song.userCoverPath
+      ? ` onerror="this.onerror=null;window._refreshUserCoverFromCloud&&window._refreshUserCoverFromCloud('${escapeHtml(song.id)}','${escapeHtml(song.userCoverPath)}',this)"`
+      : ` onerror="this.onerror=null;window._clearBrokenUserCover&&window._clearBrokenUserCover('${escapeHtml(song.id)}',this)"`;
+
+    const img = `<img src="${escapeHtml(song.userCoverImageUrl)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;display:block" decoding="sync" alt=""${errHandler}>`;
+    coverCache.set(key, img);
+    return img;
+  }
+
+  // Resolve user cover from cache/cloud if path exists but URL doesn't
+  if (song.coverSource === "user" && song.userCoverPath && !song.userCoverImageUrl && !song._userCoverResolving) {
+    song._userCoverResolving = true;
+    (async () => {
+      let url = await getCoverBlobUrl(song.userCoverPath);
+      if (!url) {
+        const blob = await supabaseFetchCoverBlob(song.userCoverPath);
+        if (blob) {
+          await putCoverBlob(song.userCoverPath, blob);
+          url = URL.createObjectURL(blob);
+          coverUrlCache.set(song.userCoverPath, url);
+        }
+      }
+      song._userCoverResolving = false;
+      if (url) {
+        song.userCoverImageUrl = url;
+        coverCache.clear();
+        saveState();
+        render();
+      }
+    })().catch(() => { song._userCoverResolving = false; });
+  }
+
   if (song.coverImageUrl) {
-    const errHandler = song.coverDriveFileId
-      ? ` onerror="this.onerror=null;window._refreshCoverFromDrive&&window._refreshCoverFromDrive('${escapeHtml(song.id)}','${escapeHtml(song.coverDriveFileId)}',this)"`
+    const errHandler = song.coverPath
+      ? ` onerror="this.onerror=null;window._refreshCoverFromCloud&&window._refreshCoverFromCloud('${escapeHtml(song.id)}','${escapeHtml(song.coverPath)}',this)"`
       : ` onerror="this.onerror=null;window._clearBrokenCover&&window._clearBrokenCover('${escapeHtml(song.id)}',this)"`;
 
     const img = `<img src="${escapeHtml(song.coverImageUrl)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;display:block" decoding="sync" alt=""${errHandler}>`;
@@ -7848,19 +8612,17 @@ function coverSvg(song, { lite = false } = {}) {
     return img;
   }
 
-  // coverImageUrl is missing but Drive file exists — resolve from IDB cache or Drive
-  if (song.coverDriveFileId && !song._coverResolving) {
+  // coverImageUrl is missing but cloud path exists — resolve from IDB cache or Supabase
+  if (song.coverPath && !song._coverResolving) {
     song._coverResolving = true;
     (async () => {
-      // Try local IndexedDB cache first (no auth needed)
-      let url = await getCoverBlobUrl(song.coverDriveFileId);
-      // Fall back to fetching from Drive and caching
+      let url = await getCoverBlobUrl(song.coverPath);
       if (!url) {
-        const blob = await gdriveFetchBlob(song.coverDriveFileId);
+        const blob = await supabaseFetchCoverBlob(song.coverPath);
         if (blob) {
-          await putCoverBlob(song.coverDriveFileId, blob);
+          await putCoverBlob(song.coverPath, blob);
           url = URL.createObjectURL(blob);
-          coverUrlCache.set(song.coverDriveFileId, url);
+          coverUrlCache.set(song.coverPath, url);
         }
       }
       song._coverResolving = false;
@@ -8271,12 +9033,14 @@ function renderSongDetail(id) {
   const activeCheck = `<svg class="sdActiveCheck" viewBox="0 0 20 20" fill="none" width="14" height="14"><path d="M3.5 10.5l4.5 4.5 8.5-9" stroke="#a855f7" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
   const versionRows = versions.map((v, i) => {
+    const hasAudio = !!(v.fileId || v.localAudioId || v.audioPath || v.link);
+    const noAudioTag = hasAudio ? "" : `<span style="color:rgba(255,90,90,.8);font-size:11px;margin-left:6px">No audio</span>`;
     const sub = v.isActive
       ? `${activeCheck}<span style="color:#a855f7;font-weight:600">Active</span>${v.notes ? ` · ${escapeHtml(v.notes)}` : ""}`
       : `${escapeHtml(v.createdAt || "—")}${v.notes ? ` · ${escapeHtml(v.notes)}` : ""}`;
 
     return `
-      <div class="pdSongRow" data-vrow="${v.id}">
+      <div class="pdSongRow" data-vrow="${v.id}" ${hasAudio ? "" : `style="opacity:.5"`}>
         <span class="pdSongNum">${i + 1}</span>
         <div class="songThumb" aria-hidden="true">
           ${rowCover}
@@ -8284,7 +9048,7 @@ function renderSongDetail(id) {
         <div class="songMain">
           <div class="songTop">
             <div class="songTitleRow">
-              <div class="songTitle">${escapeHtml(v.label || "Version")}</div>
+              <div class="songTitle">${escapeHtml(v.label || "Version")}${noAudioTag}</div>
             </div>
             <button class="songMore" data-vmore="${v.id}" aria-label="Version menu">&#x22EF;</button>
           </div>
@@ -8703,10 +9467,9 @@ function renderVersionDetail(songId, versionId) {
   try { document.body.scrollTop = 0; } catch {}
   requestAnimationFrame(() => { if (screens.home) screens.home.scrollTop = 0; });
 
-  const hasPlayable = !!(v.link || v.fileId || v.localAudioId || v.driveFileId);
+  const hasPlayable = !!(v.link || v.fileId || v.localAudioId || v.audioPath);
   const hasLocal = !!(v.fileId || v.localAudioId);
-  const hasDrive = !!v.driveFileId;
-  const driveConnected = gdriveIsConnected();
+  const hasCloud = !!v.audioPath;
 
   const heroCover = coverSvg(song);
 
@@ -8767,7 +9530,7 @@ function renderVersionDetail(songId, versionId) {
       </div>
 
       <div class="vdAudioSection">
-        ${hasLocal || hasDrive || v.link ? `
+        ${hasLocal || hasCloud || v.link ? `
           <div class="vdAudioCard">
             <div class="vdAudioIcon">
               <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
@@ -8777,7 +9540,7 @@ function renderVersionDetail(songId, versionId) {
               <div class="vdAudioMeta">
                 ${v.fileSize ? `${(v.fileSize/1024/1024).toFixed(1)} MB` : ""}
                 ${hasLocal ? `<span class="vdAudioBadge vdBadgeLocal">Local</span>` : ""}
-                ${hasDrive ? `<span class="vdAudioBadge vdBadgeDrive">Drive</span>` : ""}
+                ${hasCloud ? `<span class="vdAudioBadge vdBadgeDrive">Cloud</span>` : ""}
                 ${v.link ? `<span class="vdAudioBadge vdBadgeLink">URL</span>` : ""}
               </div>
             </div>
@@ -8786,9 +9549,8 @@ function renderVersionDetail(songId, versionId) {
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
               </button>
               ${hasLocal ? `<button class="vdAudioActionBtn vdAudioDanger" id="clearLocalBtn" aria-label="Remove local"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>` : ""}
-              ${hasLocal && driveConnected && !hasDrive ? `<button class="vdAudioActionBtn vdAudioCloud" id="uploadToDriveBtn" aria-label="Upload to Drive"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></button>` : ""}
+              ${hasLocal && !hasCloud ? `<button class="vdAudioActionBtn vdAudioCloud" id="uploadToCloudBtn" aria-label="Upload to cloud"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></button>` : ""}
               ${v.link ? `<button class="vdAudioActionBtn" id="openLinkBtn" aria-label="Open link"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></button>` : ""}
-              ${hasDrive && v.driveWebViewLink ? `<a href="${escapeHtml(v.driveWebViewLink)}" target="_blank" class="vdAudioActionBtn" aria-label="View on Drive"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>` : ""}
             </div>
           </div>
         ` : `
@@ -8818,7 +9580,7 @@ function renderVersionDetail(songId, versionId) {
     renderVersionDetail(songId, versionId);
   });
 
-  // Import audio (local file + Drive)
+  // Import audio (local + cloud)
   $("#importAudioBtn")?.addEventListener("click", async () => {
     try {
       const file = await pickAudioFile();
@@ -8826,7 +9588,7 @@ function renderVersionDetail(songId, versionId) {
 
       const id = uid();
 
-      // Always store locally first (fast, offline)
+      // Store locally first (fast, offline)
       await audioPut({
         id,
         name: file.name || "audio",
@@ -8843,36 +9605,31 @@ function renderVersionDetail(songId, versionId) {
 
       song.updatedAt = nowStamp();
       saveState();
-      toast("Imported locally ✅");
+      toast("Imported locally");
 
-      // Also upload to Google Drive (if connected)
-      if (gdriveIsConnected()) {
-        toast("Uploading to Drive… ☁️");
+      // Upload to Supabase Storage in background (compress large files first)
+      toast("Syncing to cloud…");
+      const compressed = await compressAudioForUpload(file);
+      const result = await supabaseUploadAudio({
+        blob: new File([compressed], file.name || "audio", { type: compressed.type || file.type || "audio/*" }),
+        songId: song.id,
+        versionId: v.id,
+        fileName: file.name || "audio",
+      });
 
-        const suggested = suggestedFileName(song, file.name);
-
-        const result = await gdriveUploadAudio({
-          file,
-          fileName: suggested,
-          project: song.project,
-          songTitle: song.title,
-        });
-
-        if (result.success) {
-          v.driveFileId = result.driveFileId;
-          v.driveWebViewLink = result.driveWebViewLink || "";
-          saveState();
-          toast("Synced to Drive ✅ ☁️");
-        } else {
-          console.warn("Drive upload failed:", result.error);
-          toast("Local saved, Drive failed 😅");
-        }
+      if (result.success) {
+        v.audioPath = result.audioPath;
+        saveState();
+        toast("Synced to cloud");
+      } else {
+        console.warn("Cloud upload failed:", result.error);
+        toast("Local saved, cloud sync failed");
       }
 
       renderVersionDetail(songId, versionId);
     } catch (err) {
       console.error(err);
-      toast("Import failed 😭");
+      toast("Import failed");
     }
   });
 
@@ -8908,9 +9665,8 @@ function renderVersionDetail(songId, versionId) {
   $("#queueThis")?.addEventListener("click", () => addToQueue(songId, versionId));
 
   // Upload to Drive (manual push for local-only files)
-  $("#uploadToDriveBtn")?.addEventListener("click", async () => {
-    if (!gdriveIsConnected()) return toast("Connect Drive first in Settings ⚙️");
-
+  // Upload to Cloud (manual push for local-only files)
+  $("#uploadToCloudBtn")?.addEventListener("click", async () => {
     let blob = null;
     let fileName = v.fileName || v.originalFileName || "audio.wav";
 
@@ -8922,26 +9678,25 @@ function renderVersionDetail(songId, versionId) {
       if (rec?.blob) blob = rec.blob;
     }
 
-    if (!blob) return toast("No local file to upload 😅");
+    if (!blob) return toast("No local file to upload");
 
-    toast("Uploading to Drive… ☁️");
-    const suggested = suggestedFileName(song, fileName);
-    const result = await gdriveUploadAudio({
-      file: blob,
-      fileName: suggested,
-      project: song.project,
-      songTitle: song.title,
+    toast("Compressing & uploading…");
+    const compressed = await compressAudioForUpload(blob);
+    const result = await supabaseUploadAudio({
+      blob: new File([compressed], fileName, { type: compressed.type || blob.type || "audio/*" }),
+      songId: song.id,
+      versionId: v.id,
+      fileName,
     });
 
     if (result.success) {
-      v.driveFileId = result.driveFileId;
-      v.driveWebViewLink = result.driveWebViewLink || "";
+      v.audioPath = result.audioPath;
       song.updatedAt = nowStamp();
       saveState();
-      toast("Uploaded to Drive ✅ ☁️");
+      toast("Uploaded to cloud");
       renderVersionDetail(songId, versionId);
     } else {
-      toast("Upload failed: " + (result.error || "unknown") + " 😅");
+      toast("Upload failed: " + (result.error || "unknown"));
     }
   });
 
@@ -8961,9 +9716,9 @@ function renderVersionDetail(songId, versionId) {
   $("#deleteVersionBtn")?.addEventListener("click", async () => {
     if (!confirm("Delete this version?")) return;
 
-    // Also delete from Drive if synced
-    if (v.driveFileId && gdriveIsConnected()) {
-      try { await gdriveDeleteFile(v.driveFileId); } catch {}
+    // Also delete from cloud storage if synced
+    if (v.audioPath) {
+      supabaseDeleteAudio(v.audioPath).catch(() => {});
     }
 
     const wasActive = v.isActive;
@@ -9694,113 +10449,54 @@ $("#npRepeat")?.addEventListener("click", () => {
 function renderSettings() {
   setHeader("Settings");
 
-  const driveConnected = gdriveIsConnected();
-  const driveCfg = gdriveGetConfig();
-
   activeScreenEl.innerHTML = `
     <div class="card">
       <h2>Settings</h2>
 
       <div style="
-        background: ${driveConnected ? "rgba(78,205,196,.08)" : "rgba(255,255,255,.04)"};
-        border: 1px solid ${driveConnected ? "rgba(78,205,196,.25)" : "rgba(255,255,255,.08)"};
+        background: rgba(78,205,196,.08);
+        border: 1px solid rgba(78,205,196,.25);
         border-radius: 12px;
         padding: 16px;
         margin-bottom: 16px;
       ">
         <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="${driveConnected ? "#4ecdc4" : "currentColor"}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12A10 10 0 1 1 12 2"/><path d="M22 2L12 12"/><path d="M16 2h6v6"/></svg>
-          <span style="font-weight:900; font-size:15px;">Google Drive</span>
-          ${driveConnected
-            ? `<span style="
-                background: rgba(78,205,196,.15);
-                color: #4ecdc4;
-                font-size: 11px;
-                font-weight: 700;
-                padding: 2px 8px;
-                border-radius: 6px;
-                margin-left: auto;
-              ">Connected</span>`
-            : `<span style="
-                background: rgba(255,255,255,.06);
-                color: rgba(255,255,255,.4);
-                font-size: 11px;
-                font-weight: 700;
-                padding: 2px 8px;
-                border-radius: 6px;
-                margin-left: auto;
-              ">Not connected</span>`
-          }
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#4ecdc4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+          <span style="font-weight:900; font-size:15px;">Cloud Sync</span>
+          <span style="
+            background: rgba(78,205,196,.15);
+            color: #4ecdc4;
+            font-size: 11px;
+            font-weight: 700;
+            padding: 2px 8px;
+            border-radius: 6px;
+            margin-left: auto;
+          ">Connected</span>
         </div>
 
-        ${driveConnected ? `
-          <div class="small" style="margin-bottom:6px">
-            Signed in as <b>${escapeHtml(driveCfg.userEmail || "Google account")}</b>
-          </div>
-          <div class="small" style="margin-bottom:10px; opacity:.6">
-            Home folder: <b>${escapeHtml(driveCfg.homeFolderName || "RiffBank")}</b><br>
-            Structure: <code style="font-size:11px">${escapeHtml(driveCfg.homeFolderName)}/Project/Song/Versions/</code>
-          </div>
-          <div class="small" style="margin-bottom:10px; opacity:.7">
-            Audio imports are automatically uploaded to Drive. Your files also stay on this device for offline playback.
-          </div>
-          <div class="row" style="gap:10px">
-            <button id="driveOpenFolder" class="btn" style="flex:1">Open in Drive ↗</button>
-            <button id="driveDisconnect" class="btn" style="flex:1; background: rgba(255,92,119,.08); border-color: rgba(255,92,119,.2); color: #ff5c77;">Disconnect</button>
-          </div>
-          <div class="row" style="gap:10px; margin-top:10px">
-            <button id="driveSyncPush" class="btn" style="flex:1">Push state to Drive ⬆</button>
-            <button id="driveSyncPull" class="btn" style="flex:1">Pull state from Drive ⬇</button>
-          </div>
-          <div class="row" style="gap:10px; margin-top:10px">
-            <button id="driveRebuild" class="btn" style="flex:1; background: rgba(255,200,50,.08); border-color: rgba(255,200,50,.2); color: #ffc832;">Rebuild from Drive folders 🔄</button>
-          </div>
-          <div class="small" style="margin-top:6px; opacity:.5">
-            Rebuild scans your Drive folder structure and recreates song metadata from the files it finds.
-          </div>
-        ` : `
-          <div class="small" style="margin-bottom:12px; opacity:.7">
-            Connect your Google Drive to automatically back up audio files to the cloud.
-            RiffBank creates organized folders for each project and song.
-          </div>
-
-          <button id="drivePickBtn" class="btn primary" style="width:100%; margin-bottom:10px">
-            Choose existing folder
-          </button>
-          <div class="small" style="margin-bottom:14px; opacity:.5; text-align:center">
-            Browse your Drive and pick a folder to use as RiffBank's home
-          </div>
-
-          <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px">
-            <div style="flex:1; height:1px; background:rgba(255,255,255,.1)"></div>
-            <div style="font-size:12px; opacity:.4">or</div>
-            <div style="flex:1; height:1px; background:rgba(255,255,255,.1)"></div>
-          </div>
-
-          <div class="label" style="margin-bottom:4px">Create a new folder</div>
-          <div class="row" style="gap:10px">
-            <input id="driveNewName" type="text" value="${escapeHtml(state.settings.driveRoot || "RiffBank")}" placeholder="e.g. RiffBank" style="flex:1" />
-            <button id="driveCreateBtn" class="btn">Create</button>
-          </div>
-          <div class="small" style="margin-top:4px; opacity:.5">
-            Creates a new folder at the root of your Google Drive
-          </div>
-        `}
+        <div class="small" style="margin-bottom:10px; opacity:.7">
+          Audio imports are automatically synced to the cloud. Files also stay on this device for offline playback.
+        </div>
+        <div class="row" style="gap:10px">
+          <button id="cloudSyncPush" class="btn" style="flex:1">Push to cloud</button>
+          <button id="cloudSyncPull" class="btn" style="flex:1">Pull from cloud</button>
+        </div>
+        <div class="row" style="gap:10px; margin-top:10px">
+          <button id="cloudCacheAll" class="btn" style="flex:1">Cache all audio locally</button>
+          <button id="cloudRecoverAudio" class="btn" style="flex:1; background: rgba(255,184,77,.08); border-color: rgba(255,184,77,.2); color: #ffb84d;">Recover Audio</button>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <button id="debugRecoveryBtn" class="btn" style="flex:1; background: rgba(150,150,150,.06); border-color: rgba(150,150,150,.15); color: #888; font-size:12px;">Debug Recovery</button>
+        </div>
+        <div class="row" style="gap:10px; margin-top:10px">
+          <button id="cloudSignOut" class="btn" style="flex:1; background: rgba(255,92,119,.08); border-color: rgba(255,92,119,.2); color: #ff5c77;">Sign Out</button>
+        </div>
       </div>
 
       <div class="hr"></div>
-
-      <div class="label">Drive root folder name</div>
-      <input id="driveRoot" type="text" value="${escapeHtml(state.settings.driveRoot || "RiffBank")}" />
-      <div class="small">Used to suggest where files should live in Drive/iCloud/etc.</div>
-
-      <div class="hr"></div>
       <h2>AI Art</h2>
-      <div class="label">Replicate API key</div>
-      <input id="replicateKey" type="password" value="${escapeHtml(state.settings.replicateKey || "")}" placeholder="r8_..." />
-      <div class="small">Free at replicate.com — used for cover art generation (Imagen 4)</div>
 
-      <div class="row" style="gap:10px; margin-top:14px">
+      <div class="row" style="gap:10px">
         <button id="genMissingArt" class="btn" style="flex:1" ${bulkArtState.running ? "disabled" : ""}>${bulkArtState.running ? `${bulkArtState.done}/${bulkArtState.total} done…` : "Generate Missing Art"}</button>
         <button id="regenAllArt" class="btn" style="flex:1; background: rgba(255,200,50,.08); border-color: rgba(255,200,50,.2); color: #ffc832;" ${bulkArtState.running ? "disabled" : ""}>${bulkArtState.running ? `${bulkArtState.done}/${bulkArtState.total} done…` : "Regenerate All Art"}</button>
       </div>
@@ -9840,7 +10536,7 @@ function renderSettings() {
       <div class="small" style="margin-top:4px">
         Sync Debug shows colored dots on song cards:
         <span style="color:#4ade80">●</span> local audio
-        <span style="color:#facc15">●</span> Drive-only
+        <span style="color:#facc15">●</span> cloud-only
         <span style="color:#f87171">●</span> no audio
       </div>
 
@@ -9851,147 +10547,109 @@ function renderSettings() {
     </div>
   `;
 
-  // Google Drive: Pick existing folder
-  $("#drivePickBtn")?.addEventListener("click", async () => {
-    toast("Connecting to Google Drive… ☁️");
-
-    const result = await gdriveConnect();
-
-    if (result.success) {
-      state.settings.driveRoot = result.homeFolderName || "RiffBank";
-      saveState();
-      toast("Connected to Google Drive ✅");
-      renderSettings();
-    } else {
-      toast(result.error || "Connection failed 😅");
-    }
+  // Cloud: Push state now
+  $("#cloudSyncPush")?.addEventListener("click", async () => {
+    toast("Pushing to cloud…");
+    const ok = await supabasePushState(state);
+    toast(ok ? "Pushed to cloud" : "Push failed");
   });
 
-  // Google Drive: Create new folder
-  $("#driveCreateBtn")?.addEventListener("click", async () => {
-    const folderName = ($("#driveNewName")?.value || "").trim() || "RiffBank";
-    toast("Connecting to Google Drive… ☁️");
+  // Cloud: Pull state now
+  $("#cloudSyncPull")?.addEventListener("click", async () => {
+    toast("Pulling from cloud…");
+    const cloudState = await supabasePullState();
+    if (cloudState?.songs) {
+      if (!confirm(`Found ${cloudState.songs.length} songs in cloud. Replace local data?`)) return;
 
-    const result = await gdriveConnectNewFolder(folderName);
+      // Build lookup of local versions' audio refs (fileId, audioPath, localAudioId)
+      // so we can preserve them — cloud state has fileId:null by design
+      const localAudioMap = new Map();
+      for (const s of (state.songs || [])) {
+        for (const v of (s.versions || [])) {
+          if (v.fileId || v.audioPath || v.localAudioId) {
+            localAudioMap.set(v.id, {
+              fileId: v.fileId, audioPath: v.audioPath, localAudioId: v.localAudioId,
+              fileName: v.fileName, fileType: v.fileType, fileSize: v.fileSize,
+            });
+          }
+        }
+      }
+      // Diagnostic: show what we have before merge
+      const localCount = localAudioMap.size;
+      const cloudVersionIds = [];
+      const localVersionIds = [...localAudioMap.keys()];
+      for (const cs of cloudState.songs) {
+        for (const cv of (cs.versions || [])) cloudVersionIds.push(cv.id);
+      }
+      const idOverlap = cloudVersionIds.filter(id => localAudioMap.has(id)).length;
 
-    if (result.success) {
-      state.settings.driveRoot = folderName;
-      saveState();
-      toast("Connected to Google Drive ✅");
-      renderSettings();
-    } else {
-      toast(result.error || "Connection failed 😅");
-    }
-  });
+      // Restore local audio refs into cloud versions
+      let restored = 0;
+      for (const cs of cloudState.songs) {
+        for (const cv of (cs.versions || [])) {
+          const local = localAudioMap.get(cv.id);
+          if (!local) continue;
+          if (!cv.fileId && local.fileId) {
+            cv.fileId = local.fileId;
+            cv.fileName = cv.fileName || local.fileName;
+            cv.fileType = cv.fileType || local.fileType;
+            cv.fileSize = cv.fileSize || local.fileSize;
+            restored++;
+          }
+          if (!cv.audioPath && local.audioPath) { cv.audioPath = local.audioPath; restored++; }
+          if (!cv.localAudioId && local.localAudioId) { cv.localAudioId = local.localAudioId; restored++; }
+        }
+      }
 
-  // Google Drive: Disconnect
-  $("#driveDisconnect")?.addEventListener("click", () => {
-    if (!confirm("Disconnect from Google Drive? Your files on Drive stay — RiffBank just won't sync new uploads.")) return;
-    gdriveDisconnect();
-    toast("Disconnected 🔌");
-    renderSettings();
-  });
-
-  // Google Drive: Open home folder
-  $("#driveOpenFolder")?.addEventListener("click", () => {
-    const folderId = driveCfg.homeFolderId;
-    if (folderId) {
-      window.open(`https://drive.google.com/drive/folders/${folderId}`, "_blank");
-    }
-  });
-
-  // Google Drive: Push state now
-  $("#driveSyncPush")?.addEventListener("click", async () => {
-    toast("Pushing state to Drive… ☁️");
-    const ok = await gdriveSyncStateNow(state);
-    if (ok) {
-      toast("State pushed to Drive ✅");
-    } else {
-      toast("Push failed — try reconnecting 😅");
-    }
-  });
-
-  // Google Drive: Pull state now
-  $("#driveSyncPull")?.addEventListener("click", async () => {
-    toast("Pulling state from Drive… ☁️");
-    const driveState = await gdrivePullState();
-    if (driveState && driveState.songs) {
-      if (!confirm(`Found ${driveState.songs.length} songs on Drive. Replace local data?`)) return;
-      state = driveState;
+      state = cloudState;
       normalizeState();
+
+      // Discover audio files in Supabase Storage for versions missing audio_path
+      const missingCount = state.songs.reduce((n, s) => n + (s.versions || []).filter(v => !v.audioPath).length, 0);
+      toast(`Discovering audio for ${missingCount} versions…`);
+      const discovered = await supabaseDiscoverAudioPaths(state.songs);
+      toast(`Found ${discovered.length}/${missingCount} audio files in storage`);
+
       localStorage.setItem(LS_KEY, JSON.stringify(state));
-      toast("Synced from Drive — caching audio…");
+      await restoreCoverUrlsFromCache();
+      toast("Caching audio…");
       render();
-      await cacheAllDriveAudio();
+
+      // Push back so discovered audioPath values make it to the DB
+      await supabasePushState(state).catch(console.warn);
+      await cacheAllCloudAudio();
     } else {
-      toast("No state found on Drive (or token expired) 😅");
+      toast("No data found in cloud");
     }
   });
 
-  // Google Drive: Rebuild from folder structure
-  $("#driveRebuild")?.addEventListener("click", async () => {
-    toast("Scanning Drive folders… 🔄");
-    const songs = await gdriveRebuildFromFolders();
-
-    if (!songs || songs.length === 0) {
-      toast("No songs found in Drive folders 😅");
-      return;
-    }
-
-    if (!confirm(`Found ${songs.length} songs from Drive folders. Replace local library?`)) return;
-
-    // Merge cover art from saved state JSON for songs missing cover.jpg on disk
-    try {
-      const driveState = await gdrivePullStateSilent();
-      if (driveState && driveState.songs) {
-        for (const song of songs) {
-          if (song.coverDriveFileId) continue; // folder scan found cover.jpg
-          const match = driveState.songs.find(
-            s => s.title === song.title && s.project === song.project
-          );
-          if (match) {
-            if (match.coverDriveFileId) song.coverDriveFileId = match.coverDriveFileId;
-            if (match.coverImageUrl) song.coverImageUrl = match.coverImageUrl;
-          }
-        }
-      }
-    } catch (e) {
-      console.warn("Could not merge cover art from state JSON:", e);
-    }
-
-    // Resolve cover art Drive IDs — try local cache first, then fetch & cache
-    for (const song of songs) {
-      if (song.coverDriveFileId) {
-        let url = await getCoverBlobUrl(song.coverDriveFileId);
-        if (!url) {
-          const blob = await gdriveFetchBlob(song.coverDriveFileId);
-          if (blob) {
-            await putCoverBlob(song.coverDriveFileId, blob);
-            url = URL.createObjectURL(blob);
-            coverUrlCache.set(song.coverDriveFileId, url);
-          }
-        }
-        if (url) song.coverImageUrl = url;
-      }
-    }
-
-    state.songs = songs;
-    normalizeState();
-    saveState();
-    toast(`Rebuilt ${songs.length} songs — caching audio…`);
-    render();
-    await cacheAllDriveAudio();
+  // Cloud: Cache all audio locally
+  $("#cloudCacheAll")?.addEventListener("click", async () => {
+    await cacheAllCloudAudio();
   });
 
-  // Existing settings
+  // Cloud: Recover audio — scan IndexedDB, re-link, re-upload
+  $("#cloudRecoverAudio")?.addEventListener("click", async () => {
+    await recoverAndUploadAudio();
+  });
+
+  // Debug recovery
+  $("#debugRecoveryBtn")?.addEventListener("click", () => debugRecovery());
+
+  // Cloud: Sign out
+  $("#cloudSignOut")?.addEventListener("click", async () => {
+    if (!confirm("Sign out? Your local data stays on this device.")) return;
+    await signOut();
+    window.location.reload();
+  });
+
+  // Save settings
   $("#saveSettings").addEventListener("click", () => {
-    state.settings.driveRoot = $("#driveRoot").value.trim() || "RiffBank";
     state.settings.defaultProject = $("#defProject").value.trim() || "";
     state.settings.defaultGenre = $("#defGenre").value.trim() || "";
     state.settings.defaultSprint = $("#defSprint").value.trim() || "";
-    state.settings.replicateKey = $("#replicateKey").value.trim() || "";
     saveState();
-    toast("Saved ✅");
+    toast("Saved");
   });
 
   // Bulk art generation — sync buttons to global bulkArtState
@@ -10021,7 +10679,7 @@ function renderSettings() {
     const reds = results.filter(r => r.status === "red");
     const yellows = results.filter(r => r.status === "yellow");
     const greens = results.length - reds.length - yellows.length;
-    let msg = `${results.length} versions: ${greens} local, ${yellows.length} Drive-only, ${reds.length} broken`;
+    let msg = `${results.length} versions: ${greens} synced, ${yellows.length} local only, ${reds.length} no audio`;
     if (reds.length) msg += `\n\nBroken:\n${reds.map(r => `• ${r.song} / ${r.version}`).join("\n")}`;
     alert(msg);
   });
