@@ -129,27 +129,138 @@ export function gdriveLoadGIS() {
 
   // Load Google Picker API
   const pickerPromise = new Promise((resolve) => {
-    if (_pickerLoaded) return resolve();
+    if (_pickerLoaded && window.google?.picker) return resolve();
+
+    function loadPickerModule() {
+      if (!window.gapi) {
+        // gapi script tag exists but hasn't loaded yet — wait for it
+        const existing = document.querySelector('script[src*="apis.google.com/js/api.js"]');
+        if (existing) {
+          existing.addEventListener("load", () => {
+            window.gapi.load("picker", () => { _pickerLoaded = true; resolve(); });
+          }, { once: true });
+          return;
+        }
+        return resolve();
+      }
+      window.gapi.load("picker", () => {
+        _pickerLoaded = true;
+        resolve();
+      });
+    }
+
+    // Script already in DOM — init the picker module
     if (document.querySelector('script[src*="apis.google.com/js/api.js"]')) {
-      _pickerLoaded = true;
-      return resolve();
+      loadPickerModule();
+      return;
     }
 
     const script = document.createElement("script");
     script.src = "https://apis.google.com/js/api.js";
     script.async = true;
     script.defer = true;
-    script.onload = () => {
-      window.gapi.load("picker", () => {
-        _pickerLoaded = true;
-        resolve();
-      });
-    };
+    script.onload = loadPickerModule;
     script.onerror = () => { console.warn("RiffBank: Failed to load Picker API"); resolve(); };
     document.head.appendChild(script);
   });
 
   return Promise.all([gisPromise, pickerPromise]);
+}
+
+/**
+ * Sign in to Google only (no folder picker).
+ * Returns { success, token, email } or { success: false, error }
+ */
+export async function gdriveSignIn() {
+  // If we already have a valid token, reuse it instead of re-requesting
+  if (_accessToken && Date.now() < _tokenExpiry) {
+    let email = "";
+    try {
+      const res = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+        headers: { Authorization: `Bearer ${_accessToken}` },
+      });
+      const info = await res.json();
+      email = info.email || "";
+    } catch {}
+    return { success: true, token: _accessToken, email };
+  }
+
+  if (!_gisLoaded) await gdriveLoadGIS();
+
+  if (!window.google?.accounts?.oauth2) {
+    return { success: false, error: "Google Identity Services not loaded. Check your internet connection." };
+  }
+
+  const token = await _requestToken();
+  if (!token) {
+    return { success: false, error: "Sign-in cancelled or failed." };
+  }
+
+  let email = "";
+  try {
+    const res = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const info = await res.json();
+    email = info.email || "";
+  } catch {}
+
+  return { success: true, token, email };
+}
+
+/**
+ * Check if a "RiffBank" folder already exists at the user's Drive root.
+ * Call after gdriveSignIn(). Returns { found, folderId } or { found: false }.
+ */
+export async function gdriveFindExisting() {
+  const token = await _ensureToken();
+  if (!token) return { found: false };
+
+  const folderId = await _findFolder("RiffBank", "root");
+  return folderId ? { found: true, folderId } : { found: false };
+}
+
+/**
+ * Connect to an existing folder by ID (skip the picker).
+ * Returns { success, homeFolderId, homeFolderName } or { success: false, error }
+ */
+export async function gdriveConnectToFolder(folderId, folderName, email = "") {
+  if (!folderId) return { success: false, error: "No folder ID." };
+
+  _config.connected = true;
+  _config.homeFolderId = folderId;
+  _config.homeFolderName = folderName;
+  _config.userEmail = email;
+  _config.folderCache = _folderCache;
+  _saveConfig(_config);
+
+  return { success: true, homeFolderId: folderId, homeFolderName: folderName };
+}
+
+/**
+ * Open folder picker and save as home folder (call after gdriveSignIn).
+ * Returns { success, homeFolderId, homeFolderName } or { success: false, error }
+ */
+export async function gdrivePickHome(email = "") {
+  const token = await _ensureToken();
+  if (!token) return { success: false, error: "Not signed in." };
+
+  // Ensure picker module is loaded
+  if (!_pickerLoaded || !window.google?.picker) {
+    await gdriveLoadGIS();
+  }
+
+  const folder = await _pickFolder(token);
+  if (!folder) return { success: false, error: "No folder selected." };
+
+  _config.connected = true;
+  _config.homeFolderId = folder.id;
+  _config.homeFolderName = folder.name;
+  _config.userEmail = email;
+  _config.folderCache = _folderCache;
+  _saveConfig(_config);
+
+  return { success: true, homeFolderId: folder.id, homeFolderName: folder.name };
 }
 
 /**
@@ -883,8 +994,13 @@ function _sanitize(name) {
 
 /**
  * Request an access token via GIS popup.
+ * Tries silent (prompt:"") first; if that hangs, retries with consent prompt.
  */
 function _requestToken() {
+  return _requestTokenWithPrompt("");
+}
+
+function _requestTokenWithPrompt(promptMode) {
   return new Promise((resolve) => {
     if (!window.google?.accounts?.oauth2) return resolve(null);
 
@@ -909,8 +1025,28 @@ function _requestToken() {
       });
     }
 
-    _tokenResolve = resolve;
-    _tokenClient.requestAccessToken({ prompt: "" });
+    // Timeout: if silent prompt hangs, retry with explicit consent
+    let settled = false;
+    let timer = null;
+    if (promptMode === "") {
+      timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          _tokenResolve = null;
+          console.warn("Silent token request timed out — retrying with consent prompt");
+          _requestTokenWithPrompt("consent").then(resolve);
+        }
+      }, 3000);
+    }
+
+    _tokenResolve = (token) => {
+      if (!settled) {
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve(token);
+      }
+    };
+    _tokenClient.requestAccessToken({ prompt: promptMode });
   });
 }
 

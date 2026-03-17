@@ -23,7 +23,7 @@
   <link rel="stylesheet" href="./styles.css" />
 </head>
 
-<body>
+<body class="splashing">
   <!-- Global audio element -->
   <audio id="globalAudio" playsinline preload="metadata"></audio>
 
@@ -106,10 +106,13 @@
       <div id="back-peek"></div>
       <div id="screen-home" class="screen screen--home is-active"></div>
       <div id="screen-songs" class="screen screen--songs"></div>
+      <div id="screen-song-detail" class="screen screen--song-detail"></div>
+      <div id="screen-version-detail" class="screen screen--version-detail"></div>
       <div id="screen-player" class="screen screen--player"></div>
       <div id="screen-settings" class="screen screen--settings"></div>
       <div id="screen-collab" class="screen screen--collab"></div>
       <div id="screen-drawer" class="screen screen--drawer"></div>
+      <div id="screen-project-detail" class="screen screen--project-detail"></div>
     </main>
 
     <!-- Create bottom sheet -->
@@ -163,9 +166,7 @@
       </button>
 
       <button class="navBtn salNavBtn" aria-label="Sal">
-        <span class="navIcon" aria-hidden="true">
-          <img src="./sal.png" alt="Sal" class="salNavImg">
-        </span>
+        <span class="navIcon salNavIcon" aria-hidden="true"></span>
         <span class="navLabel">Sal</span>
       </button>
     </nav>

@@ -9,20 +9,33 @@
 
 window.onerror = (m, src, line, col) => alert(`JS ERROR:\n${m}\n${line}:${col}`);
 
-// Dev toggle: skip splash animation
+// Dev toggles: skip splash / welcome screen
  const DISABLE_SPLASH = true;
+ const DISABLE_WELCOME = true;
+
+// Debug toggle: highlight sync status on song cards
+// Toggle via console: toggleSyncDebug()
+window.RIFFBANK_DEBUG_SYNC = false;
+window.toggleSyncDebug = () => {
+  window.RIFFBANK_DEBUG_SYNC = !window.RIFFBANK_DEBUG_SYNC;
+  console.log(`[RiffBank] Sync debug ${window.RIFFBANK_DEBUG_SYNC ? "ON" : "OFF"}`);
+  render();
+};
 
 // console.log("RIFFBANK APP.JS LOADED ✅", new Date().toISOString());
 // alert("RIFFBANK APP.JS LOADED ✅ " + new Date().toISOString());
 
 import { $ } from "./ui/dom.js";
-import { runSplashSequence } from "./splash/splash.js";
+import { runSplashSequence, replaySplash } from "./splash/splash.js";
+import { supabase, signUp, signIn, signOut, getSession, onAuthChange } from "./supabase.js";
 import {
   gdriveLoadGIS,
   gdriveIsConnected,
   gdriveHasValidToken,
   gdriveGetConfig,
   gdriveConnect,
+  gdriveSignIn,
+  gdrivePickHome,
   gdriveConnectNewFolder,
   gdriveDisconnect,
   gdriveUploadAudio,
@@ -34,6 +47,8 @@ import {
   gdrivePullStateSilent,
   gdriveRebuildFromFolders,
   gdriveUploadCoverArt,
+  gdriveFindExisting,
+  gdriveConnectToFolder,
 } from "./gdrive.js";
 
 const LS_KEY = "riffbank_v1";
@@ -49,6 +64,7 @@ let splashAlreadyRan = false;
 // ---------------------
 let playerFilter = "all"; // all | playlists | projects | releases
 let playerSort = "recent"; // recent | title
+let playerQuery = "";
 let playerQueue = []; // array of { songId, versionId }
 let sheetState = null; // { songId, versionId }
 let lastTabBeforeFullPlayer = null;
@@ -103,10 +119,13 @@ if (!view) {
 const screens = {
   home: document.getElementById("screen-home"),
   songs: document.getElementById("screen-songs"),
+  songDetail: document.getElementById("screen-song-detail"),
+  versionDetail: document.getElementById("screen-version-detail"),
   player: document.getElementById("screen-player"),
   settings: document.getElementById("screen-settings"),
   collab: document.getElementById("screen-collab"),
   drawer: document.getElementById("screen-drawer"),
+  projectDetail: document.getElementById("screen-project-detail"),
 };
 
 // ---------------------
@@ -125,8 +144,11 @@ class Nav {
     this.paddingStack = []; // computed padding at capture time
     this.tbRectStack = [];  // topbar rect at capture time
 
+    this.appStack = [];     // full-app captures for new transition system
+
     this.pendingBackState = null;
     this._isBackNav = false;
+    this._transitionActive = false;
     this._restoredScrollTop = 0;
 
     // Snapshot state (captured at render() time, before DOM mutations)
@@ -139,10 +161,6 @@ class Nav {
     this.topbarRect = null;
     this.prevState = null;
 
-    // Swipe overlay references
-    this.swipeAceEl = null;
-    this.swipeQueenEl = null;
-
     this.ACE_PARALLAX = 30;
   }
 
@@ -151,8 +169,15 @@ class Nav {
   // Capture current screen so back transitions can show it as the ace.
   // Call at the start of render() before any DOM mutations.
   snapshot(screenEl) {
+    if (this._transitionActive) return; // slideTransition handles captures
     if (!screenEl?.innerHTML) return;
-    this.peekNode = screenEl.cloneNode(true);
+    this.peekNode = this._cloneDeep(screenEl);
+    // Strip touch artifacts so snapshot shows natural (untouched) state
+    this.peekNode.querySelectorAll(".hCard.is-touched").forEach(c => c.classList.remove("is-touched"));
+    this.peekNode.querySelectorAll(".hDarken").forEach(d => d.style.opacity = 0);
+    this.peekNode.querySelectorAll(".hArt").forEach(a => { a.style.transform = ""; a.style.scale = ""; });
+    // Bake current animation state into inline styles so clones don't restart from keyframe 0%
+    this._freezeAnimations(screenEl, this.peekNode);
     const r = screenEl.getBoundingClientRect();
     this.aceViewTop = r.top || 0;
     this.aceScrollTop = screenEl.scrollTop || 0;
@@ -162,7 +187,49 @@ class Nav {
     const tb = document.querySelector(".topbar");
     const tbRect = tb?.getBoundingClientRect();
     const tbVisible = tbRect && tbRect.height > 0;
-    this.topbarHTML = tbVisible ? (tb?.outerHTML || "") : "";
+    if (tbVisible && tb) {
+      // Bake computed styles into the snapshot so collapseTitle/pdActive context
+      // isn't lost when the clone is placed outside .app in an overlay.
+      const tbBg = getComputedStyle(tb).background;
+      const prevTbStyle = tb.getAttribute("style") || "";
+      tb.style.background = tbBg;
+
+      // collapseTitle uses a ::after pseudo to extend the topbar 14px downward.
+      // Flag via data attribute so the standalone CSS rule fires on the clone.
+      const isCollapse = document.querySelector(".app")?.classList.contains("collapseTitle");
+      if (isCollapse) {
+        tb.dataset.tbExt = "";
+      }
+
+      const tbBlock = tb.querySelector(".titleblock");
+      const h1Live = tbBlock?.querySelector("h1");
+      let prevH1Style = "", prevBlockStyle = "";
+      if (h1Live) {
+        const cs = getComputedStyle(h1Live);
+        prevH1Style = h1Live.getAttribute("style") || "";
+        h1Live.style.fontSize = cs.fontSize;
+        h1Live.style.fontWeight = cs.fontWeight;
+        h1Live.style.letterSpacing = cs.letterSpacing;
+      }
+      if (tbBlock) {
+        const bs = getComputedStyle(tbBlock);
+        prevBlockStyle = tbBlock.getAttribute("style") || "";
+        tbBlock.style.position = bs.position;
+        tbBlock.style.left = bs.left;
+        tbBlock.style.top = bs.top;
+        tbBlock.style.height = bs.height;
+        tbBlock.style.display = bs.display;
+        tbBlock.style.alignItems = bs.alignItems;
+      }
+      this.topbarHTML = tb.outerHTML || "";
+      // Restore original inline styles so live DOM isn't polluted
+      if (isCollapse) delete tb.dataset.tbExt;
+      tb.setAttribute("style", prevTbStyle);
+      if (h1Live) h1Live.setAttribute("style", prevH1Style);
+      if (tbBlock) tbBlock.setAttribute("style", prevBlockStyle);
+    } else {
+      this.topbarHTML = "";
+    }
     this.topbarRect = tbVisible ? { top: tbRect.top, height: tbRect.height } : null;
   }
 
@@ -180,14 +247,92 @@ class Nav {
     this.rectStack = [];
     this.paddingStack = [];
     this.tbRectStack = [];
+    this.appStack = [];
   }
 
   // --- Shared helpers ---
+
+  // Bake live CSS animation state (opacity, transform, background-position) into
+  // inline styles on the clone, then kill the animation so it doesn't restart.
+  _freezeAnimations(live, clone) {
+    const animEls = live.querySelectorAll(".hShimmer, .hCard");
+    const cloneEls = clone.querySelectorAll(".hShimmer, .hCard");
+    animEls.forEach((el, i) => {
+      const c = cloneEls[i];
+      if (!c) return;
+      const cs = getComputedStyle(el);
+      if (el.classList.contains("hShimmer")) {
+        c.style.opacity = cs.opacity;
+        c.style.transform = cs.transform;
+      }
+      if (el.classList.contains("hCard")) {
+        c.style.backgroundPosition = cs.backgroundPosition;
+      }
+      c.style.animation = "none";
+    });
+  }
+
+  // Clone a DOM node, preserving canvas pixel data (cloneNode doesn't copy canvas content)
+  _cloneDeep(node) {
+    const clone = node.cloneNode(true);
+    const origCanvases = node.querySelectorAll('canvas');
+    const cloneCanvases = clone.querySelectorAll('canvas');
+    origCanvases.forEach((orig, i) => {
+      const c = cloneCanvases[i];
+      if (c && orig.width > 0 && orig.height > 0) {
+        c.width = orig.width;
+        c.height = orig.height;
+        try { const ctx = c.getContext('2d'); if (ctx) ctx.drawImage(orig, 0, 0); }
+        catch (e) { /* tainted canvas */ }
+      }
+    });
+    return clone;
+  }
 
   _bottomOffset() {
     const bnEl = document.getElementById("bottomNav");
     const bnRect = bnEl?.getBoundingClientRect();
     return bnRect ? `${window.innerHeight - bnRect.top}px` : "0px";
+  }
+
+  // Bake context-dependent styles (collapseTitle, pdActive, etc.) into a
+  // topbar clone so it renders correctly outside .app.
+  // IMPORTANT: call AFTER setting cssText on tbClone so topbar-level
+  // properties aren't wiped out.
+  _bakeTopbarStyles(tbClone, tbLive) {
+    // Topbar's own background (transparent in pdActive, solid otherwise)
+    const tbBg = getComputedStyle(tbLive).background;
+    tbClone.style.background = tbBg;
+
+    // collapseTitle uses a ::after pseudo to extend the topbar 14px downward.
+    // The clone loses .app ancestor context, so flag via data attribute to
+    // trigger the standalone CSS rule (.topbar[data-tb-ext]::after).
+    const isCollapse = document.querySelector(".app")?.classList.contains("collapseTitle");
+    if (isCollapse) {
+      tbClone.dataset.tbExt = "";
+      tbClone.style.overflow = "visible";
+    }
+
+    const h1L = tbLive.querySelector(".titleblock h1");
+    const h1C = tbClone.querySelector(".titleblock h1");
+    if (h1L && h1C) {
+      const cs = getComputedStyle(h1L);
+      h1C.style.fontSize = cs.fontSize;
+      h1C.style.fontWeight = cs.fontWeight;
+      h1C.style.letterSpacing = cs.letterSpacing;
+      if (!h1C.style.opacity) h1C.style.opacity = cs.opacity;
+    }
+    const blkL = tbLive.querySelector(".titleblock");
+    const blkC = tbClone.querySelector(".titleblock");
+    if (blkL && blkC) {
+      const bs = getComputedStyle(blkL);
+      blkC.style.position = bs.position;
+      blkC.style.left = bs.left;
+      blkC.style.top = bs.top;
+      blkC.style.height = bs.height;
+      blkC.style.display = bs.display;
+      blkC.style.alignItems = bs.alignItems;
+    }
   }
 
   // Lock a screen element into a context-independent frozen clone.
@@ -206,8 +351,216 @@ class Nav {
     return clone;
   }
 
-  // --- Forward slide ---
+  // --- New centralized transition system ---
+  // Captures the entire .app element as a pixel-perfect frozen clone.
+  // Because the clone IS .app with all its CSS classes (pdActive, collapseTitle, etc.),
+  // all context-dependent styles are automatically preserved — no manual baking needed
+  // for most properties.
+  _captureApp() {
+    const appEl = document.querySelector(".app");
+    if (!appEl) return null;
+
+    const rect = appEl.getBoundingClientRect();
+    const activeScreen = appEl.querySelector(".screen.is-active");
+    const scrollTop = activeScreen ? activeScreen.scrollTop : 0;
+
+    const clone = this._cloneDeep(appEl);
+
+    // Strip non-visible content to reduce memory
+    clone.querySelector("#drawer")?.remove();
+    clone.querySelector("#drawerOverlay")?.remove();
+    clone.querySelectorAll(".screen").forEach(s => {
+      if (!s.classList.contains("is-active") && !s.querySelector(".homeWrap")) {
+        s.innerHTML = "";
+      }
+    });
+
+    // Strip touch artifacts
+    clone.querySelectorAll(".hCard.is-touched").forEach(c => c.classList.remove("is-touched"));
+    clone.querySelectorAll(".hDarken").forEach(d => d.style.opacity = 0);
+    clone.querySelectorAll(".hArt").forEach(a => { a.style.transform = ""; a.style.scale = ""; });
+
+    // Freeze CSS animations so they don't restart from frame 0
+    if (activeScreen) {
+      const cloneActive = clone.querySelector(".screen.is-active");
+      if (cloneActive) this._freezeAnimations(activeScreen, cloneActive);
+    }
+
+    // Bake body-context-dependent styles that may change during mutations.
+    // The clone retains .app classes (collapseTitle, pdActive), so most CSS works.
+    // But body-level selectors (body.isHome, body.hasHeaderGrad, etc.) won't match
+    // when the clone is displayed from a different screen context.
+    const liveTb = appEl.querySelector(".topbar");
+    const cloneTb = clone.querySelector(".topbar");
+    if (liveTb && cloneTb) {
+      const cs = getComputedStyle(liveTb);
+      cloneTb.style.display = cs.display;
+      cloneTb.style.background = cs.background;
+      // Bake h1 styles (opacity is scroll-driven, may be lost)
+      const h1L = liveTb.querySelector("h1");
+      const h1C = cloneTb.querySelector("h1");
+      if (h1L && h1C) {
+        const h1cs = getComputedStyle(h1L);
+        h1C.style.opacity = h1cs.opacity;
+        h1C.style.transition = "none";
+      }
+    }
+
+    // Bake active screen's computed styles (body.isHome sets padding:0, overflow:hidden
+    // on #screen-home — these are lost when body class changes between screens)
+    if (activeScreen) {
+      const cloneActive = clone.querySelector(".screen.is-active");
+      if (cloneActive) {
+        const screenCS = getComputedStyle(activeScreen);
+        cloneActive.style.padding = screenCS.padding;
+        cloneActive.style.overflow = screenCS.overflow;
+        cloneActive.style.overflowX = screenCS.overflowX;
+        cloneActive.style.overflowY = screenCS.overflowY;
+      }
+    }
+
+    // Bake body background onto clone (body.hasHeaderGrad sets gradient background)
+    const bodyBg = getComputedStyle(document.body).background;
+    if (bodyBg && bodyBg !== "none") {
+      // Only bake if there's a meaningful gradient (not just the default solid bg)
+      const cloneView = clone.querySelector(".view");
+      if (cloneView && bodyBg.includes("gradient")) {
+        cloneView.style.background = bodyBg;
+      }
+    }
+
+    // Bake FAB from fixed → absolute position
+    const liveFab = appEl.querySelector(".sdFab");
+    const cloneFab = clone.querySelector(".sdFab");
+    if (liveFab && cloneFab) {
+      const fr = liveFab.getBoundingClientRect();
+      cloneFab.style.position = "absolute";
+      cloneFab.style.top = `${fr.top}px`;
+      cloneFab.style.left = `${fr.left}px`;
+      cloneFab.style.bottom = "auto";
+      cloneFab.style.right = "auto";
+    }
+
+    // Kill all CSS transitions on the clone so nothing animates
+    clone.style.transition = "none";
+    clone.querySelectorAll("*").forEach(el => {
+      if (getComputedStyle(el).transition !== "all 0s ease 0s") {
+        el.style.transition = "none";
+      }
+    });
+
+    return { clone, rect, scrollTop };
+  }
+
+  // Build a fixed-position overlay from a capture, ready for animation.
+  // The clone IS .app — append it directly to body so all CSS rules
+  // (body.isHome .topbar, etc.) work identically to the live DOM.
+  _buildOverlay(capture, zIndex) {
+    if (!capture) return null;
+    const { clone, rect, scrollTop } = capture;
+
+    // Position the clone exactly where .app sits, as a fixed overlay
+    clone.style.cssText += `;position:fixed;top:${rect.top}px;left:${rect.left}px;width:${rect.width}px;height:${rect.height}px;z-index:${zIndex};overflow:hidden;pointer-events:none;margin:0;background:var(--bg);`;
+
+    // Stash scrollTop so the caller can restore it AFTER appending to the DOM.
+    // scrollTop has no effect on detached nodes.
+    clone._deferredScrollTop = scrollTop;
+
+    return clone;
+  }
+
+  // Restore scroll on a clone built by _buildOverlay. Call AFTER appendChild.
+  _restoreOverlayScroll(clone) {
+    if (clone && clone._deferredScrollTop != null) {
+      const cloneScreen = clone.querySelector(".screen.is-active");
+      if (cloneScreen) cloneScreen.scrollTop = clone._deferredScrollTop;
+      delete clone._deferredScrollTop;
+    }
+  }
+
+  // Centralized slide transition using the View Transitions API.
+  // The browser captures pixel-perfect BITMAP screenshots of the before/after
+  // states — no DOM cloning, no CSS context issues.
+  //
+  // direction: "forward" | "back" | "jumpHome"
+  // mutate: function that performs all state changes + render()
+  slideTransition({ direction, mutate }) {
+    const vtClass = `vt-${direction}`;
+    const docEl = document.documentElement;
+
+    // Fallback for browsers without View Transitions API
+    const noVT = !document.startViewTransition;
+
+    if (direction === "forward") {
+      // Snapshot the current screen BEFORE setting _transitionActive,
+      // so that peekNode/topbarHTML/etc. are fresh when pushed to stacks.
+      // snapshot() temporarily bakes styles then restores them, so the DOM
+      // is clean by the time startViewTransition captures its bitmap.
+      const currentScreen = document.querySelector(".screen.is-active");
+      this.snapshot(currentScreen);
+
+      // Capture full app clone for swipe-back ace (pixel-perfect, no hand-building)
+      this.appStack.push(this._captureApp());
+
+      // Now prevent render()'s snapshot() from overwriting our fresh capture
+      this._transitionActive = true;
+      if (this.peekNode) this.stack.push(this.peekNode);
+      this.topbarStack.push(this.topbarHTML);
+      this.scrollStack.push(this.aceScrollTop);
+      this.rectStack.push(this.aceRect);
+      this.paddingStack.push(this.acePadding);
+      this.tbRectStack.push(this.topbarRect);
+      if (this.prevState) this.stateStack.push(this.prevState);
+
+      if (noVT) { this._transitionActive = false; mutate(); return; }
+
+      docEl.classList.add(vtClass);
+      const transition = document.startViewTransition(() => {
+        mutate();
+        this._transitionActive = false;
+      });
+      transition.finished.finally(() => docEl.classList.remove(vtClass));
+    }
+
+    else if (direction === "back") {
+      // Pop stacks
+      this.pendingBackState = this.stateStack.length > 0 ? this.stateStack.pop() : null;
+      if (this.stack.length > 0) this.stack.pop();
+      if (this.topbarStack.length > 0) this.topbarStack.pop();
+      const aceScrollTop = this.scrollStack.length > 0 ? this.scrollStack.pop() : 0;
+      if (this.rectStack.length > 0) this.rectStack.pop();
+      if (this.paddingStack.length > 0) this.paddingStack.pop();
+      if (this.tbRectStack.length > 0) this.tbRectStack.pop();
+      if (this.appStack.length > 0) this.appStack.pop();
+
+      if (noVT) { mutate(); return; }
+
+      docEl.classList.add(vtClass);
+      this._transitionActive = true;
+      const transition = document.startViewTransition(() => {
+        mutate();
+        this._transitionActive = false;
+        // Restore scroll so the API captures the correct scroll position
+        const screen = document.querySelector(".screen.is-active");
+        if (aceScrollTop && screen) screen.scrollTop = aceScrollTop;
+      });
+      transition.finished.finally(() => docEl.classList.remove(vtClass));
+    }
+
+    else if (direction === "jumpHome") {
+      this.clearStacks();
+
+      if (noVT) { mutate(); return; }
+
+      docEl.classList.add(vtClass);
+      const transition = document.startViewTransition(() => mutate());
+      transition.finished.finally(() => docEl.classList.remove(vtClass));
+    }
+  }
+
+  // --- Legacy forward slide ---
   // Slide new screen in from the right. Call AFTER render().
+  // Kept for swipe gesture compatibility.
 
   forward(screenEl) {
     const topbar = document.querySelector(".topbar");
@@ -240,14 +593,14 @@ class Nav {
         tbWrap.innerHTML = this.topbarHTML;
         const tbEl = tbWrap.firstElementChild;
         if (tbEl) {
-          tbEl.style.cssText = `display:flex;position:absolute;top:${this.topbarRect.top}px;left:0;width:100%;height:${this.topbarRect.height}px;overflow:hidden;pointer-events:none;box-sizing:border-box;`;
+          tbEl.style.cssText = `display:flex;position:absolute;top:${this.topbarRect.top}px;left:0;width:100%;height:${this.topbarRect.height}px;overflow:visible;pointer-events:none;box-sizing:border-box;`;
           aceOverlay.appendChild(tbEl);
         }
       }
 
       const aceContent = document.createElement("div");
       aceContent.style.cssText = `position:absolute;top:${this.aceViewTop}px;left:0;width:100%;bottom:0;overflow:hidden;`;
-      const aceScreenClone = this.peekNode.cloneNode(true);
+      const aceScreenClone = this._cloneDeep(this.peekNode);
       aceScreenClone.style.padding = this.acePadding;
       aceContent.appendChild(aceScreenClone);
       aceOverlay.appendChild(aceContent);
@@ -269,7 +622,8 @@ class Nav {
     if (topbar) {
       const tbRect = topbar.getBoundingClientRect();
       const tbClone = topbar.cloneNode(true);
-      tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${r.left}px;width:${r.width}px;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
+      tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${r.left}px;width:${r.width}px;height:${tbRect.height}px;overflow:visible;pointer-events:none;`;
+      this._bakeTopbarStyles(tbClone, topbar);
       overlay.appendChild(tbClone);
     }
 
@@ -277,6 +631,21 @@ class Nav {
     screenWrap.style.cssText = `position:absolute;top:${r.top}px;left:${r.left}px;width:${r.width}px;height:${r.height}px;overflow:hidden;`;
     screenWrap.appendChild(this._freeze(screenEl));
     overlay.appendChild(screenWrap);
+
+    // Reposition FAB from fixed to absolute so it doesn't jump during slide
+    const overlayFab = overlay.querySelector('.sdFab');
+    if (overlayFab) {
+      const liveFab = screenEl.querySelector('.sdFab');
+      if (liveFab) {
+        const fr = liveFab.getBoundingClientRect();
+        overlayFab.style.position = 'absolute';
+        overlayFab.style.top = `${fr.top}px`;
+        overlayFab.style.left = `${fr.left}px`;
+        overlayFab.style.bottom = 'auto';
+        overlayFab.style.right = 'auto';
+        overlay.appendChild(overlayFab);
+      }
+    }
 
     document.body.appendChild(overlay);
 
@@ -348,25 +717,48 @@ class Nav {
 
     if (tbRect && tb) {
       const tbClone = tb.cloneNode(true);
-      tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${tbRect.left}px;width:${tbRect.width}px;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
+      tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${tbRect.left}px;width:${tbRect.width}px;height:${tbRect.height}px;overflow:visible;pointer-events:none;`;
+      this._bakeTopbarStyles(tbClone, tb);
       queenEl.appendChild(tbClone);
     }
 
     const screenWrap = document.createElement("div");
     screenWrap.style.cssText = `position:absolute;top:${viewRect.top}px;left:${viewRect.left}px;width:${viewRect.width}px;height:${viewRect.height}px;overflow:hidden;`;
     const queenClone = this._freeze(screenEl);
-    queenClone.scrollTop = screenEl.scrollTop;
+    const queenScrollTop = screenEl.scrollTop;
     screenWrap.appendChild(queenClone);
     queenEl.appendChild(screenWrap);
 
+    // Bake fixed-position FAB into absolute pixel coords so it won't jump
+    // when renderUnderneath() changes --dock-h
+    const queenFab = queenEl.querySelector('.sdFab');
+    if (queenFab) {
+      const liveFab = document.querySelector('.sdFab');
+      if (liveFab) {
+        const fr = liveFab.getBoundingClientRect();
+        queenFab.style.position = 'absolute';
+        queenFab.style.top = `${fr.top}px`;
+        queenFab.style.left = `${fr.left}px`;
+        queenFab.style.bottom = 'auto';
+        queenFab.style.right = 'auto';
+        queenEl.appendChild(queenFab);
+      }
+    }
+
     // Queen goes on first — covers everything while we render + build ace
     document.body.appendChild(queenEl);
+    // scrollTop must be set AFTER appendChild — no effect on detached nodes
+    queenClone.scrollTop = queenScrollTop;
+
+    // Hide live topbar — overlays have their own clones; prevents the live
+    // topbar from peeking through the ace's parallax gap during animation.
+    if (tb) tb.style.visibility = "hidden";
 
     // Render live DOM invisibly underneath the queen overlay.
     // This removes pdActive, restores normal .view dimensions, etc.
-    this._isBackNav = true;
+    // Note: do NOT set _isBackNav here — goBack's doRender() manages
+    // that flag so setHeader(restoreState.headerTitle) isn't skipped.
     renderUnderneath();
-    this._isBackNav = false;
 
     // Restore scroll position on the newly-rendered screen
     if (aceScrollTop && activeScreenEl) activeScreenEl.scrollTop = aceScrollTop;
@@ -387,7 +779,7 @@ class Nav {
         tbWrap.innerHTML = aceTopbarHTML;
         const tbEl = tbWrap.firstElementChild;
         if (tbEl) {
-          tbEl.style.cssText = `display:flex;position:absolute;top:${aceTbRect.top}px;left:${aceRect.left}px;width:${aceRect.width}px;height:${aceTbRect.height}px;overflow:hidden;pointer-events:none;box-sizing:border-box;`;
+          tbEl.style.cssText = `display:flex;position:absolute;top:${aceTbRect.top}px;left:${aceRect.left}px;width:${aceRect.width}px;height:${aceTbRect.height}px;overflow:visible;pointer-events:none;box-sizing:border-box;`;
           aceOverlay.appendChild(tbEl);
         }
       }
@@ -395,7 +787,7 @@ class Nav {
       // Screen content — frozen at exact capture-time dimensions
       const aceWrap = document.createElement("div");
       aceWrap.style.cssText = `position:absolute;top:${aceRect.top}px;left:${aceRect.left}px;width:${aceRect.width}px;height:${aceRect.height}px;overflow:hidden;`;
-      const aceClone = aceNode.cloneNode(true);
+      const aceClone = this._cloneDeep(aceNode);
       aceClone.style.width = `${aceRect.width}px`;
       aceClone.style.height = `${aceRect.height}px`;
       aceClone.style.padding = isHomeAce ? "0" : acePadding;
@@ -433,6 +825,7 @@ class Nav {
         queenEl.addEventListener("transitionend", () => {
           queenEl.remove();
           if (aceOverlay) aceOverlay.remove();
+          if (tb) tb.style.visibility = "";
         }, { once: true });
       });
     });
@@ -453,18 +846,36 @@ class Nav {
 
     if (tbRect && tb) {
       const tbClone = tb.cloneNode(true);
-      tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${tbRect.left}px;width:${tbRect.width}px;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
+      tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${tbRect.left}px;width:${tbRect.width}px;height:${tbRect.height}px;overflow:visible;pointer-events:none;`;
+      this._bakeTopbarStyles(tbClone, tb);
       queenEl.appendChild(tbClone);
     }
 
     const screenWrap = document.createElement("div");
     screenWrap.style.cssText = `position:absolute;top:${viewRect.top}px;left:${viewRect.left}px;width:${viewRect.width}px;height:${viewRect.height}px;overflow:hidden;`;
     const queenClone = this._freeze(screenEl);
-    queenClone.scrollTop = screenEl.scrollTop;
+    const jumpScrollTop = screenEl.scrollTop;
     screenWrap.appendChild(queenClone);
     queenEl.appendChild(screenWrap);
 
+    // Reposition FAB from fixed to absolute so it doesn't jump during slide
+    const jumpFab = queenEl.querySelector('.sdFab');
+    if (jumpFab) {
+      const liveFab = screenEl.querySelector('.sdFab');
+      if (liveFab) {
+        const fr = liveFab.getBoundingClientRect();
+        jumpFab.style.position = 'absolute';
+        jumpFab.style.top = `${fr.top}px`;
+        jumpFab.style.left = `${fr.left}px`;
+        jumpFab.style.bottom = 'auto';
+        jumpFab.style.right = 'auto';
+        queenEl.appendChild(jumpFab);
+      }
+    }
+
     document.body.appendChild(queenEl);
+    // scrollTop must be set AFTER appendChild — no effect on detached nodes
+    queenClone.scrollTop = jumpScrollTop;
 
     // Clear all stacks and render Home live underneath
     this.clearStacks();
@@ -488,6 +899,7 @@ class Nav {
     if (this.rectStack.length > 0) this.rectStack.pop();
     if (this.paddingStack.length > 0) this.paddingStack.pop();
     if (this.tbRectStack.length > 0) this.tbRectStack.pop();
+    if (this.appStack.length > 0) this.appStack.pop();
     return this.stateStack.length > 0 ? this.stateStack.pop() : null;
   }
 
@@ -498,131 +910,6 @@ class Nav {
     return s;
   }
 
-  // --- Swipe gesture helpers ---
-
-  swipeStart(screenEl) {
-    const navBottomOffset = this._bottomOffset();
-
-    const peekNode = this.stack.length > 0 ? this.stack[this.stack.length - 1] : this.peekNode;
-    const peekTopbarHTML = this.topbarStack.length > 0
-      ? this.topbarStack[this.topbarStack.length - 1]
-      : this.topbarHTML;
-    const peekRect = this.rectStack.length > 0
-      ? this.rectStack[this.rectStack.length - 1]
-      : this.aceRect;
-    const peekPadding = this.paddingStack.length > 0
-      ? this.paddingStack[this.paddingStack.length - 1]
-      : this.acePadding;
-    const peekTopbarRect = this.topbarRect;
-    const isHomeAce = peekNode && peekNode.querySelector(".homeWrap");
-    const swipeAceScrollTop = this.scrollStack.length > 0 ? this.scrollStack[this.scrollStack.length - 1] : this.aceScrollTop;
-
-    // ACE overlay (frozen previous screen using stored dimensions)
-    this.swipeAceEl = document.createElement("div");
-    this.swipeAceEl.style.cssText = `position:fixed;inset:0;bottom:${navBottomOffset};z-index:499;overflow:hidden;pointer-events:none;background:var(--bg);`;
-
-    if (peekTopbarHTML && peekTopbarRect && peekRect) {
-      const tbWrap = document.createElement("div");
-      tbWrap.innerHTML = peekTopbarHTML;
-      const tbEl = tbWrap.firstElementChild;
-      if (tbEl) {
-        tbEl.style.cssText = `display:flex;position:absolute;top:${peekTopbarRect.top}px;left:${peekRect.left}px;width:${peekRect.width}px;height:${peekTopbarRect.height}px;overflow:hidden;pointer-events:none;box-sizing:border-box;`;
-        this.swipeAceEl.appendChild(tbEl);
-      }
-    }
-
-    if (peekNode && peekRect) {
-      const aceWrap = document.createElement("div");
-      aceWrap.style.cssText = `position:absolute;top:${peekRect.top}px;left:${peekRect.left}px;width:${peekRect.width}px;height:${peekRect.height}px;overflow:hidden;`;
-      const aceScreenClone = peekNode.cloneNode(true);
-      aceScreenClone.style.width = `${peekRect.width}px`;
-      aceScreenClone.style.height = `${peekRect.height}px`;
-      aceScreenClone.style.padding = isHomeAce ? "0" : peekPadding;
-      aceScreenClone.style.margin = "0";
-      aceScreenClone.style.boxSizing = "border-box";
-      aceScreenClone.style.position = "relative";
-      aceScreenClone.style.inset = "auto";
-      aceWrap.appendChild(aceScreenClone);
-      this.swipeAceEl.appendChild(aceWrap);
-      document.body.appendChild(this.swipeAceEl);
-      aceScreenClone.scrollTop = swipeAceScrollTop;
-    } else {
-      document.body.appendChild(this.swipeAceEl);
-    }
-
-    // QUEEN overlay (current screen)
-    this.swipeQueenEl = document.createElement("div");
-    this.swipeQueenEl.style.cssText = `position:fixed;top:0;left:0;right:0;bottom:${navBottomOffset};z-index:500;overflow:hidden;pointer-events:none;background:var(--bg);`;
-
-    const swipeTb = document.querySelector(".topbar");
-    if (swipeTb) {
-      const tbRect = swipeTb.getBoundingClientRect();
-      const tbClone = swipeTb.cloneNode(true);
-      tbClone.style.cssText = `display:flex;position:absolute;top:${tbRect.top}px;left:${tbRect.left}px;width:${tbRect.width}px;height:${tbRect.height}px;overflow:hidden;pointer-events:none;`;
-      this.swipeQueenEl.appendChild(tbClone);
-    }
-
-    let clonedScreen = null;
-    const savedScrollTop = screenEl ? screenEl.scrollTop : 0;
-    if (screenEl) {
-      const screenRect = screenEl.getBoundingClientRect();
-      const screenWrap = document.createElement("div");
-      screenWrap.style.cssText = `position:absolute;top:${screenRect.top}px;left:${screenRect.left}px;width:${screenRect.width}px;height:${screenRect.height}px;overflow:hidden;`;
-      clonedScreen = this._freeze(screenEl);
-      screenWrap.appendChild(clonedScreen);
-      this.swipeQueenEl.appendChild(screenWrap);
-    }
-
-    document.body.appendChild(this.swipeQueenEl);
-    if (clonedScreen) clonedScreen.scrollTop = savedScrollTop;
-
-    if (this.swipeAceEl) this.swipeAceEl.style.transform = `translateX(-${this.ACE_PARALLAX}px)`;
-  }
-
-  swipeMove(dx) {
-    const clamp = Math.max(0, dx);
-    if (this.swipeQueenEl) this.swipeQueenEl.style.transform = `translateX(${clamp}px)`;
-    if (this.swipeAceEl) {
-      const ratio = Math.min(clamp / window.innerWidth, 1);
-      this.swipeAceEl.style.transform = `translateX(${-this.ACE_PARALLAX * (1 - ratio)}px)`;
-    }
-  }
-
-  swipeCommit(goBackFn) {
-    if (this.swipeQueenEl) {
-      this.swipeQueenEl.style.transition = "transform 268ms ease-out";
-      this.swipeQueenEl.style.transform = `translateX(${window.innerWidth}px)`;
-    }
-    if (this.swipeAceEl) {
-      this.swipeAceEl.style.transition = "transform 268ms ease-out";
-      this.swipeAceEl.style.transform = "translateX(0)";
-    }
-    setTimeout(() => {
-      goBackFn();
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          this._cleanupSwipe();
-        });
-      });
-    }, 268);
-  }
-
-  swipeCancel() {
-    if (this.swipeQueenEl) {
-      this.swipeQueenEl.style.transition = "transform 236ms ease-out";
-      this.swipeQueenEl.style.transform = "translateX(0)";
-    }
-    if (this.swipeAceEl) {
-      this.swipeAceEl.style.transition = "transform 236ms ease-out";
-      this.swipeAceEl.style.transform = `translateX(-${this.ACE_PARALLAX}px)`;
-    }
-    setTimeout(() => this._cleanupSwipe(), 236);
-  }
-
-  _cleanupSwipe() {
-    if (this.swipeQueenEl) { this.swipeQueenEl.remove(); this.swipeQueenEl = null; }
-    if (this.swipeAceEl) { this.swipeAceEl.remove(); this.swipeAceEl = null; }
-  }
 }
 
 const nav = new Nav();
@@ -640,8 +927,23 @@ function setActiveScreen(name) {
     if (!el) return;
     const isActive = screenName === name;
     el.classList.toggle("is-active", isActive);
-    if (!isActive) el.innerHTML = "";
+    // Keep home screen alive so particles don't get destroyed on nav away
+    if (!isActive && screenName !== "home") el.innerHTML = "";
   });
+
+  // Pause/resume home particles + CSS animations to freeze state while away
+  const homeGrid = screens.home?.querySelector(".homeGrid");
+  if (homeGrid) {
+    if (homeGrid._resumeTimer) { clearTimeout(homeGrid._resumeTimer); homeGrid._resumeTimer = null; }
+    if (name === "home") {
+      // Delay resume until after transition overlay is removed (~300ms transition)
+      homeGrid._resumeTimer = setTimeout(() => {
+        if (homeGrid._resumeHome) homeGrid._resumeHome();
+      }, 330);
+    } else {
+      if (homeGrid._pauseHome) homeGrid._pauseHome();
+    }
+  }
 }
 
 // Thin wrappers — all logic lives in the Nav class above.
@@ -649,10 +951,28 @@ function captureNavState() {
   nav.captureState({
     currentTab, drawerView, projectDetailScreen, releaseDetailId,
     selectedSongId, selectedVersionId, songsView, overlayView,
-    songsBackTarget, headerTitle: headerTitle?.textContent || "RiffBank"
+    songsBackTarget, lyricsEditSongId, headerTitle: headerTitle?.textContent ?? "RiffBank"
   });
 }
 function triggerForwardSlide() { nav.forward(activeScreenEl); }
+
+// New centralized forward navigation: captures frozen snapshots before AND
+// after mutations, then animates between them. No live DOM leaks.
+function navigateForward(mutateFn) {
+  const captured = {
+    currentTab, drawerView, projectDetailScreen, releaseDetailId,
+    selectedSongId, selectedVersionId, songsView, overlayView,
+    songsBackTarget, lyricsEditSongId, headerTitle: headerTitle?.textContent ?? "RiffBank"
+  };
+  nav.captureState(captured);
+  nav.slideTransition({
+    direction: "forward",
+    mutate: () => {
+      mutateFn();
+      render();
+    }
+  });
+}
 
 const headerTitle = $("#headerTitle");
 const headerBackEl = document.getElementById("headerBack");
@@ -1354,6 +1674,7 @@ async function playNowPlaying({ autoplay = true } = {}){
       if (miniToggleEl) miniToggleEl.textContent = "▶";
     });
     navigator.mediaSession.setActionHandler("nexttrack", () => {
+      if (state.player?.repeat === "one") return;
       advanceToNextTrack({ render: true });
     });
     navigator.mediaSession.setActionHandler("previoustrack", () => {
@@ -1805,14 +2126,30 @@ async function audioDelete(id) {
 // Pick audio from iOS Files picker
 function pickAudioFile() {
   return new Promise((resolve) => {
-    const input = document.createElement("input");
-    input.type = "file";
+    // Reuse the hidden input already in the DOM (iOS PWA needs a persistent element)
+    let input = document.getElementById("_audioPickerDynamic");
+    if (!input) {
+      input = document.createElement("input");
+      input.id = "_audioPickerDynamic";
+      input.type = "file";
+      input.style.position = "fixed";
+      input.style.left = "-9999px";
+      input.style.top = "-9999px";
+      input.style.opacity = "0";
+      input.style.pointerEvents = "none";
+      document.body.appendChild(input);
+    }
 
-    // iOS/Safari sometimes mislabels audio MIME types, so don't over-filter
-    input.accept = ""; // allow all
+    // Reset so the same file can be re-picked
+    input.value = "";
 
-    input.onchange = () => {
+    // Only file extensions — avoids iOS showing camera/photo options
+    input.accept = ".wav,.mp3,.m4a,.aac,.aiff,.flac,.ogg,.caf";
+
+    const handler = () => {
+      input.removeEventListener("change", handler);
       const f = input.files?.[0] || null;
+
       if (!f) return resolve(null);
 
       const name = (f.name || "").toLowerCase();
@@ -1827,7 +2164,10 @@ function pickAudioFile() {
       resolve(f);
     };
 
-    input.click();
+    input.addEventListener("change", handler);
+
+    // Small delay for iOS PWA — ensures the input is ready
+    setTimeout(() => input.click(), 50);
   });
 }
 
@@ -1909,6 +2249,137 @@ async function getPlayableUrlForVersion(songId, versionId) {
   }
   return null;
 }
+
+// In-memory set of driveFileIds known to be cached in IndexedDB
+const _cachedDriveIds = new Set();
+
+// Cache all Drive-only audio blobs into IndexedDB so they play offline forever.
+// Called automatically after pull/rebuild. Shows progress toasts.
+async function cacheAllDriveAudio() {
+  const driveVersions = [];
+  for (const song of (state.songs || [])) {
+    for (const v of (song.versions || [])) {
+      if (!v.driveFileId) continue;
+      // Skip if already cached locally
+      if (v.fileId || v.localAudioId) continue;
+      if (_cachedDriveIds.has(v.driveFileId)) continue;
+      try {
+        const existing = await audioGet(`gdrive:${v.driveFileId}`);
+        if (existing?.blob) { _cachedDriveIds.add(v.driveFileId); continue; }
+      } catch {}
+      driveVersions.push({ song, v });
+    }
+  }
+
+  if (!driveVersions.length) {
+    toast("All audio already cached locally ✅");
+    return;
+  }
+
+  let done = 0;
+  let failed = 0;
+  toast(`Caching audio: 0/${driveVersions.length}…`);
+
+  for (const { song, v } of driveVersions) {
+    try {
+      const blob = await gdriveFetchBlob(v.driveFileId);
+      if (blob) {
+        await audioPut({
+          id: `gdrive:${v.driveFileId}`,
+          blob,
+          name: v.fileName || v.label || "audio",
+          type: v.fileType || blob.type || "audio/*",
+          size: blob.size,
+        });
+        _cachedDriveIds.add(v.driveFileId);
+        done++;
+      } else {
+        failed++;
+      }
+    } catch {
+      failed++;
+    }
+    toast(`Caching audio: ${done + failed}/${driveVersions.length}…`);
+  }
+
+  const msg = failed
+    ? `Cached ${done}/${driveVersions.length} (${failed} failed)`
+    : `All ${done} tracks cached locally ✅`;
+  toast(msg);
+}
+
+// Sync debug: check each version's audio availability (sync, not async — metadata only)
+// Returns "green" (has local blob), "yellow" (Drive-only, needs network), "red" (no source)
+function getVersionSyncColor(v) {
+  if (!v) return "red";
+  if (v.fileId || v.localAudioId) return "green";
+  if (v.driveFileId) {
+    if (_cachedDriveIds.has(v.driveFileId)) return "green";
+    return "yellow";
+  }
+  if (v.link) return "green";
+  return "red";
+}
+
+// Returns worst-case sync color across all versions of a song
+function getSongSyncColor(song) {
+  if (!song?.versions?.length) return "red";
+  let worst = "green"; // green > yellow > red
+  for (const v of song.versions) {
+    const c = getVersionSyncColor(v);
+    if (c === "red") return "red";
+    if (c === "yellow") worst = "yellow";
+  }
+  return worst;
+}
+
+// Returns an HTML dot string for debug overlay (empty string if debug off)
+function syncDot(song) {
+  if (!window.RIFFBANK_DEBUG_SYNC) return "";
+  const color = getSongSyncColor(song);
+  const label = color === "green" ? "Local" : color === "yellow" ? "Drive-only" : "No audio";
+  return `<span class="syncDot syncDot--${color}" title="${label}"></span>`;
+}
+
+// Deep async audit: checks IndexedDB for actual blobs, logs a table to console
+window.auditSync = async () => {
+  const results = [];
+  for (const song of (state.songs || [])) {
+    for (const v of (song.versions || [])) {
+      const row = {
+        song: song.title,
+        version: v.label || v.id,
+        fileId: v.fileId ? "yes" : "",
+        localAudioId: v.localAudioId ? "yes" : "",
+        driveFileId: v.driveFileId ? "yes" : "",
+        link: v.link ? "yes" : "",
+        localBlobOk: "",
+        driveCacheOk: "",
+        status: getVersionSyncColor(v),
+      };
+      // Check if local blob actually exists in IndexedDB
+      if (v.fileId) {
+        try { const r = await audioGet(v.fileId); row.localBlobOk = r?.blob ? "yes" : "MISSING"; } catch { row.localBlobOk = "ERROR"; }
+        if (row.localBlobOk === "MISSING") row.status = "red";
+      }
+      if (v.localAudioId) {
+        try { const r = await getAudioBlob(v.localAudioId); row.localBlobOk = r?.blob ? "yes" : "MISSING"; } catch { row.localBlobOk = "ERROR"; }
+        if (row.localBlobOk === "MISSING" && !v.fileId) row.status = v.driveFileId ? "yellow" : "red";
+      }
+      // Check if Drive blob is cached locally
+      if (v.driveFileId) {
+        try { const r = await audioGet(`gdrive:${v.driveFileId}`); row.driveCacheOk = r?.blob ? "yes" : "no"; } catch { row.driveCacheOk = "no"; }
+      }
+      results.push(row);
+    }
+  }
+  console.table(results);
+  const reds = results.filter(r => r.status === "red");
+  const yellows = results.filter(r => r.status === "yellow");
+  console.log(`[RiffBank Sync Audit] ${results.length} versions: ${reds.length} broken, ${yellows.length} Drive-only, ${results.length - reds.length - yellows.length} local`);
+  if (reds.length) console.warn("Broken versions (no playable audio):", reds.map(r => `${r.song} / ${r.version}`));
+  return results;
+};
 
 function getSongById(data, songId) {
   return (data.songs || []).find(s => s.id === songId);
@@ -1997,6 +2468,9 @@ if ("serviceWorker" in navigator) {
       navigator.serviceWorker.addEventListener("controllerchange", () => {
         if (reloaded) return;
         reloaded = true;
+        // Hide the app shell before reloading so the home screen doesn't
+        // flash visible during the page transition (splash-flash bug).
+        document.body.classList.add("splashing");
         window.location.reload();
       });
 
@@ -2087,11 +2561,12 @@ function setDrawerView(v) {
 }
 
 function setHeader(t) {
-  // During back-nav, goBack() already set the header — skip redundant DOM churn
-  if (nav._isBackNav) return;
   if (headerTitle) headerTitle.textContent = t;
   const appEl = document.querySelector(".app");
-  appEl?.classList.remove("pdActive", "pdScrolled");
+  appEl?.classList.remove("pdActive", "pdScrolled", "collapseTitle");
+  // Reset inline opacity from collapse scroll listener
+  const h1El = appEl?.querySelector(".titleblock h1");
+  if (h1El) h1El.style.opacity = "";
   // Restore screen padding when leaving project detail
   document.querySelectorAll(".screen").forEach(s => s.style.paddingBottom = "");
 }
@@ -2105,6 +2580,7 @@ function syncBackButton() {
   const onRoot =
     ROOT_TABS.has(currentTab) &&
     !drawerView &&
+    !overlayView &&
     !selectedSongId &&
     !selectedVersionId &&
     !projectDetailScreen &&
@@ -2282,8 +2758,227 @@ document.querySelectorAll(".drawerItem").forEach((btn) => {
 // Create button in bottom nav
 document.querySelector(".createNavBtn")?.addEventListener("click", () => openCreateOverlay());
 
+// ── Sal SVG mascot ──────────────────────────────────────────────────
+// Auto-traced from sal.png using vtracer. Transparent background.
+// Returns an <img> tag pointing to the SVG file.
+function salSvg(size = 140) {
+  return `<img src="./sal.svg" alt="Sal" width="${size}" style="height:auto;">`;
+}
+
+// ── Onboarding cleanup — fades + removes all onboarding overlays ────
+function dismissOnboarding() {
+  document.querySelectorAll(".welcomeScreen, .driveScreen").forEach(el => {
+    el.classList.add("welcomeOut");
+    el.addEventListener("animationend", () => el.remove(), { once: true });
+  });
+  document.body.classList.remove("welcoming");
+}
+
+// ── Welcome screen (Duolingo-style landing after splash) ────────────
+// Returns a promise that resolves when user taps a button.
+// result: "getStarted" or "hasAccount"
+function showWelcomeScreen() {
+  return new Promise(resolve => {
+    document.body.classList.add("welcoming");
+    const el = document.createElement("div");
+    el.id = "welcomeScreen";
+    // Start fully opaque so it seamlessly replaces the splash overlay
+    el.className = "welcomeScreen welcomeIn";
+    el.innerHTML = `
+      <div class="welcomeSalWrap">
+        ${salSvg(140)}
+      </div>
+      <div class="welcomeTitle">RiffBank</div>
+      <div class="welcomeSub">Your music. Everywhere.</div>
+      <div class="welcomeBtns">
+        <button class="welcomeBtn welcomeBtnPrimary" data-action="getStarted">GET STARTED</button>
+        <button class="welcomeBtn welcomeBtnSecondary" data-action="hasAccount">I ALREADY HAVE AN ACCOUNT</button>
+      </div>
+    `;
+
+    el.addEventListener("click", e => {
+      const btn = e.target.closest("[data-action]");
+      if (!btn) return;
+      // Resolve immediately — the overlay stays in place so the app shell
+      // never flashes. init() will call dismissOnboarding() after render().
+      resolve(btn.dataset.action);
+    });
+
+    document.body.appendChild(el);
+    // Welcome is already opaque; now safe to unhide the app shell behind it
+    document.body.classList.remove("splashing");
+  });
+}
+
+// ── Drive connect screen (Duolingo-style, after welcome) ────────────
+// Returns a promise: { action: "connected"|"skip"|"back", email?, homeFolderName? }
+function showDriveScreen() {
+  return new Promise(resolve => {
+    const el = document.createElement("div");
+    el.className = "driveScreen";
+    el.innerHTML = `
+      <button class="driveBackBtn" data-action="back">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="15 18 9 12 15 6"/>
+        </svg>
+      </button>
+      <div class="driveBubbleArea">
+        <div class="driveBubble">
+          <strong>RiffBank</strong> uses your <strong>Google Drive</strong> to store, manage, and release all of your in-progress songs.
+        </div>
+        <div class="driveSalWrap">${salSvg(120)}</div>
+      </div>
+      <div class="driveBtns">
+        <button class="driveBtnConnect" data-action="connect">CONNECT GOOGLE DRIVE</button>
+        <button class="driveBtnSkip" data-action="skip">Maybe later</button>
+      </div>
+    `;
+
+    let _signedInEmail = "";
+    let _existingFolderId = null;
+
+    el.addEventListener("click", async e => {
+      const btn = e.target.closest("[data-action]");
+      if (!btn) return;
+      const action = btn.dataset.action;
+
+      if (action === "back" || action === "skip") {
+        // Resolve immediately — overlay stays. init() cleans up after render().
+        resolve({ action });
+        return;
+      }
+
+      if (action === "connect") {
+        // ── Sign in to Google ──
+        btn.textContent = "SIGNING IN…";
+        btn.style.pointerEvents = "none";
+        btn.style.opacity = "0.6";
+
+        await gdriveLoadGIS();
+        const signIn = await gdriveSignIn();
+        if (!signIn.success) {
+          btn.textContent = "CONNECT GOOGLE DRIVE";
+          btn.style.pointerEvents = "";
+          btn.style.opacity = "";
+          toast(signIn.error || "Sign-in failed — try again!");
+          return;
+        }
+
+        _signedInEmail = signIn.email || "";
+
+        // Check if there's already a RiffBank folder on Drive
+        el.querySelector(".driveBubble").innerHTML =
+          `Checking your <strong>Google Drive</strong>…`;
+        btn.textContent = "CHECKING…";
+
+        const existing = await gdriveFindExisting();
+
+        if (existing.found) {
+          // Existing RiffBank folder found!
+          _existingFolderId = existing.folderId;
+          el.querySelector(".driveBubble").innerHTML =
+            `Hey, I found a <strong>RiffBank</strong> folder on your Drive! Want me to connect to it?`;
+          btn.textContent = "CONNECT TO MY RIFFBANK";
+          btn.style.pointerEvents = "";
+          btn.style.opacity = "";
+          btn.dataset.action = "connectExisting";
+
+          const skipBtn = el.querySelector('[data-action="skip"]');
+          if (skipBtn) {
+            skipBtn.textContent = "Pick a different folder";
+            skipBtn.dataset.action = "pick";
+          }
+        } else {
+          // No existing folder — let user pick
+          el.querySelector(".driveBubble").innerHTML =
+            `Nice! Now pick a spot for your <strong>RiffBank</strong> folder — this is where all your songs, versions, and projects will live.`;
+          btn.textContent = "PICK A FOLDER";
+          btn.style.pointerEvents = "";
+          btn.style.opacity = "";
+          btn.dataset.action = "pick";
+
+          const skipBtn = el.querySelector('[data-action="skip"]');
+          if (skipBtn) skipBtn.textContent = "Skip for now";
+        }
+        return;
+      }
+
+      if (action === "connectExisting") {
+        // ── Connect to the found RiffBank folder ──
+        btn.textContent = "CONNECTING…";
+        btn.style.pointerEvents = "none";
+        btn.style.opacity = "0.6";
+
+        const result = await gdriveConnectToFolder(_existingFolderId, "RiffBank", _signedInEmail);
+        if (result.success) {
+          resolve({ action: "connected", homeFolderName: result.homeFolderName });
+        } else {
+          btn.textContent = "CONNECT TO MY RIFFBANK";
+          btn.style.pointerEvents = "";
+          btn.style.opacity = "";
+          toast(result.error || "Connection failed — try again!");
+        }
+        return;
+      }
+
+      if (action === "pick") {
+        // ── Open folder picker (full screen) ──
+        btn.textContent = "OPENING PICKER…";
+        btn.style.pointerEvents = "none";
+        btn.style.opacity = "0.6";
+
+        // Hide ALL overlays + app chrome so picker is full screen
+        const welcomeEl = document.getElementById("welcomeScreen");
+        const topBar = document.querySelector(".topBar");
+        const bottomNav = document.querySelector(".bottomNav");
+        el.style.display = "none";
+        if (welcomeEl) welcomeEl.style.display = "none";
+        if (topBar) topBar.style.display = "none";
+        if (bottomNav) bottomNav.style.display = "none";
+
+        // Show Sal PiP floating overlay while picker is open
+        const pip = document.createElement("div");
+        pip.className = "salPip";
+        pip.innerHTML = `
+          <div class="salPipBubble">Pick a folder for <strong>RiffBank</strong>!</div>
+          ${salSvg(56)}
+        `;
+        document.body.appendChild(pip);
+        requestAnimationFrame(() => pip.classList.add("salPipIn"));
+
+        const result = await gdrivePickHome(_signedInEmail);
+
+        // Restore everything
+        el.style.display = "";
+        if (welcomeEl) welcomeEl.style.display = "";
+        if (topBar) topBar.style.display = "";
+        if (bottomNav) bottomNav.style.display = "";
+
+        // Remove PiP
+        pip.classList.add("salPipOut");
+        pip.addEventListener("animationend", () => pip.remove(), { once: true });
+
+        if (result.success) {
+          resolve({ action: "connected", homeFolderName: result.homeFolderName });
+        } else {
+          // User cancelled picker — let them try again
+          btn.textContent = "PICK A FOLDER";
+          btn.style.pointerEvents = "";
+          btn.style.opacity = "";
+        }
+      }
+    });
+
+    document.body.appendChild(el);
+    requestAnimationFrame(() => el.classList.add("welcomeIn"));
+  });
+}
+
 // Sal mascot button — opens help sheet
 document.querySelector(".salNavBtn")?.addEventListener("click", () => openSalSheet());
+// Inject Sal PNG into nav icon
+{ const navIcon = document.querySelector(".salNavIcon");
+  if (navIcon) navIcon.innerHTML = salSvg(26); }
 
 function openSalSheet() {
   // Remove any existing Sal sheet
@@ -2300,7 +2995,7 @@ function openSalSheet() {
   sheet.style.cssText = "padding: 0; overflow: hidden; border-radius: 22px;";
   sheet.innerHTML = `
     <div style="display:flex;flex-direction:column;align-items:center;padding:28px 24px 12px;gap:12px;">
-      <img src="./sal.png" alt="Sal" style="width:80px;height:80px;object-fit:contain;filter:drop-shadow(0 4px 16px rgba(0,0,0,0.6));">
+      ${salSvg(80)}
       <div style="font-size:22px;font-weight:900;color:#fff;letter-spacing:-0.4px;">Hey, I'm Sal!</div>
       <div style="font-size:14px;color:rgba(255,255,255,.55);text-align:center;line-height:1.6;max-width:280px;">
         Your RiffBank guide. I'll help you manage songs, projects, versions, and everything in between.
@@ -2318,14 +3013,81 @@ function openSalSheet() {
   document.body.appendChild(sheet);
 }
 
+// Sal first-time onboarding — auto-opens once for new users
+function openSalOnboarding() {
+  if (localStorage.getItem("salOnboardingDone")) return;
+  if (state.songs?.length) { localStorage.setItem("salOnboardingDone", "1"); return; }
+
+  // Remove any existing Sal sheet
+  document.getElementById("salSheetBackdrop")?.remove();
+  document.getElementById("salSheet")?.remove();
+
+  const backdrop = document.createElement("div");
+  backdrop.id = "salSheetBackdrop";
+  backdrop.className = "actionSheetBackdrop";
+
+  const sheet = document.createElement("div");
+  sheet.id = "salSheet";
+  sheet.className = "actionSheet";
+  sheet.style.cssText = "padding: 0; overflow: hidden; border-radius: 22px;";
+  sheet.innerHTML = `
+    <div style="display:flex;flex-direction:column;align-items:center;padding:32px 24px 20px;gap:14px;">
+      ${salSvg(96)}
+      <div style="font-size:24px;font-weight:900;color:#fff;letter-spacing:-0.4px;">Welcome to RiffBank!</div>
+      <div style="font-size:15px;color:rgba(255,255,255,.55);text-align:center;line-height:1.7;max-width:290px;">
+        Hey, I'm <strong style="color:#fff;">Sal</strong>! I'll be your guide around here.<br><br>
+        RiffBank keeps all your songs, versions, and projects safe in <strong style="color:#fff;">Google Drive</strong> — record on any device and access your music anywhere.
+      </div>
+    </div>
+    <div style="height:1px;background:rgba(255,255,255,.08);margin:0 16px;"></div>
+    <div style="padding:8px 0 6px;display:flex;flex-direction:column;">
+      <button class="actionSheetBtn" id="salConnectDrive" style="font-weight:700;">Hi Sal! Yes, connect my Google Drive!</button>
+      <button class="actionSheetBtn" id="salDismiss" style="color:rgba(255,255,255,.4);font-size:13px;">Hi Sal! I don't need you, I can do this MYSELF</button>
+    </div>
+  `;
+
+  function close() { backdrop.remove(); sheet.remove(); localStorage.setItem("salOnboardingDone", "1"); }
+
+  backdrop.addEventListener("click", close);
+
+  sheet.querySelector("#salConnectDrive")?.addEventListener("click", async () => {
+    toast("Connecting to Google Drive…");
+    const result = await gdriveConnect();
+    if (result.success) {
+      state.settings.driveRoot = result.homeFolderName || "RiffBank";
+      saveState();
+      toast("Connected to Google Drive! Sal approves.");
+      close();
+      // Kick off sync now that we're connected
+      incrementalSyncFromDrive().then(() => {
+        render();
+        syncMiniPlayerUI();
+        preFetchDriveAudio().catch(console.warn);
+      }).catch(console.warn);
+    } else {
+      toast(result.error || "Connection failed — try again!");
+    }
+  });
+
+  sheet.querySelector("#salDismiss")?.addEventListener("click", close);
+
+  document.body.appendChild(backdrop);
+  document.body.appendChild(sheet);
+}
+
 // Tabs
 document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
     const targetTab = btn.dataset.tab || "home";
 
+    // Already on home root with no overlays — nothing to do
+    if (targetTab === "home" && currentTab === "home" && nav.depth === 0 && !drawerView && !overlayView) {
+      return;
+    }
+
     // If tapping home while deep in a nav stack, jump straight to home
     if (targetTab === "home" && nav.depth > 0) {
-      nav.jumpHome(activeScreenEl, () => {
+      nav.slideTransition({ direction: "jumpHome", mutate: () => {
         songsBackTarget = null;
         drawerView = null;
         overlayView = null;
@@ -2343,7 +3105,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
         syncTabs();
         setHeader("RiffBank");
         render();
-      });
+      }});
       return;
     }
 
@@ -2403,7 +3165,7 @@ headerTitle?.addEventListener("click", () => {
 
   // If on home tab with nav depth, jump straight to home; otherwise snap
   if (currentTab === "home" && nav.depth > 0) {
-    nav.jumpHome(activeScreenEl, resetToHome);
+    nav.slideTransition({ direction: "jumpHome", mutate: resetToHome });
   } else {
     resetToHome();
   }
@@ -2455,14 +3217,16 @@ audioPickerEl?.addEventListener("change", async (e) => {
 // iOS slide-back animation (back button)
 // ---------------------
 function slideBackTransition(renderUnderneath) {
-  nav.back(activeScreenEl, renderUnderneath);
+  nav.slideTransition({ direction: "back", mutate: renderUnderneath });
 }
 
 function goBack({ animate = false } = {}) {
+  // Prevent double-back while a View Transition is still in flight
+  if (nav._transitionActive) return;
   const doRender = () => {
     if (drawerOpen) { closeDrawer(); return; }
 
-    // Resolve the state to restore: animated backs already popped in nav.back()
+    // Resolve the state to restore: animated backs already popped in slideTransition/nav.back()
     // (pendingBackState), non-animated backs pop here.
     let restoreState = animate ? nav.consumePendingState() : nav.popStacks();
 
@@ -2476,6 +3240,7 @@ function goBack({ animate = false } = {}) {
       songsView = restoreState.songsView;
       overlayView = restoreState.overlayView;
       songsBackTarget = restoreState.songsBackTarget;
+      lyricsEditSongId = restoreState.lyricsEditSongId ?? null;
       // Going back to home resets songs scroll so next visit starts fresh
       if (restoreState.currentTab === "home" && !restoreState.drawerView) songsListScrollTop = 0;
       setHeader(restoreState.headerTitle);
@@ -2534,6 +3299,12 @@ let touchStartY = 0;
 let touchTracking = false;
 let touchMode = null;
 
+// Swipe-back state — purely visual overlays, no state changes during gesture
+let swipeQueenEl = null;    // frozen clone of current screen (follows finger)
+let swipeAceEl = null;      // frozen clone of previous screen (parallaxes underneath)
+let swipeShadow = null;     // dimming overlay between ace and queen
+let swipeActive = false;    // whether a swipe-back gesture is in progress
+
 document.addEventListener("touchstart", (e) => {
   const t = e.changedTouches?.[0];
   if (!t) return;
@@ -2549,9 +3320,70 @@ if (!drawerOpen && t.clientX <= 24) {
   touchMode = onHomeRoot ? "open" : "back";
   touchStartX = t.clientX;
   touchStartY = t.clientY;
-
   if (touchMode === "back") {
-    nav.swipeStart(activeScreenEl);
+    // Guard: no transition during flight, must have state to go back to
+    if (nav._transitionActive || nav.stateStack.length === 0) {
+      touchTracking = false; touchMode = null; return;
+    }
+
+    const navBottomOffset = nav._bottomOffset();
+    const appRect = document.querySelector(".app")?.getBoundingClientRect();
+    const appTop = appRect?.top ?? 0;
+    const appLeft = appRect?.left ?? 0;
+    const appWidth = appRect?.width ?? window.innerWidth;
+
+    // Helper: position a full-app clone as a fixed overlay
+    function positionAppClone(clone, zIndex) {
+      clone.querySelector("#bottomNav")?.remove();
+      clone.querySelector("#sheetOverlay")?.remove();
+      clone.querySelector("#createSheet")?.remove();
+      const s = clone.style;
+      s.position = "fixed";
+      s.top = `${appTop}px`;
+      s.left = `${appLeft}px`;
+      s.width = `${appWidth}px`;
+      s.height = "auto";
+      s.bottom = navBottomOffset;
+      s.zIndex = String(zIndex);
+      s.overflow = "hidden";
+      s.pointerEvents = "none";
+      s.margin = "0";
+      s.background = "var(--bg)";
+      return clone;
+    }
+
+    // Restore scrollTop on a clone's active screen — must be called AFTER
+    // the clone is in the DOM, because scrollTop has no effect on detached nodes.
+    function restoreCloneScroll(clone, scrollTop) {
+      const cloneScreen = clone.querySelector(".screen.is-active");
+      if (cloneScreen) cloneScreen.scrollTop = scrollTop;
+    }
+
+    // 1. Queen: frozen clone of the CURRENT app state (follows finger)
+    const capture = nav._captureApp();
+    if (capture) {
+      swipeQueenEl = positionAppClone(capture.clone, 501);
+      document.body.appendChild(swipeQueenEl);
+      restoreCloneScroll(swipeQueenEl, capture.scrollTop);
+    }
+
+    // 2. Ace: frozen clone of the PREVIOUS app state (captured during forward nav)
+    //    Same technique as queen — full _captureApp() clone, pixel-perfect
+    const aceCapture = nav.appStack.length > 0 ? nav.appStack[nav.appStack.length - 1] : null;
+    if (aceCapture) {
+      const aceClone = nav._cloneDeep(aceCapture.clone);
+      swipeAceEl = positionAppClone(aceClone, 499);
+      swipeAceEl.style.transform = `translateX(-${nav.ACE_PARALLAX}px)`;
+      document.body.appendChild(swipeAceEl);
+      restoreCloneScroll(swipeAceEl, aceCapture.scrollTop);
+    }
+
+    // 3. Shadow between ace and queen for depth
+    swipeShadow = document.createElement("div");
+    swipeShadow.style.cssText = "position:fixed;inset:0;z-index:500;background:rgba(0,0,0,.35);pointer-events:none;";
+    document.body.appendChild(swipeShadow);
+
+    swipeActive = true;
   }
   return;
 }
@@ -2582,7 +3414,14 @@ document.addEventListener("touchmove", (e) => {
   }
 
   if (touchMode === "back") {
-    nav.swipeMove(dx);
+    const clamp = Math.max(0, dx);
+    const ratio = Math.min(clamp / window.innerWidth, 1);
+    // Queen (frozen clone): follow finger
+    if (swipeQueenEl) swipeQueenEl.style.transform = `translateX(${clamp}px)`;
+    // Ace (frozen clone): parallax from -ACE_PARALLAX toward 0
+    if (swipeAceEl) swipeAceEl.style.transform = `translateX(${-nav.ACE_PARALLAX * (1 - ratio)}px)`;
+    // Shadow fades as queen reveals ace
+    if (swipeShadow) swipeShadow.style.opacity = 1 - ratio;
     return;
   }
 
@@ -2593,6 +3432,13 @@ document.addEventListener("touchmove", (e) => {
   }
 }, { passive: true });
 
+function cleanupSwipe() {
+  if (swipeQueenEl) { swipeQueenEl.remove(); swipeQueenEl = null; }
+  if (swipeAceEl) { swipeAceEl.remove(); swipeAceEl = null; }
+  if (swipeShadow) { swipeShadow.remove(); swipeShadow = null; }
+  swipeActive = false;
+}
+
 document.addEventListener("touchend", (e) => {
   if (!touchTracking) return;
   const t = e.changedTouches?.[0];
@@ -2601,10 +3447,25 @@ document.addEventListener("touchend", (e) => {
     const dx = t ? t.clientX - touchStartX : 0;
     const threshold = window.innerWidth * 0.38;
 
-    if (dx >= threshold) {
-      nav.swipeCommit(() => goBack({ animate: false }));
+    if (dx >= threshold && swipeActive) {
+      // Commit: animate overlays, then goBack() handles actual navigation
+      const dur = 250;
+      const ease = "cubic-bezier(.4,0,.2,1)";
+      if (swipeQueenEl) { swipeQueenEl.style.transition = `transform ${dur}ms ${ease}`; swipeQueenEl.style.transform = `translateX(${window.innerWidth}px)`; }
+      if (swipeAceEl) { swipeAceEl.style.transition = `transform ${dur}ms ${ease}`; swipeAceEl.style.transform = "translateX(0)"; }
+      if (swipeShadow) { swipeShadow.style.transition = `opacity ${dur}ms ${ease}`; swipeShadow.style.opacity = "0"; }
+      setTimeout(() => {
+        cleanupSwipe();
+        // Same door, different handle — goBack() does the real navigation
+        goBack({ animate: false });
+      }, dur);
     } else {
-      nav.swipeCancel();
+      // Cancel: spring queen back, remove overlays — no state to restore
+      const dur = swipeActive ? 200 : 0;
+      if (swipeQueenEl) { swipeQueenEl.style.transition = `transform ${dur}ms ease-out`; swipeQueenEl.style.transform = "translateX(0)"; }
+      if (swipeAceEl) { swipeAceEl.style.transition = `transform ${dur}ms ease-out`; swipeAceEl.style.transform = `translateX(-${nav.ACE_PARALLAX}px)`; }
+      if (swipeShadow) { swipeShadow.style.transition = `opacity ${dur}ms ease-out`; swipeShadow.style.opacity = "1"; }
+      setTimeout(() => cleanupSwipe(), dur);
     }
     touchTracking = false;
     touchMode = null;
@@ -2701,8 +3562,9 @@ function stopAndResetPlayback() {
       const inner = miniPlayerEl.querySelector('.miniSwipeInner');
       // Rubber band: apply 18% resistance when swiping in a "dead" direction
       const goingNext = dx < 0;
-      const canGo = goingNext
-        ? ((state.player?.queue || []).length > 0 || !!state.player?.repeat)
+      const repeatOne = state.player?.repeat === "one";
+      const canGo = repeatOne ? false : goingNext
+        ? ((state.player?.queue || []).length > 0 || state.player?.repeat === true)
         : ((state.player?.playHistory || []).length > 0);
       const effectiveDx = canGo ? dx : dx * 0.18;
       if (inner) { inner.style.transition = 'none'; inner.style.transform = `translateX(${effectiveDx}px)`; }
@@ -2734,8 +3596,9 @@ function stopAndResetPlayback() {
       if (didDrag && Math.abs(dx) > 55) {
         const goNext = dx < 0;
         // Dead swipe check
-        const canGoForward = (state.player?.queue || []).length > 0 || !!state.player?.repeat;
-        const canGoBack = ((state.player?.playHistory || []).length > 0);
+        const repeatOne = state.player?.repeat === "one";
+        const canGoForward = !repeatOne && ((state.player?.queue || []).length > 0 || state.player?.repeat === true);
+        const canGoBack = !repeatOne && ((state.player?.playHistory || []).length > 0);
         const isDead = goNext ? !canGoForward : !canGoBack;
         if (isDead) {
           // Rubber band spring back
@@ -2919,7 +3782,7 @@ globalAudio?.addEventListener("ended", () => {
 const sheet = $("#createSheet");
 const sheetOverlay = $("#sheetOverlay");
 const sheetContent = $("#sheetContent");
-let sheetMode = "chooser"; // chooser | song | lyrics | release | songMenu | versionMenu | songFilters
+let sheetMode = "chooser"; // chooser | song | lyrics | release | songMenu | versionMenu | songFilters | shareTarget | shareNewSong | shareExistingSong
 let sheetSongMenuId = null;
 
 function openSongMenu(songId){
@@ -2973,10 +3836,22 @@ function renderSheet() {
     )].sort();
     const defaultProj = state.settings.defaultProject || "";
 
+    // Track the picked file for optional first-version upload
+    let _sheetAudioFile = null;
+
     sheetContent.innerHTML = `
       <div class="sheetTitle">New song</div>
 
       <div class="sheetForm">
+        <button class="sheetFileBtn" id="sheetPickFile">
+          <div class="sheetFileIcon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          </div>
+          <div class="sheetFileMeta">
+            <div class="sheetFileLabel" id="sheetFileName">Add audio file</div>
+            <div class="sheetFileSub" id="sheetFileSub">Optional — or just create a placeholder</div>
+          </div>
+        </button>
         <input id="sheetSongTitle" type="text" placeholder="Title (e.g. Internal)" />
         <select id="sheetSongProject">
           ${existingProjects.map(p => `<option value="${escapeHtml(p)}"${p === defaultProj ? " selected" : ""}>${escapeHtml(p)}</option>`).join("")}
@@ -2994,6 +3869,27 @@ function renderSheet() {
       </div>
     `;
 
+    // Optional file pick — auto-populate title from filename
+    $("#sheetPickFile")?.addEventListener("click", async () => {
+      const file = await pickAudioFile();
+      if (!file) return;
+      _sheetAudioFile = file;
+
+      const nameEl = $("#sheetFileName");
+      const subEl = $("#sheetFileSub");
+      const btn = $("#sheetPickFile");
+      if (nameEl) nameEl.textContent = file.name;
+      if (subEl) subEl.textContent = `${(file.size/1024/1024).toFixed(1)} MB · tap to change`;
+      if (btn) btn.classList.add("sheetFilePicked");
+
+      // Auto-populate title if empty
+      const titleInput = $("#sheetSongTitle");
+      if (titleInput && !titleInput.value.trim()) {
+        const baseName = (file.name || "").replace(/\.[^.]+$/, "").replace(/[-_]/g, " ").trim();
+        titleInput.value = baseName;
+      }
+    });
+
     $("#sheetSongProject")?.addEventListener("change", (e) => {
       const isNew = e.target.value === "__new__";
       const inp = $("#sheetNewProject");
@@ -3003,7 +3899,7 @@ function renderSheet() {
 
     $("#sheetBack")?.addEventListener("click", () => openSheet("chooser"));
 
-    $("#sheetCreateSong")?.addEventListener("click", () => {
+    $("#sheetCreateSong")?.addEventListener("click", async () => {
       const title = ($("#sheetSongTitle")?.value || "").trim();
       if (!title) return toast("Give it a title 🙂");
 
@@ -3032,8 +3928,16 @@ function renderSheet() {
       };
 
       state.songs.unshift(song);
-      saveState();
-      toast("Created 🎸");
+
+      // If user picked a file, create v1 with audio attached
+      if (_sheetAudioFile) {
+        const v = createVersion(song);
+        await attachSharedAudio(song, v, _sheetAudioFile, _sheetAudioFile.name || "audio", _sheetAudioFile.type || "audio/*", _sheetAudioFile.size || 0);
+        toast("Created with audio 🎸");
+      } else {
+        saveState();
+        toast("Created 🎸");
+      }
 
       closeSheet();
       currentTab = "songs";
@@ -3042,6 +3946,7 @@ function renderSheet() {
       setHeader("Song");
       syncTabs();
       render();
+      autoGenerateArt(song);
     });
 
     setTimeout(() => $("#sheetSongTitle")?.focus(), 0);
@@ -3049,29 +3954,13 @@ function renderSheet() {
   }
 
   if (sheetMode === "lyrics") {
-    const value = state.settings.lyricsScratch || "";
-    sheetContent.innerHTML = `
-      <div class="sheetTitle">New lyrics</div>
-
-      <div class="sheetForm">
-        <textarea id="sheetLyrics" placeholder="Write lyric ideas...">${escapeTextarea(value)}</textarea>
-      </div>
-
-      <div class="sheetActions">
-        <button class="sheetBtn ghost" id="sheetBack">Back</button>
-        <button class="sheetBtn primary" id="sheetSaveLyrics">Save</button>
-      </div>
-    `;
-
-    $("#sheetBack")?.addEventListener("click", () => openSheet("chooser"));
-    $("#sheetSaveLyrics")?.addEventListener("click", () => {
-      state.settings.lyricsScratch = $("#sheetLyrics")?.value || "";
-      saveState();
-      toast("Lyrics saved ✍️");
-      closeSheet();
-    });
-
-    setTimeout(() => $("#sheetLyrics")?.focus(), 0);
+    closeSheet();
+    lyricsEditSongId = null;
+    overlayView = "lyrics";
+    setHeader("Lyrics");
+    renderLyricsScratch();
+    openLyricsSongPicker();
+    return;
   }
 
   if (sheetMode === "release") {
@@ -3185,6 +4074,96 @@ function renderSheet() {
     $("#songMenuCancel")?.addEventListener("click", () => {
       closeSheet();
     });
+
+    return;
+  }
+
+  if (sheetMode === "songDetailMenu") {
+    const song = getSong(sheetSongMenuId);
+    if (!song) { closeSheet(); return; }
+    const fv = featuredVersion(song);
+    const title = song?.title || "Song";
+    const canGenArt = !generatingArtSongs.has(song.id) && Date.now() >= artCooldownUntil;
+    const artLabel = generatingArtSongs.has(song.id) ? "Generating..." : song.coverImageUrl ? "Regen Art" : "Gen Art";
+    const hasApiKey = !!(state.settings.replicateKey || "");
+
+    sheetContent.innerHTML = `
+      <div class="sheetTitle">${escapeHtml(title)}</div>
+
+      <div class="sheetForm" style="gap:10px">
+        <button class="sheetChoice" id="sdmDetails">Details</button>
+        <button class="sheetChoice" id="sdmQueue" ${(fv?.link || fv?.fileId || fv?.localAudioId || fv?.driveFileId) ? "" : "disabled"}>Add to Queue</button>
+        <button class="sheetChoice" id="sdmGenArt" ${canGenArt && hasApiKey ? "" : "disabled"}>${escapeHtml(artLabel)}</button>
+        <button class="sheetChoice" id="sdmDelete" style="background: rgba(255,92,119,.12); border-color: rgba(255,92,119,.25);">
+          Delete song
+          <span class="sub">this can't be undone</span>
+        </button>
+        <button class="sheetChoice" id="sdmCancel">Cancel</button>
+      </div>
+    `;
+
+    $("#sdmDetails")?.addEventListener("click", () => {
+      closeSheet();
+      if (!fv) {
+        const first = createVersion(song);
+        if (!first) return toast("Couldn't create version");
+        navigateForward(() => {
+          selectedVersionId = first.id;
+        });
+        return;
+      }
+      navigateForward(() => {
+        selectedVersionId = fv.id;
+      });
+    });
+
+    $("#sdmQueue")?.addEventListener("click", () => {
+      if (fv) addToQueue(song.id, fv.id);
+      closeSheet();
+    });
+
+    $("#sdmGenArt")?.addEventListener("click", async () => {
+      if (!canGenArt) return;
+      const apiKey = state.settings.replicateKey || "";
+      if (!apiKey) { toast("Add your Replicate API key in Settings first"); return; }
+
+      closeSheet();
+      generatingArtSongs.add(song.id);
+      artCooldownUntil = Date.now() + 10000;
+      coverCache.clear();
+      render();
+
+      try {
+        await generateArtForSong(song, apiKey);
+        coverCache.clear();
+        saveState();
+        toast("Art generated");
+      } catch (e) {
+        console.error("Art generation failed:", e);
+        toast(e.message || "Art generation failed");
+      } finally {
+        generatingArtSongs.delete(song.id);
+        coverCache.clear();
+        render();
+        const remaining = artCooldownUntil - Date.now();
+        if (remaining > 0) setTimeout(() => render(), remaining + 50);
+      }
+    });
+
+    $("#sdmDelete")?.addEventListener("click", () => {
+      if (!confirm(`Delete "${song.title}"?`)) return;
+      state.songs = state.songs.filter(s => s.id !== song.id);
+      saveState();
+      toast("Deleted");
+      closeSheet();
+      selectedSongId = null;
+      selectedVersionId = null;
+      songsView = "list";
+      setHeader("Songs");
+      render();
+    });
+
+    $("#sdmCancel")?.addEventListener("click", () => closeSheet());
 
     return;
   }
@@ -3344,6 +4323,28 @@ function renderSheet() {
     $("#pmCancel")?.addEventListener("click", closeSheet);
     return;
   }
+
+  if (sheetMode === "releaseMenu") {
+    const rel = (state.releases || []).find(r => r.id === sheetReleaseMenuId);
+    if (!rel) { closeSheet(); return; }
+    sheetContent.innerHTML = `
+      <div class="sheetTitle">${escapeHtml(rel.title)}</div>
+      <div class="sheetForm" style="gap:10px; margin-top:12px">
+        <button class="sheetChoice" id="rmDelete" style="color:#ef4444">Delete Release</button>
+        <button class="sheetChoice" id="rmCancel">Cancel</button>
+      </div>
+    `;
+    $("#rmDelete")?.addEventListener("click", () => {
+      closeSheet();
+      if (!confirm(`Delete "${rel.title}"?`)) return;
+      state.releases = (state.releases || []).filter(r => r.id !== rel.id);
+      saveState();
+      releaseDetailId = null;
+      render();
+    });
+    $("#rmCancel")?.addEventListener("click", closeSheet);
+    return;
+  }
 }
 
 let sheetVersionMenu = { songId: null, versionId: null };
@@ -3357,6 +4358,13 @@ function openVersionMenu(songId, versionId){
 function openProjectMenu(projectName) {
   sheetProjectMenuName = projectName;
   openSheet("projectMenu");
+}
+
+let sheetReleaseMenuId = null;
+
+function openReleaseMenu(releaseId) {
+  sheetReleaseMenuId = releaseId;
+  openSheet("releaseMenu");
 }
 
 sheetOverlay?.addEventListener("click", closeSheet);
@@ -3415,6 +4423,8 @@ let createGenreSearch = "";
 let createSelectedGenres = [];
 let createSelectedProject = "";
 let createGenreDropdownOpen = false;
+let createAudioFile = null; // optional audio file for first version
+let createTitleValue = ""; // preserve title across re-renders
 
 function openCreateOverlay() {
   if (createOverlayEl) return;
@@ -3424,6 +4434,8 @@ function openCreateOverlay() {
   createSelectedGenres = [];
   createSelectedProject = "";
   createGenreDropdownOpen = false;
+  createAudioFile = null;
+  createTitleValue = "";
 
   createOverlayEl = document.createElement("div");
   createOverlayEl.id = "createOverlay";
@@ -3488,6 +4500,10 @@ function getProjectCoverArt(projectName) {
 function renderCreateOverlay() {
   if (!createOverlayEl) return;
 
+  // Preserve title input across re-renders
+  const prevTitle = createOverlayEl.querySelector("#coTitle");
+  if (prevTitle) createTitleValue = prevTitle.value;
+
   const existingProjects = [...new Set(
     state.songs.map(s => (s.project || "").trim()).filter(Boolean)
   )].sort();
@@ -3535,10 +4551,28 @@ function renderCreateOverlay() {
         ).join("")}</div>`
       : "";
 
+    const hasFile = !!createAudioFile;
+    const fileDisplayName = hasFile ? escapeHtml(createAudioFile.name) : "";
+    const fileDisplaySize = hasFile ? `${(createAudioFile.size/1024/1024).toFixed(1)} MB` : "";
+
     contentHTML = `
+      <button class="coFileBtn${hasFile ? " picked" : ""}" id="coPickFile">
+        <div class="coFileIcon">
+          ${hasFile
+            ? `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>`
+            : `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`
+          }
+        </div>
+        <div class="coFileMeta">
+          <div class="coFileName">${hasFile ? fileDisplayName : "Add audio file"}</div>
+          <div class="coFileSub">${hasFile ? `${fileDisplaySize} · tap to change` : "Optional · or create a placeholder"}</div>
+        </div>
+        ${hasFile ? `<button class="coFileClear" id="coFileClear">&times;</button>` : ""}
+      </button>
+
       <div class="coField">
         <label class="coLabel">Title</label>
-        <input id="coTitle" class="coInput" type="text" placeholder="e.g. Dinosaur Uprising" autocomplete="off" />
+        <input id="coTitle" class="coInput" type="text" placeholder="e.g. Dinosaur Uprising" autocomplete="off" value="${escapeHtml(createTitleValue)}" />
       </div>
 
       <div class="coField">
@@ -3596,6 +4630,26 @@ function renderCreateOverlay() {
   });
 
   if (createTab === "song") {
+    // File pick
+    createOverlayEl.querySelector("#coPickFile")?.addEventListener("click", async (e) => {
+      if (e.target.closest("#coFileClear")) return;
+      const file = await pickAudioFile();
+      if (!file) return;
+      createAudioFile = file;
+      // Auto-populate title if empty
+      if (!createTitleValue.trim()) {
+        createTitleValue = (file.name || "").replace(/\.[^.]+$/, "").replace(/[-_]/g, " ").trim();
+      }
+      renderCreateOverlay();
+    });
+
+    // File clear
+    createOverlayEl.querySelector("#coFileClear")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      createAudioFile = null;
+      renderCreateOverlay();
+    });
+
     // Project selection
     createOverlayEl.querySelectorAll(".coProjCard").forEach(card => {
       card.addEventListener("click", () => {
@@ -3632,6 +4686,7 @@ function renderCreateOverlay() {
       }
     });
     genreInput?.addEventListener("focus", () => {
+      if (createGenreDropdownOpen) return;
       createGenreDropdownOpen = true;
       renderCreateOverlay();
       const newInput = createOverlayEl?.querySelector("#coGenreSearch");
@@ -3673,7 +4728,7 @@ function renderCreateOverlay() {
     });
 
     // Create button
-    createOverlayEl.querySelector("#coCreateSong")?.addEventListener("click", () => {
+    createOverlayEl.querySelector("#coCreateSong")?.addEventListener("click", async () => {
       const title = (createOverlayEl?.querySelector("#coTitle")?.value || "").trim();
       if (!title) return toast("Give it a title");
 
@@ -3704,8 +4759,16 @@ function renderCreateOverlay() {
       };
 
       state.songs.unshift(song);
-      saveState();
-      toast("Created");
+
+      // If user picked a file, create v1 with audio attached
+      if (createAudioFile) {
+        const v = createVersion(song);
+        await attachSharedAudio(song, v, createAudioFile, createAudioFile.name || "audio", createAudioFile.type || "audio/*", createAudioFile.size || 0);
+        toast("Created with audio 🎸");
+      } else {
+        saveState();
+        toast("Created");
+      }
 
       closeCreateOverlay();
       currentTab = "songs";
@@ -3714,6 +4777,7 @@ function renderCreateOverlay() {
       setHeader("Song");
       syncTabs();
       render();
+      autoGenerateArt(song);
     });
 
     // Focus title
@@ -3804,7 +4868,16 @@ function render() {
   const _isBack = nav._isBackNav;
 
   // Drawer screens
-  if (drawerView === "projects") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return projectDetailScreen ? renderProjectSongs(projectDetailScreen) : renderProjects(); }
+  if (drawerView === "projects") {
+    if (projectDetailScreen) {
+      setActiveScreen("projectDetail");
+      if (!_isBack) activeScreenEl.scrollTop = 0;
+      return renderProjectSongs(projectDetailScreen);
+    }
+    setActiveScreen("drawer");
+    if (!_isBack) activeScreenEl.scrollTop = 0;
+    return renderProjects();
+  }
   if (drawerView === "releases") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return releaseDetailId ? renderReleaseDetail(releaseDetailId) : renderReleases(); }
   if (drawerView === "eps") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderEPs(); }
   if (drawerView === "collabs") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderCollaborators(); }
@@ -3812,13 +4885,35 @@ function render() {
   if (drawerView === "about") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderAbout(); }
   if (drawerView === "globalSearch") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderGlobalSearch(); }
 
+  // Overlay screens (lyrics, next actions, etc.)
+  if (overlayView === "lyrics") {
+    setActiveScreen("home");
+    if (!_isBack) activeScreenEl.scrollTop = 0;
+    return renderLyricsScratch();
+  }
+
   // Normal screens
-  if (currentTab === "home") { setActiveScreen("home"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderHome(); }
+  if (currentTab === "home") {
+    setActiveScreen("home");
+    if (!_isBack) activeScreenEl.scrollTop = 0;
+    // On back-nav, reuse existing home if particles are still alive (avoids position jump)
+    const existingGrid = activeScreenEl.querySelector(".homeGrid");
+    if (_isBack && existingGrid && existingGrid._cleanupHome) return;
+    return renderHome();
+  }
   if (currentTab === "songs") {
+    if (selectedSongId && selectedVersionId) {
+      setActiveScreen("versionDetail");
+      if (!_isBack) activeScreenEl.scrollTop = 0;
+      return renderVersionDetail(selectedSongId, selectedVersionId);
+    }
+    if (selectedSongId) {
+      setActiveScreen("songDetail");
+      if (!_isBack) activeScreenEl.scrollTop = 0;
+      return renderSongDetail(selectedSongId);
+    }
     setActiveScreen("songs");
     if (!_isBack) activeScreenEl.scrollTop = 0;
-    if (selectedSongId && selectedVersionId) return renderVersionDetail(selectedSongId, selectedVersionId);
-    if (selectedSongId) return renderSongDetail(selectedSongId);
     if (songsView === "create") return renderSongCreate();
     return renderSongsList();
   }
@@ -3843,9 +4938,10 @@ async function preFetchDriveAudio() {
       if (!v.driveFileId || v.fileId) continue; // no Drive file, or local copy already exists
       const dbKey = `gdrive:${v.driveFileId}`;
       const existing = await audioGet(dbKey);
-      if (existing?.blob) continue; // already cached
+      if (existing?.blob) { _cachedDriveIds.add(v.driveFileId); continue; }
       const blob = await gdriveFetchBlob(v.driveFileId);
       if (blob) {
+        _cachedDriveIds.add(v.driveFileId);
         await putAudioBlob({
           id: dbKey,
           blob,
@@ -3858,6 +4954,355 @@ async function preFetchDriveAudio() {
   }
 }
 
+// ---------------------
+// Web Share Target — receive files shared from other apps
+// ---------------------
+async function checkSharedAudioFile() {
+  const params = new URLSearchParams(window.location.search);
+  if (!params.has("shared")) return;
+
+  // Clean URL so refreshing doesn't re-trigger
+  history.replaceState(null, "", window.location.pathname);
+
+  try {
+    const cache = await caches.open("riffbank-share-target");
+    const resp = await cache.match("shared-audio-file");
+    if (!resp) return;
+
+    const blob = await resp.blob();
+    const fileName = decodeURIComponent(resp.headers.get("X-File-Name") || "audio");
+    const fileType = resp.headers.get("X-File-Type") || "audio/*";
+    const fileSize = parseInt(resp.headers.get("X-File-Size") || "0", 10);
+
+    // Clean up the temp cache
+    await cache.delete("shared-audio-file");
+
+    // Show the share target sheet
+    openShareTargetSheet(blob, fileName, fileType, fileSize);
+  } catch (err) {
+    console.error("Share target error:", err);
+  }
+}
+
+function openShareTargetSheet(blob, fileName, fileType, fileSize) {
+  sheetMode = "shareTarget";
+  const existingSongs = (state.songs || []).filter(s => s.title);
+
+  sheetContent.innerHTML = `
+    <div class="sheetTitle">Shared file</div>
+    <div style="padding:0 20px 12px;color:#aaa;font-size:13px">${escapeHtml(fileName)}</div>
+
+    <div class="sheetRow">
+      <button class="sheetChoice" id="shareNewSong">
+        New song
+        <span class="sub">create a song with this file</span>
+      </button>
+      <button class="sheetChoice" id="shareExistingSong">
+        Existing song
+        <span class="sub">add as latest version</span>
+      </button>
+    </div>
+  `;
+
+  document.body.classList.add("sheetOpen");
+  sheet?.setAttribute("aria-hidden", "false");
+  sheetOverlay?.setAttribute("aria-hidden", "false");
+
+  $("#shareNewSong")?.addEventListener("click", () => {
+    closeSheet();
+    openShareNewSongSheet(blob, fileName, fileType, fileSize);
+  });
+
+  $("#shareExistingSong")?.addEventListener("click", () => {
+    closeSheet();
+    openShareExistingSongSheet(blob, fileName, fileType, fileSize);
+  });
+}
+
+function openShareNewSongSheet(blob, fileName, fileType, fileSize) {
+  sheetMode = "shareNewSong";
+
+  const existingProjects = [...new Set(
+    state.songs.map(s => (s.project || "").trim()).filter(Boolean)
+  )].sort();
+  const defaultProj = state.settings.defaultProject || "";
+
+  sheetContent.innerHTML = `
+    <div class="sheetTitle">New song</div>
+    <div style="padding:0 20px 12px;color:#aaa;font-size:13px">${escapeHtml(fileName)}</div>
+
+    <div class="sheetForm">
+      <input id="sheetSongTitle" type="text" placeholder="Title (e.g. Internal)" />
+      <select id="sheetSongProject">
+        ${existingProjects.map(p => `<option value="${escapeHtml(p)}"${p === defaultProj ? " selected" : ""}>${escapeHtml(p)}</option>`).join("")}
+        <option value="__new__"${!existingProjects.length ? " selected" : ""}>+ New project…</option>
+      </select>
+      <input id="sheetNewProject" type="text" placeholder="Project name"
+        style="display:${!existingProjects.length ? "block" : "none"}; margin-top:-4px" />
+      <input id="sheetSongGenre" type="text" placeholder="Genre" value="${escapeHtml(state.settings.defaultGenre || "")}" />
+      <input id="sheetSongSprint" type="text" placeholder="Sprint" value="${escapeHtml(state.settings.defaultSprint || "")}" />
+    </div>
+
+    <div class="sheetActions">
+      <button class="sheetBtn ghost" id="sheetBack">Back</button>
+      <button class="sheetBtn primary" id="sheetCreateSong">Create</button>
+    </div>
+  `;
+
+  document.body.classList.add("sheetOpen");
+  sheet?.setAttribute("aria-hidden", "false");
+  sheetOverlay?.setAttribute("aria-hidden", "false");
+
+  $("#sheetSongProject")?.addEventListener("change", (e) => {
+    const isNew = e.target.value === "__new__";
+    const inp = $("#sheetNewProject");
+    if (inp) { inp.style.display = isNew ? "block" : "none"; }
+    if (isNew) setTimeout(() => $("#sheetNewProject")?.focus(), 0);
+  });
+
+  $("#sheetBack")?.addEventListener("click", () => {
+    closeSheet();
+    openShareTargetSheet(blob, fileName, fileType, fileSize);
+  });
+
+  $("#sheetCreateSong")?.addEventListener("click", async () => {
+    const title = ($("#sheetSongTitle")?.value || "").trim();
+    if (!title) return toast("Give it a title 🙂");
+
+    const projSel = $("#sheetSongProject")?.value || "";
+    const projectRaw = projSel === "__new__"
+      ? ($("#sheetNewProject")?.value || "").trim()
+      : projSel;
+
+    const song = {
+      id: uid(),
+      title,
+      project: projectRaw || "Project",
+      genre: ($("#sheetSongGenre")?.value || "").trim() || "",
+      sprint: ($("#sheetSongSprint")?.value || "").trim() || "Unsorted",
+      instrumentation: "",
+      collaborators: "",
+      status: "Idea",
+      stuckState: "Active",
+      nextAction: "",
+      vibes: "",
+      lyrics: "",
+      notes: "",
+      versions: [],
+      createdAt: nowStamp(),
+      updatedAt: nowStamp(),
+    };
+
+    state.songs.unshift(song);
+
+    // Create version and attach audio
+    const v = createVersion(song);
+    await attachSharedAudio(song, v, blob, fileName, fileType, fileSize);
+
+    closeSheet();
+    toast("Created with audio 🎸");
+
+    currentTab = "songs";
+    songsView = "list";
+    selectedSongId = song.id;
+    setHeader("Song");
+    syncTabs();
+    render();
+    autoGenerateArt(song);
+  });
+
+  setTimeout(() => $("#sheetSongTitle")?.focus(), 0);
+}
+
+function openShareExistingSongSheet(blob, fileName, fileType, fileSize) {
+  sheetMode = "shareExistingSong";
+
+  const songs = (state.songs || []).filter(s => s.title);
+
+  sheetContent.innerHTML = `
+    <div class="sheetTitle">Choose song</div>
+    <div style="padding:0 20px 12px;color:#aaa;font-size:13px">${escapeHtml(fileName)}</div>
+
+    <div class="sheetForm">
+      <input id="shareSearchSongs" type="text" placeholder="Search songs…" />
+    </div>
+
+    <div id="shareSongList" class="sheetRow" style="flex-direction:column;max-height:50vh;overflow-y:auto">
+      ${songs.map(s => `
+        <button class="sheetChoice sharePickSong" data-id="${s.id}" style="text-align:left">
+          ${escapeHtml(s.title)}
+          <span class="sub">${escapeHtml(s.project || "")}${s.versions?.length ? ` · ${s.versions.length} version${s.versions.length > 1 ? "s" : ""}` : ""}</span>
+        </button>
+      `).join("")}
+    </div>
+
+    <div class="sheetActions">
+      <button class="sheetBtn ghost" id="sheetBack">Back</button>
+    </div>
+  `;
+
+  document.body.classList.add("sheetOpen");
+  sheet?.setAttribute("aria-hidden", "false");
+  sheetOverlay?.setAttribute("aria-hidden", "false");
+
+  // Search filter
+  $("#shareSearchSongs")?.addEventListener("input", (e) => {
+    const q = (e.target.value || "").toLowerCase();
+    const list = document.getElementById("shareSongList");
+    if (!list) return;
+    for (const btn of list.querySelectorAll(".sharePickSong")) {
+      const text = (btn.textContent || "").toLowerCase();
+      btn.style.display = !q || text.includes(q) ? "" : "none";
+    }
+  });
+
+  $("#sheetBack")?.addEventListener("click", () => {
+    closeSheet();
+    openShareTargetSheet(blob, fileName, fileType, fileSize);
+  });
+
+  // Song pick handlers
+  for (const btn of document.querySelectorAll(".sharePickSong")) {
+    btn.addEventListener("click", async () => {
+      const songId = btn.dataset.id;
+      const song = getSong(songId);
+      if (!song) return toast("Song not found 😅");
+
+      const v = createVersion(song);
+      await attachSharedAudio(song, v, blob, fileName, fileType, fileSize);
+
+      closeSheet();
+      toast(`Added v${song.versions.length} to ${song.title} 🎸`);
+
+      currentTab = "songs";
+      songsView = "list";
+      selectedSongId = song.id;
+      setHeader("Song");
+      syncTabs();
+      render();
+    });
+  }
+
+  setTimeout(() => $("#shareSearchSongs")?.focus(), 0);
+}
+
+async function attachSharedAudio(song, v, blob, fileName, fileType, fileSize) {
+  const id = uid();
+
+  await audioPut({
+    id,
+    name: fileName,
+    type: fileType,
+    size: fileSize,
+    blob,
+    createdAt: nowStamp(),
+  });
+
+  v.fileId = id;
+  v.fileName = fileName;
+  v.fileType = fileType;
+  v.fileSize = fileSize;
+
+  song.updatedAt = nowStamp();
+  saveState();
+
+  // Upload to Google Drive in background if connected
+  if (gdriveIsConnected()) {
+    toast("Uploading to Drive… ☁️");
+    const file = new File([blob], fileName, { type: fileType });
+    const suggested = suggestedFileName(song, fileName);
+    gdriveUploadAudio({
+      file,
+      fileName: suggested,
+      project: song.project,
+      songTitle: song.title,
+    }).then(result => {
+      if (result.success) {
+        v.driveFileId = result.driveFileId;
+        v.driveWebViewLink = result.driveWebViewLink || "";
+        saveState();
+        toast("Synced to Drive ✅ ☁️");
+      } else {
+        toast("Local saved, Drive failed 😅");
+      }
+    }).catch(() => toast("Local saved, Drive failed 😅"));
+  }
+}
+
+// ── Auth screen (card layout + Sal) ───────────────────────────────
+function showAuthScreen() {
+  return new Promise((resolve) => {
+    const el = document.createElement("div");
+    el.id = "authScreen";
+    el.className = "authScreen";
+    el.innerHTML = `
+      <div class="authCard">
+        <div class="authSalWrap">${salSvg(80)}</div>
+        <div class="authLogo">RiffBank</div>
+        <div class="authToggle">
+          <button class="authToggleBtn active" data-mode="login">Log In</button>
+          <button class="authToggleBtn" data-mode="signup">Sign Up</button>
+        </div>
+        <form id="authForm" autocomplete="on">
+          <input id="authEmail" type="email" placeholder="Email" required autocomplete="email" />
+          <input id="authPass" type="password" placeholder="Password" required autocomplete="current-password" />
+          <div id="authError" class="authError"></div>
+          <button id="authSubmit" type="submit" class="authSubmitBtn">Log In</button>
+        </form>
+      </div>
+    `;
+    document.body.appendChild(el);
+
+    let mode = "login";
+    const toggleBtns = el.querySelectorAll(".authToggleBtn");
+    const submitBtn = el.querySelector("#authSubmit");
+    const errorEl = el.querySelector("#authError");
+    const passInput = el.querySelector("#authPass");
+
+    toggleBtns.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        mode = btn.dataset.mode;
+        toggleBtns.forEach((b) => b.classList.toggle("active", b === btn));
+        submitBtn.textContent = mode === "login" ? "Log In" : "Create Account";
+        passInput.autocomplete = mode === "login" ? "current-password" : "new-password";
+        errorEl.textContent = "";
+      });
+    });
+
+    el.querySelector("#authForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const email = el.querySelector("#authEmail").value.trim();
+      const pass = el.querySelector("#authPass").value;
+      errorEl.textContent = "";
+      errorEl.style.color = "";
+      submitBtn.disabled = true;
+      submitBtn.textContent = mode === "login" ? "Logging in..." : "Creating account...";
+
+      try {
+        if (mode === "signup") {
+          const data = await signUp(email, pass);
+          if (data.user && !data.session) {
+            errorEl.style.color = "#22c55e";
+            errorEl.textContent = "Check your email to confirm, then log in!";
+            submitBtn.disabled = false;
+            submitBtn.textContent = "Create Account";
+            return;
+          }
+        } else {
+          await signIn(email, pass);
+        }
+        el.classList.add("authFadeOut");
+        setTimeout(() => { el.remove(); resolve(); }, 300);
+      } catch (err) {
+        errorEl.style.color = "";
+        errorEl.textContent = err.message || "Something went wrong";
+        submitBtn.disabled = false;
+        submitBtn.textContent = mode === "login" ? "Log In" : "Create Account";
+      }
+    });
+  });
+}
+
 async function init() {
   if (!DISABLE_SPLASH) {
     await runSplashSequence();
@@ -3867,14 +5312,17 @@ async function init() {
     await new Promise(r => requestAnimationFrame(r));
   }
 
-  // Auto-seed disabled — use Drive sync or manual import instead
-  // const seeded = await seedDefaultLibraryIfNeeded({ force: false });
-  // if (seeded) toast("Seeded library 🎧");
+  // ── Auth gate: require login before loading app ──
+  const session = await getSession();
+  if (!session) {
+    document.body.classList.remove("splashing");
+    await showAuthScreen();
+  } else {
+    document.body.classList.remove("splashing");
+  }
 
-  // Load Google Identity Services (non-blocking, for Drive integration)
+  // Load Google Drive integration (non-blocking, still available alongside Supabase)
   gdriveLoadGIS();
-
-  // Incremental sync runs in background after render (see below)
 
   // Seed example release if none exist yet
   if (!state.releases.length) {
@@ -3893,20 +5341,38 @@ async function init() {
     }
   }
 
-  // Restore cover art from IndexedDB cache (instant, no auth needed)
-  await restoreCoverUrlsFromCache();
-
+  // Render immediately so user sees the home screen right after welcome
   setHeader("RiffBank");
   syncTabs();
   render();
   syncMiniPlayerUI();
 
-  // Background: incremental sync + pre-fetch (non-blocking)
+  // Now that the home screen is painted, fade out any remaining onboarding overlays
+  dismissOnboarding();
+
+  // Background: restore cover art, scan cached blobs, sync Drive (non-blocking)
+  restoreCoverUrlsFromCache().then(() => render()).catch(() => {});
+
+  (async () => {
+    for (const song of (state.songs || [])) {
+      for (const v of (song.versions || [])) {
+        if (!v.driveFileId || v.fileId || v.localAudioId) continue;
+        try {
+          const rec = await audioGet(`gdrive:${v.driveFileId}`);
+          if (rec?.blob) _cachedDriveIds.add(v.driveFileId);
+        } catch {}
+      }
+    }
+  })();
+
   if (gdriveIsConnected()) {
     incrementalSyncFromDrive().then(() => {
       preFetchDriveAudio().catch(console.warn);
     }).catch(console.warn);
   }
+
+  // Check for Web Share Target file
+  checkSharedAudioFile();
 }
 
 // Incremental sync: pull Drive state JSON and merge only new/changed songs
@@ -3991,6 +5457,10 @@ if (document.readyState === "loading") {
 // ---------------------
 function renderProjects() {
   setHeader("Projects");
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("collapseTitle");
+  const h1 = appEl?.querySelector(".titleblock h1");
+  if (h1) h1.style.opacity = "0";
 
   const projects = Array.from(
     new Set([
@@ -4006,7 +5476,6 @@ function renderProjects() {
     .map((p, i) => {
       const projSongs = state.songs.filter(s => (s.project || "").trim() === p);
       const count = projSongs.length;
-      const isDefault = (state.settings.defaultProject || "").trim() === p;
       const repSong = projSongs.slice().sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))[0]
         || { id: p, title: p, project: p, genre: "" };
       // Build mini song list for sleeve reveal (up to 4 songs)
@@ -4030,7 +5499,6 @@ function renderProjects() {
               <div class="pName">${escapeHtml(p)}</div>
               <div class="pMeta">
                 <span>${count} song${count === 1 ? "" : "s"}</span>
-                ${isDefault ? `<span class="pill good">Default</span>` : ""}
               </div>
             </div>
           </div>
@@ -4039,6 +5507,7 @@ function renderProjects() {
     }).join("");
 
   activeScreenEl.innerHTML = `
+    <div class="songsPageTitle">Projects</div>
     <div class="songsHead">
       <div class="songsBar">
         <input id="projSearch" type="text" placeholder="Search projects..." />
@@ -4146,10 +5615,9 @@ function renderProjects() {
     }, 320);
     // Navigate after short delay so animation is visible
     setTimeout(() => {
-      captureNavState();
-      projectDetailScreen = projName;
-      render();
-      triggerForwardSlide();
+      navigateForward(() => {
+        projectDetailScreen = projName;
+      });
     }, 120);
   }
 
@@ -4168,10 +5636,40 @@ function renderProjects() {
 
   $("#projSearch")?.addEventListener("input", applyProjFilter);
   applyProjFilter();
+
+  // Collapse title: fade small title in as big title scrolls behind topbar
+  if (activeScreenEl._collapseTitleScroll) {
+    activeScreenEl.removeEventListener("scroll", activeScreenEl._collapseTitleScroll);
+    activeScreenEl._collapseTitleScroll = null;
+  }
+  const _screen = activeScreenEl;
+  const _sm = document.querySelector(".app.collapseTitle .titleblock h1");
+  if (_sm) {
+    requestAnimationFrame(() => {
+      const bt = _screen.querySelector(".songsPageTitle");
+      if (!bt) return;
+      const topbarEl = document.querySelector(".topbar");
+      const screenTop = _screen.getBoundingClientRect().top;
+      const topbarBottom = topbarEl ? topbarEl.getBoundingClientRect().bottom : 80;
+      const fadeStart = bt.offsetTop - (topbarBottom - screenTop);
+      const fadeEnd = fadeStart + (bt.offsetHeight || 40);
+      const range = fadeEnd - fadeStart;
+      const onScroll = () => {
+        const progress = Math.min(1, Math.max(0, (_screen.scrollTop - fadeStart) / range));
+        _sm.style.opacity = progress;
+      };
+      _screen._collapseTitleScroll = onScroll;
+      _screen.addEventListener("scroll", onScroll, { passive: true });
+      onScroll();
+    });
+  }
 }
 
 function renderProjectSongs(projectName) {
   setHeader(projectName);
+  // Hide topbar title — the hero has its own large title
+  const _tbH1 = document.querySelector(".topbar h1");
+  if (_tbH1) _tbH1.textContent = "";
   const appEl = document.querySelector(".app");
   appEl?.classList.add("pdActive");
   appEl?.classList.remove("pdScrolled");
@@ -4182,10 +5680,7 @@ function renderProjectSongs(projectName) {
   const topbarH = topbarEl ? topbarEl.offsetHeight : 0;
   activeScreenEl.style.setProperty("--pd-topbar-h", topbarH + "px");
 
-  if (activeScreenEl) {
-    activeScreenEl.scrollTop = 0;
-    activeScreenEl.style.overflowY = "scroll";
-  }
+  activeScreenEl.style.overflowY = "scroll";
 
   const songs = state.songs.filter(s => (s.project || "").trim() === projectName);
 
@@ -4211,6 +5706,7 @@ function renderProjectSongs(projectName) {
         <div class="songMain">
           <div class="songTop">
             <div class="songTitleRow">
+              ${syncDot(s)}
               <div class="songTitle">${escapeHtml(s.title || "Untitled")}</div>
             </div>
             <button class="songMore" data-proj-song-more="${s.id}" aria-label="Song menu">&#x22EF;</button>
@@ -4255,6 +5751,9 @@ function renderProjectSongs(projectName) {
       </div>
     </div>
   `;
+
+  // Reset scroll AFTER innerHTML so the hero is visible on load
+  activeScreenEl.scrollTop = 0;
 
   /* ── Tab switching ── */
   const tabBody = $("#pdTabBody");
@@ -4302,18 +5801,18 @@ function renderProjectSongs(projectName) {
   /* ── Song row listeners ── */
   function attachSongListeners() {
     activeScreenEl.querySelectorAll("[data-open-song]").forEach(row => {
-      row.addEventListener("click", (e) => {
+      row.addEventListener("click", async (e) => {
         if (e.target.closest("[data-proj-song-more]")) return;
-        captureNavState();
         const sid = row.getAttribute("data-open-song");
-        projectDetailScreen = null;
-        drawerView = null;
-        currentTab = "songs";
-        songsView = "detail";
-        selectedSongId = sid;
-        selectedVersionId = null;
-        render();
-        triggerForwardSlide();
+        // Play from this song onwards (active version of each)
+        const idx = items.findIndex(it => it.songId === sid);
+        if (idx < 0) return toast("No playable version");
+        const fromHere = [...items.slice(idx), ...items.slice(0, idx)];
+        state.player.nowPlaying = fromHere[0];
+        state.player.queue = fromHere.slice(1);
+        state.player.repeatQueue = fromHere;
+        saveState();
+        await playNowPlaying({ autoplay: true });
       });
     });
 
@@ -4338,10 +5837,6 @@ function renderProjectSongs(projectName) {
     const FADE_PX = 200;
     requestAnimationFrame(() => {
       maxScroll = activeScreenEl.scrollHeight - activeScreenEl.clientHeight;
-      // Force pdTabBody content to overflow so iOS elastic scroll works
-      const tb = activeScreenEl.querySelector(".pdTabBody");
-      const sl = tb?.querySelector(".pdSongList, .pdPlaceholder");
-      if (tb && sl) sl.style.minHeight = (tb.clientHeight + 1) + "px";
     });
 
     activeScreenEl.addEventListener("scroll", () => {
@@ -4370,6 +5865,10 @@ function renderProjectSongs(projectName) {
 
 function renderReleases() {
   setHeader("Releases");
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("collapseTitle");
+  const h1 = appEl?.querySelector(".titleblock h1");
+  if (h1) h1.style.opacity = "0";
 
   const releases = state.releases || [];
 
@@ -4379,44 +5878,108 @@ function renderReleases() {
     return new Date(+y, +m - 1, +day).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
   };
 
-  const rows = releases.map(r => {
+  const releaseCompositeArt = (r, lite) => {
+    const songs = (r.songIds || []).map(id => state.songs.find(s => s.id === id)).filter(Boolean);
+    if (!songs.length) {
+      const fakeSong = { id: r.id, title: r.title, project: r.artist, genre: "" };
+      return coverSvg(fakeSong, { lite });
+    }
+    if (songs.length === 1) return coverSvg(songs[0], { lite });
+    // 2 → side by side, 3 → top-left big + right column, 4+ → 2×2 grid
+    const cells = songs.slice(0, 4);
+    const cls = `relMosaic relMosaic${Math.min(cells.length, 4)}`;
+    return `<div class="${cls}">${cells.map(s => `<div class="relMosaicCell">${coverSvg(s, { lite })}</div>`).join("")}</div>`;
+  };
+
+  const releaseCard = (r, span) => {
     const count = (r.songIds || []).length;
-    const fakeSong = { id: r.id, title: r.title, project: r.artist, genre: "" };
+    const spanStyle = span > 1 ? ` style="grid-column:span ${span}"` : "";
     return `
-      <div class="songRow" data-rel-open="${escapeHtml(r.id)}">
-        <div class="songThumb" aria-hidden="true">${coverSvg(fakeSong, { lite: true })}</div>
-        <div class="songMain">
-          <div class="songTop">
-            <div class="songTitleRow"><div class="songTitle">${escapeHtml(r.title)}</div></div>
+      <div class="songCard" data-rel-open="${escapeHtml(r.id)}"${spanStyle}>
+        <div class="songCardStack">
+          <div class="songCardLayer songCardLayer2"></div>
+          <div class="songCardLayer songCardLayer1"></div>
+          <div class="songCardFront">
+            <div class="songCardArt">${releaseCompositeArt(r, true)}</div>
           </div>
-          <div class="songSub">${escapeHtml(r.artist || "—")} · ${escapeHtml(fmtDate(r.releaseDate))} · ${count} song${count === 1 ? "" : "s"}</div>
+        </div>
+        <div class="songCardInfo">
+          <div class="songCardTitle">${escapeHtml(r.title)}</div>
+          <div class="songCardSub">${escapeHtml(r.artist || "—")} · ${count} song${count !== 1 ? "s" : ""}</div>
         </div>
       </div>
     `;
-  }).join("");
+  };
+
+  const buildRelGrid = (items) => {
+    const count = items.length;
+    if (count === 0) return "";
+    if (count === 1) return releaseCard(items[0], 3);
+    if (count === 2) return releaseCard(items[0], 2) + releaseCard(items[1], 1);
+    const remainder = count % 3;
+    if (remainder === 0) return items.map(r => releaseCard(r, 1)).join("");
+    const fullCount = count - (remainder === 1 ? 4 : remainder);
+    let html = items.slice(0, fullCount).map(r => releaseCard(r, 1)).join("");
+    const tail = items.slice(fullCount);
+    if (remainder === 2) {
+      html += releaseCard(tail[0], 2) + releaseCard(tail[1], 1);
+    } else {
+      // remainder === 1 → take last 4, two rows of span 2 + span 1 (alternating)
+      html += releaseCard(tail[0], 2) + releaseCard(tail[1], 1);
+      html += releaseCard(tail[2], 1) + releaseCard(tail[3], 2);
+    }
+    return html;
+  };
 
   activeScreenEl.innerHTML = `
+    <div class="songsPageTitle">Releases</div>
     <div class="songsHead">
       <div class="songsBar" style="justify-content:space-between;align-items:center">
-        <span style="font-size:15px;font-weight:600;color:rgba(255,255,255,.6)">${releases.length} release${releases.length === 1 ? "" : "s"}</span>
+        <span style="font-size:13px;font-weight:600;color:rgba(255,255,255,.4)">${releases.length} release${releases.length === 1 ? "" : "s"}</span>
         <button class="btn" id="addReleaseBtn" style="padding:6px 14px;font-size:13px">+ Add Release</button>
       </div>
     </div>
     <div class="songsList">
-      ${rows || `<div class="small">No releases yet. Tap "+ Add Release" to plan your first drop.</div>`}
+      ${buildRelGrid(releases) || `<div class="small" style="grid-column:1/-1">No releases yet. Tap "+ Add Release" to plan your first drop.</div>`}
     </div>
   `;
 
-  activeScreenEl.querySelectorAll("[data-rel-open]").forEach(row => {
-    row.addEventListener("click", () => {
-      captureNavState();
-      releaseDetailId = row.getAttribute("data-rel-open");
-      render();
-      triggerForwardSlide();
+  activeScreenEl.querySelectorAll(".songCard[data-rel-open]").forEach(el => {
+    el.addEventListener("click", () => {
+      navigateForward(() => {
+        releaseDetailId = el.getAttribute("data-rel-open");
+      });
     });
   });
 
   $("#addReleaseBtn")?.addEventListener("click", () => openSheet("release"));
+
+  // Collapse title: fade small title in as big title scrolls behind topbar
+  if (activeScreenEl._collapseTitleScroll) {
+    activeScreenEl.removeEventListener("scroll", activeScreenEl._collapseTitleScroll);
+    activeScreenEl._collapseTitleScroll = null;
+  }
+  const _screen = activeScreenEl;
+  const _sm = document.querySelector(".app.collapseTitle .titleblock h1");
+  if (_sm) {
+    requestAnimationFrame(() => {
+      const bt = _screen.querySelector(".songsPageTitle");
+      if (!bt) return;
+      const topbarEl = document.querySelector(".topbar");
+      const screenTop = _screen.getBoundingClientRect().top;
+      const topbarBottom = topbarEl ? topbarEl.getBoundingClientRect().bottom : 80;
+      const fadeStart = bt.offsetTop - (topbarBottom - screenTop);
+      const fadeEnd = fadeStart + (bt.offsetHeight || 40);
+      const range = fadeEnd - fadeStart;
+      const onScroll = () => {
+        const progress = Math.min(1, Math.max(0, (_screen.scrollTop - fadeStart) / range));
+        _sm.style.opacity = progress;
+      };
+      _screen._collapseTitleScroll = onScroll;
+      _screen.addEventListener("scroll", onScroll, { passive: true });
+      onScroll();
+    });
+  }
 }
 
 function renderReleaseDetail(releaseId) {
@@ -4424,7 +5987,17 @@ function renderReleaseDetail(releaseId) {
   if (!release) { releaseDetailId = null; return renderReleases(); }
 
   setHeader(release.title);
-  if (activeScreenEl) activeScreenEl.scrollTop = 0;
+  // Hide topbar title — the hero has its own large title
+  const _tbH1 = document.querySelector(".topbar h1");
+  if (_tbH1) _tbH1.textContent = "";
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("pdActive");
+  appEl?.classList.remove("pdScrolled");
+  activeScreenEl.style.paddingBottom = "0px";
+  const topbarEl = document.querySelector(".topbar");
+  const topbarH = topbarEl ? topbarEl.offsetHeight : 0;
+  activeScreenEl.style.setProperty("--pd-topbar-h", topbarH + "px");
+  activeScreenEl.style.overflowY = "scroll";
 
   const fmtDate = (d) => {
     if (!d) return "No date set";
@@ -4443,16 +6016,33 @@ function renderReleaseDetail(releaseId) {
       return { songId: s.id, versionId: vv.id };
     });
 
-  const fakeSong = { id: release.id, title: release.title, project: release.artist, genre: "" };
-  const heroCover = coverSvg(fakeSong);
+  // Composite art for release hero
+  const releaseHeroArt = (rel, lite) => {
+    const rSongs = (rel.songIds || []).map(id => state.songs.find(s => s.id === id)).filter(Boolean);
+    if (!rSongs.length) {
+      const fake = { id: rel.id, title: rel.title, project: rel.artist, genre: "" };
+      return coverSvg(fake, { lite });
+    }
+    if (rSongs.length === 1) return coverSvg(rSongs[0], { lite });
+    const cells = rSongs.slice(0, 4);
+    const cls = `relMosaic relMosaic${Math.min(cells.length, 4)}`;
+    return `<div class="${cls}">${cells.map(s => `<div class="relMosaicCell">${coverSvg(s, { lite })}</div>`).join("")}</div>`;
+  };
+  const heroCover = releaseHeroArt(release, false);
 
-  const rows = songs.map(s => {
+  const songRows = songs.map((s, i) => {
     return `
-      <div class="songRow" data-open-song="${s.id}">
-        <div class="songThumb" aria-hidden="true">${coverSvg(s, { lite: true })}</div>
+      <div class="pdSongRow" data-open-song="${s.id}">
+        <span class="pdSongNum">${i + 1}</span>
+        <div class="songThumb" aria-hidden="true">
+          ${coverSvg(s, { lite: true })}
+        </div>
         <div class="songMain">
           <div class="songTop">
-            <div class="songTitleRow"><div class="songTitle">${escapeHtml(s.title || "Untitled")}</div></div>
+            <div class="songTitleRow">
+              <div class="songTitle">${escapeHtml(s.title || "Untitled")}</div>
+            </div>
+            <button class="songMore" data-rel-song-more="${s.id}" aria-label="Song menu">&#x22EF;</button>
           </div>
           <div class="songSub">${escapeHtml(s.genre || s.project || "—")}</div>
         </div>
@@ -4461,66 +6051,126 @@ function renderReleaseDetail(releaseId) {
   }).join("");
 
   activeScreenEl.innerHTML = `
-    <div class="albumHero">
-      <div class="albumBg" aria-hidden="true">${heroCover}</div>
-      <div class="albumTop">
-        <div class="albumArt" aria-hidden="true">${heroCover}</div>
-        <div class="albumText">
-          <div class="albumTitle">${escapeHtml(release.title)}</div>
-          <div class="albumMeta">${escapeHtml(release.artist || "—")} · ${escapeHtml(fmtDate(release.releaseDate))}</div>
-        </div>
-      </div>
-      <div class="albumActions">
-        <button class="songHeroPlay" id="relPlayAll" ${!items.length ? "disabled" : ""}>▶ Play All</button>
-        <button class="songHeroQueue" id="relShuffle" ${!items.length ? "disabled" : ""}>⇄ Shuffle</button>
+    <div class="pdHero">
+      <div class="pdHeroBg" aria-hidden="true">${heroCover}</div>
+      <div class="pdHeroContent">
+        <div class="pdHeroTitle">${escapeHtml(release.title)}</div>
+        <div class="pdHeroMeta">${escapeHtml(release.artist || "—")} · ${escapeHtml(fmtDate(release.releaseDate))}</div>
       </div>
     </div>
 
-    <div class="versionsWrap">
-      <div class="versionsHeader">
-        <div class="versionsTitle">Songs (${songs.length})</div>
+    <div class="pdActions">
+      <button class="pdPlayBtn" id="relPlayAll" ${!items.length ? "disabled" : ""}>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+      </button>
+      <button class="pdShuffleBtn" id="relShuffle" ${!items.length ? "disabled" : ""}>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+      </button>
+      <button class="pdMoreBtn" id="relMoreMenu" aria-label="Release menu">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
+      </button>
+    </div>
+
+    <div class="pdSticky">
+      <div class="pdTabs">
+        <button class="pdTab pdTabActive">Songs</button>
       </div>
-      <div class="versionsRows songsList">
-        ${rows || `<div class="small" style="padding:12px 2px">No songs linked to this release yet.</div>`}
+      <div class="pdTabBody" id="pdTabBody">
+        <div class="pdSongList">
+          ${songRows || `<div class="small" style="padding:24px 0; text-align:center">No songs linked to this release yet.</div>`}
+        </div>
       </div>
     </div>
   `;
 
+  // Reset scroll AFTER innerHTML so the hero is visible on load
+  activeScreenEl.scrollTop = 0;
+
+  /* ── Play / Shuffle ── */
   $("#relPlayAll")?.addEventListener("click", async () => {
-    if (!items.length) return toast("No playable songs 😅");
+    if (!items.length) return toast("No playable songs");
     const all = [...items];
     state.player.nowPlaying = all[0];
     state.player.queue = all.slice(1);
     state.player.repeatQueue = all;
     saveState();
     await playNowPlaying({ autoplay: true });
-    toast("Playing ▶️");
   });
 
   $("#relShuffle")?.addEventListener("click", async () => {
-    if (!items.length) return toast("No playable songs 😅");
+    if (!items.length) return toast("No playable songs");
     const all = shuffleArray([...items]);
     state.player.nowPlaying = all[0];
     state.player.queue = all.slice(1);
     state.player.repeatQueue = all;
     saveState();
     await playNowPlaying({ autoplay: true });
-    toast("Shuffled ▶️");
   });
 
-  activeScreenEl.querySelectorAll("[data-open-song]").forEach(row => {
-    row.addEventListener("click", () => {
-      captureNavState();
-      releaseDetailId = null;
-      drawerView = null;
-      currentTab = "songs";
-      songsView = "detail";
-      selectedSongId = row.getAttribute("data-open-song");
-      selectedVersionId = null;
-      render();
-      triggerForwardSlide();
-    });
+  $("#relMoreMenu")?.addEventListener("click", () => {
+    openReleaseMenu(releaseId);
   });
+
+  /* ── Song row listeners ── */
+  function attachSongListeners() {
+    activeScreenEl.querySelectorAll("[data-open-song]").forEach(row => {
+      row.addEventListener("click", (e) => {
+        if (e.target.closest("[data-rel-song-more]")) return;
+        const sid = row.getAttribute("data-open-song");
+        navigateForward(() => {
+          releaseDetailId = null;
+          drawerView = null;
+          currentTab = "songs";
+          songsView = "detail";
+          selectedSongId = sid;
+          selectedVersionId = null;
+        });
+      });
+    });
+
+    activeScreenEl.querySelectorAll("[data-rel-song-more]").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openSongMenu(btn.getAttribute("data-rel-song-more"));
+      });
+    });
+  }
+
+  attachSongListeners();
+
+  /* ── Fade hero + actions to black, solid topbar as user scrolls ── */
+  const heroEl = activeScreenEl.querySelector(".pdHero");
+  const heroBgEl = heroEl?.querySelector(".pdHeroBg");
+  const heroContentEl = heroEl?.querySelector(".pdHeroContent");
+  const actionsEl = activeScreenEl.querySelector(".pdActions");
+  const stickyEl = activeScreenEl.querySelector(".pdSticky");
+  if (stickyEl && heroEl) {
+    let maxScroll = 0;
+    const FADE_PX = 200;
+    requestAnimationFrame(() => {
+      maxScroll = activeScreenEl.scrollHeight - activeScreenEl.clientHeight;
+    });
+
+    activeScreenEl.addEventListener("scroll", () => {
+      const scrolled = activeScreenEl.scrollTop;
+      if (maxScroll > 0) {
+        const remaining = maxScroll - scrolled;
+        const opacity = remaining < FADE_PX ? Math.max(0, remaining / FADE_PX) : 1;
+        if (heroBgEl) heroBgEl.style.opacity = opacity;
+        if (heroContentEl) heroContentEl.style.opacity = opacity;
+        if (actionsEl) actionsEl.querySelectorAll("button").forEach(b => b.style.opacity = opacity);
+      }
+      if (appEl) {
+        const heroBottom = heroEl.getBoundingClientRect().bottom;
+        const screenTop = activeScreenEl.getBoundingClientRect().top;
+        if (heroBottom - screenTop < 60) {
+          appEl.classList.add("pdScrolled");
+        } else {
+          appEl.classList.remove("pdScrolled");
+        }
+      }
+    }, { passive: true });
+  }
 }
 
 function renderEPs() {
@@ -4594,7 +6244,7 @@ function renderCollaborators() {
       selectedSongId = null;
       setHeader("Songs");
       syncTabs();
-      renderSongsList();
+      render();
       setTimeout(() => {
         const q = $("#q");
         if (q) {
@@ -4791,35 +6441,51 @@ function renderHome() {
     renderGlobalSearch();
   });
   activeScreenEl.querySelector("#htbSettings")?.addEventListener("click", () => {
-    captureNavState();
-    currentTab = "settings";
-    setHeader("Settings");
-    syncTabs();
-    render();
-    triggerForwardSlide();
+    navigateForward(() => {
+      currentTab = "settings";
+    });
   });
 
   // Card navigation
   activeScreenEl.querySelectorAll("[data-home]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const target = btn.getAttribute("data-home");
-      captureNavState();
       if (target === "songs") {
-        resetSongsFilters({ keepSort: true });
-        songsBackTarget = null;
-        songsListScrollTop = 0;
-        currentTab = "songs";
-        songsView = "list";
-        selectedSongId = null;
-        setHeader("Songs");
-        syncTabs();
-        render();
-        triggerForwardSlide();
+        navigateForward(() => {
+          resetSongsFilters({ keepSort: true });
+          songsBackTarget = null;
+          songsListScrollTop = 0;
+          currentTab = "songs";
+          songsView = "list";
+          selectedSongId = null;
+        });
         return;
       }
-      if (target === "projects") { setDrawerView("projects"); triggerForwardSlide(); return; }
-      if (target === "releases") { setDrawerView("releases"); triggerForwardSlide(); return; }
-      if (target === "lyrics") return renderLyricsScratch();
+      if (target === "projects") {
+        navigateForward(() => {
+          drawerView = "projects";
+          closeDrawer();
+          selectedSongId = null;
+        });
+        return;
+      }
+      if (target === "releases") {
+        navigateForward(() => {
+          drawerView = "releases";
+          closeDrawer();
+          selectedSongId = null;
+        });
+        return;
+      }
+      if (target === "lyrics") {
+        navigateForward(() => {
+          lyricsEditSongId = null;
+          overlayView = "lyrics";
+          setHeader("Lyrics");
+          renderLyricsScratch();
+        });
+        return;
+      }
       if (target === "next") return renderNextActions();
     });
   });
@@ -5333,6 +6999,20 @@ function renderHome() {
     homeGrid.addEventListener("touchend", releaseCard, { passive: true });
     homeGrid.addEventListener("touchcancel", releaseCard, { passive: true });
 
+    // Pause/resume — freeze particle positions AND CSS animations when home goes off-screen
+    homeGrid._pauseHome = () => {
+      if (homeAnimId) { cancelAnimationFrame(homeAnimId); homeAnimId = null; }
+      homeGrid.querySelectorAll(".hShimmer, .hCard").forEach(el => {
+        el.style.animationPlayState = "paused";
+      });
+    };
+    homeGrid._resumeHome = () => {
+      if (!homeAnimId) homeAnimId = requestAnimationFrame(animLoop);
+      homeGrid.querySelectorAll(".hShimmer, .hCard").forEach(el => {
+        el.style.animationPlayState = "";
+      });
+    };
+
     // Cleanup when navigating away
     const cleanupHome = () => {
       if (homeAnimId) { cancelAnimationFrame(homeAnimId); homeAnimId = null; }
@@ -5510,7 +7190,7 @@ function renderSearchResults(q, container) {
       } else if (type === "project") {
         drawerView = "projects";
         projectDetailScreen = btn.dataset.id;
-        setActiveScreen("drawer");
+        setActiveScreen("projectDetail");
         renderProjectSongs(projectDetailScreen);
       } else if (type === "collab") {
         resetSongsFilters({ keepSort: true });
@@ -5563,34 +7243,247 @@ function iconPeople(){
   </svg>`;
 }
 
-// Lyrics scratch
+// ── Lyrics view ──
+let lyricsQuery = "";
+let lyricsEditSongId = null; // when set, we show the edit view
+
 function renderLyricsScratch() {
+  if (lyricsEditSongId) return renderLyricsEdit(lyricsEditSongId);
+
   overlayView = "lyrics";
   setHeader("Lyrics");
-  const value = state.settings.lyricsScratch || "";
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("collapseTitle");
+  const h1 = appEl?.querySelector(".titleblock h1");
+  if (h1) h1.style.opacity = "0";
+
+  // Collect songs that have lyrics
+  const lq = lyricsQuery.toLowerCase();
+  const songsWithLyrics = state.songs.filter(s => (s.lyrics || "").trim()).filter(s => {
+    if (!lq) return true;
+    return `${s.title} ${s.project} ${s.lyrics}`.toLowerCase().includes(lq);
+  });
+
   activeScreenEl.innerHTML = `
-    <div class="card">
-      <div class="row" style="justify-content:space-between; align-items:center">
-        <h2>Lyrics scratch</h2>
-        <button id="closeLyrics" class="ghost">Close</button>
+    <div class="songsPageTitle">Lyrics</div>
+    <div class="lyricsHead">
+      <input id="lyricsSearch" type="text" placeholder="Search lyrics..." value="${escapeHtml(lyricsQuery)}" />
+    </div>
+
+    <div class="lyricsList">
+      ${
+        songsWithLyrics.length
+          ? songsWithLyrics.map(s => {
+              const cover = coverSvg(s, { lite: true });
+              const preview = (s.lyrics || "").replace(/\n/g, " ").slice(0, 60) + ((s.lyrics || "").length > 60 ? "…" : "");
+              return `
+                <div class="lyricsRow" data-lyrics-song="${s.id}">
+                  <div class="lyricsCover" aria-hidden="true">${cover}</div>
+                  <div class="lyricsMain">
+                    <div class="lyricsName">${escapeHtml(s.title || "Untitled")}</div>
+                    <div class="lyricsMeta">${escapeHtml(preview)}</div>
+                  </div>
+                  <button class="lyricsMore" data-lmore="${s.id}" aria-label="More options">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+                  </button>
+                </div>
+              `;
+            }).join("")
+          + `<div style="text-align:center;padding:20px 0 8px;color:rgba(255,255,255,0.35);font-size:13px;">${songsWithLyrics.length} song${songsWithLyrics.length === 1 ? "" : "s"}</div>`
+          : `<div class="emptyState">No lyrics yet. Tap + to add lyrics for a song.</div>`
+      }
+    </div>
+
+    <button class="sdFab" id="lyricsAddFab" aria-label="Add lyrics">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+    </button>
+  `;
+
+  // Search
+  const searchInput = $("#lyricsSearch");
+  if (searchInput) {
+    searchInput.addEventListener("input", () => {
+      lyricsQuery = searchInput.value;
+      renderLyricsScratch();
+      const el = $("#lyricsSearch");
+      if (el) { el.focus(); el.selectionStart = el.selectionEnd = el.value.length; }
+    });
+  }
+
+  // Row tap → open lyrics editor
+  activeScreenEl.querySelectorAll(".lyricsRow").forEach(row => {
+    row.addEventListener("click", () => {
+      const sid = row.getAttribute("data-lyrics-song");
+      if (sid) {
+        lyricsEditSongId = sid;
+        navigateForward(() => renderLyricsEdit(sid));
+      }
+    });
+  });
+
+  // Kebab → action sheet (delete lyrics)
+  activeScreenEl.querySelectorAll(".lyricsMore").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const sid = btn.getAttribute("data-lmore");
+      const s = getSong(sid);
+      if (!s) return;
+      openLyricsActionSheet(s);
+    });
+  });
+
+  // FAB → pick a song to add lyrics
+  $("#lyricsAddFab")?.addEventListener("click", () => openLyricsSongPicker());
+
+  // Collapsing title scroll listener
+  const _screen = activeScreenEl;
+  const _sm = document.querySelector(".app.collapseTitle .titleblock h1");
+  if (_sm) {
+    requestAnimationFrame(() => {
+      const bt = _screen.querySelector(".songsPageTitle");
+      if (!bt) return;
+      const topbarEl = document.querySelector(".topbar");
+      const screenTop = _screen.getBoundingClientRect().top;
+      const topbarBottom = topbarEl ? topbarEl.getBoundingClientRect().bottom : 80;
+      const fadeStart = bt.offsetTop - (topbarBottom - screenTop);
+      const fadeEnd = fadeStart + (bt.offsetHeight || 40);
+      const range = fadeEnd - fadeStart;
+
+      const onScroll = () => {
+        const progress = Math.min(1, Math.max(0, (_screen.scrollTop - fadeStart) / range));
+        _sm.style.opacity = progress;
+      };
+      _screen._collapseTitleScroll = onScroll;
+      _screen.addEventListener("scroll", onScroll, { passive: true });
+      onScroll();
+    });
+  }
+}
+
+function openLyricsActionSheet(song) {
+  document.querySelectorAll(".actionSheetBackdrop, .actionSheet").forEach(el => el.remove());
+
+  const backdrop = document.createElement("div");
+  backdrop.className = "actionSheetBackdrop";
+  const sheet = document.createElement("div");
+  sheet.className = "actionSheet";
+  sheet.innerHTML = `
+    <div class="actionSheetHeader">
+      <div style="font-weight:900; font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+        ${escapeHtml(song.title || "Untitled")}
       </div>
-      <textarea id="lyricsScratch" placeholder="Capture lyric ideas...">${escapeTextarea(value)}</textarea>
-      <div class="row" style="margin-top:10px">
-        <button id="saveLyricsScratch" class="btn primary">Save</button>
+      <div class="small" style="margin-top:4px;">Lyrics</div>
+    </div>
+    <button class="actionSheetBtn" data-act="edit">Edit Lyrics</button>
+    <button class="actionSheetBtn danger" data-act="clear">Clear Lyrics</button>
+    <button class="actionSheetBtn" data-act="cancel">Cancel</button>
+  `;
+
+  function close() { backdrop.remove(); sheet.remove(); }
+  backdrop.addEventListener("click", close);
+
+  sheet.querySelectorAll("[data-act]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const act = btn.getAttribute("data-act");
+      if (act === "edit") {
+        close();
+        lyricsEditSongId = song.id;
+        navigateForward(() => renderLyricsEdit(song.id));
+      } else if (act === "clear") {
+        close();
+        song.lyrics = "";
+        song.updatedAt = nowStamp();
+        saveState();
+        toast("Lyrics cleared");
+        renderLyricsScratch();
+      } else {
+        close();
+      }
+    });
+  });
+
+  document.body.appendChild(backdrop);
+  document.body.appendChild(sheet);
+}
+
+function renderLyricsEdit(songId) {
+  const song = getSong(songId);
+  if (!song) {
+    lyricsEditSongId = null;
+    return renderLyricsScratch();
+  }
+
+  overlayView = "lyrics";
+  lyricsEditSongId = songId;
+  setHeader("Edit Lyrics");
+
+  const cover = coverSvg(song, { lite: true });
+
+  activeScreenEl.innerHTML = `
+    <div class="lyricsEditHead">
+      <div class="lyricsEditCover">${cover}</div>
+      <div class="lyricsEditInfo">
+        <div class="lyricsEditTitle">${escapeHtml(song.title || "Untitled")}</div>
+        <div class="lyricsEditSub">${escapeHtml(song.project || "—")}</div>
       </div>
     </div>
+    <textarea id="lyricsEditArea" class="lyricsEditArea" placeholder="Write lyrics...">${escapeTextarea(song.lyrics || "")}</textarea>
+    <div class="lyricsEditActions">
+      <button id="lyricsSaveBtn" class="btn primary">Save</button>
+    </div>
   `;
-  $("#closeLyrics")?.addEventListener("click", () => {
-    overlayView = null;
-    currentTab = "home";
-    setHeader("RiffBank");
-    renderHome();
-  });
-  $("#saveLyricsScratch")?.addEventListener("click", () => {
-    state.settings.lyricsScratch = $("#lyricsScratch").value;
+
+  $("#lyricsSaveBtn")?.addEventListener("click", () => {
+    song.lyrics = $("#lyricsEditArea")?.value || "";
+    song.updatedAt = nowStamp();
     saveState();
-    toast("Lyrics saved ✍️");
+    toast("Lyrics saved");
   });
+
+  setTimeout(() => $("#lyricsEditArea")?.focus(), 100);
+}
+
+function openLyricsSongPicker() {
+  document.querySelectorAll(".actionSheetBackdrop, .actionSheet").forEach(el => el.remove());
+
+  // Songs that DON'T already have lyrics
+  const available = state.songs.filter(s => !(s.lyrics || "").trim());
+  const all = state.songs;
+
+  const backdrop = document.createElement("div");
+  backdrop.className = "actionSheetBackdrop";
+  const sheet = document.createElement("div");
+  sheet.className = "actionSheet";
+  sheet.style.maxHeight = "70vh";
+  sheet.style.overflowY = "auto";
+  sheet.innerHTML = `
+    <div class="actionSheetHeader">
+      <div style="font-weight:900; font-size:14px;">Add Lyrics</div>
+      <div class="small" style="margin-top:4px;">Pick a song</div>
+    </div>
+    ${(available.length ? available : all).map(s => `
+      <button class="actionSheetBtn" data-pick-song="${s.id}">${escapeHtml(s.title || "Untitled")}</button>
+    `).join("")}
+    ${!available.length && all.length ? `<div class="small" style="padding:8px 16px;color:var(--muted);">All songs already have lyrics</div>` : ""}
+    ${!all.length ? `<div class="small" style="padding:8px 16px;color:var(--muted);">No songs yet</div>` : ""}
+    <button class="actionSheetBtn" data-pick-song="cancel">Cancel</button>
+  `;
+
+  function close() { backdrop.remove(); sheet.remove(); }
+  backdrop.addEventListener("click", close);
+
+  sheet.querySelectorAll("[data-pick-song]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const sid = btn.getAttribute("data-pick-song");
+      close();
+      if (sid === "cancel") return;
+      lyricsEditSongId = sid;
+      navigateForward(() => renderLyricsEdit(sid));
+    });
+  });
+
+  document.body.appendChild(backdrop);
+  document.body.appendChild(sheet);
 }
 
 function renderNextActions() {
@@ -5625,12 +7518,10 @@ function renderNextActions() {
   });
   activeScreenEl.querySelectorAll("[data-open-song]").forEach((el) =>
     el.addEventListener("click", () => {
-      captureNavState();
-      currentTab = "songs";
-      selectedSongId = el.getAttribute("data-open-song");
-      setHeader("Song");
-      render();
-      triggerForwardSlide();
+      navigateForward(() => {
+        currentTab = "songs";
+        selectedSongId = el.getAttribute("data-open-song");
+      });
     })
   );
 }
@@ -5661,6 +7552,19 @@ function makeRng(seed){
 // --- Cover caching + iOS "lite" mode ---
 const coverCache = new Map();
 const generatingArtSongs = new Set(); // song IDs currently generating art
+
+// Auto-generate art for a newly created song (fire-and-forget)
+function autoGenerateArt(song) {
+  const apiKey = state.settings.replicateKey || "";
+  if (!apiKey || song.coverImageUrl || song.coverDriveFileId) return;
+  generatingArtSongs.add(song.id);
+  coverCache.clear();
+  render();
+  generateArtForSong(song, apiKey)
+    .then(() => { coverCache.clear(); saveState(); })
+    .catch(e => console.warn("Auto art generation failed:", e))
+    .finally(() => { generatingArtSongs.delete(song.id); coverCache.clear(); render(); });
+}
 
 // Global handler: refresh cover image from Drive when cached URL expires
 window._refreshCoverFromDrive = async (songId, driveFileId, imgEl) => {
@@ -5777,7 +7681,7 @@ function buildArtPrompt(song) {
 async function generateArtForSong(song, apiKey) {
   const prompt = buildArtPrompt(song);
   const ac = new AbortController();
-  const timeout = setTimeout(() => ac.abort(), 60000);
+  const timeout = setTimeout(() => ac.abort(), 20000);
   let res;
   try {
     res = await fetch("https://riffbank-art.riffbank.workers.dev", {
@@ -5787,7 +7691,7 @@ async function generateArtForSong(song, apiKey) {
       signal: ac.signal,
     });
   } catch (e) {
-    if (e.name === "AbortError") throw new Error("Request timed out — try again");
+    if (e.name === "AbortError") throw new Error("Art generation timed out — try again");
     throw e;
   } finally {
     clearTimeout(timeout);
@@ -5802,16 +7706,26 @@ async function generateArtForSong(song, apiKey) {
   // Download image and upload to Google Drive for persistence
   try {
     console.log("[ArtGen] Fetching image...");
-    const imgRes = await fetch(url);
+    const imgAc = new AbortController();
+    const imgTimeout = setTimeout(() => imgAc.abort(), 15000);
+    let imgRes;
+    try {
+      imgRes = await fetch(url, { signal: imgAc.signal });
+    } finally {
+      clearTimeout(imgTimeout);
+    }
     console.log("[ArtGen] Image fetch done:", imgRes.status);
     if (imgRes.ok) {
       const blob = await imgRes.blob();
       console.log("[ArtGen] Uploading to Drive...");
-      const driveResult = await gdriveUploadCoverArt({
-        blob,
-        project: song.project,
-        songTitle: song.title,
-      });
+      const driveResult = await Promise.race([
+        gdriveUploadCoverArt({
+          blob,
+          project: song.project,
+          songTitle: song.title,
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Drive upload timed out")), 15000)),
+      ]);
       console.log("[ArtGen] Drive upload result:", driveResult);
       if (driveResult.success) {
         song.coverDriveFileId = driveResult.driveFileId;
@@ -6063,7 +7977,12 @@ function coverSvg(song, { lite = false } = {}) {
 // Songs list + create
 // ---------------------
 function renderSongsList() {
-  setHeader("");
+  setHeader("Songs");
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("collapseTitle");
+  // Hide h1 immediately so it doesn't flash centered during slide transition
+  const h1 = appEl?.querySelector(".titleblock h1");
+  if (h1) h1.style.opacity = "0";
 
   const songs = [...state.songs];
   const projects = Array.from(
@@ -6146,6 +8065,7 @@ function renderSongsList() {
               </div>
             </div>
             <div class="songCardInfo">
+              ${syncDot(s)}
               <div class="songCardTitle">${escapeHtml(s.title)}</div>
               <div class="songCardSub">${vCount} ver${vCount !== 1 ? "s" : ""}</div>
             </div>
@@ -6209,11 +8129,10 @@ function renderSongsList() {
 
       el.addEventListener("click", () => {
         if (didLongPress) return;
-        captureNavState();
         songsListScrollTop = activeScreenEl.scrollTop;
-        selectedSongId = el.getAttribute("data-id");
-        render();
-        triggerForwardSlide();
+        navigateForward(() => {
+          selectedSongId = el.getAttribute("data-id");
+        });
       });
     });
 
@@ -6221,11 +8140,10 @@ function renderSongsList() {
       el.addEventListener("click", () => {
         const artist = el.getAttribute("data-artist");
         if (!artist) return;
-        captureNavState();
-        drawerView = "projects";
-        projectDetailScreen = artist;
-        render();
-        triggerForwardSlide();
+        navigateForward(() => {
+          drawerView = "projects";
+          projectDetailScreen = artist;
+        });
       });
     });
   };
@@ -6235,9 +8153,42 @@ function renderSongsList() {
   $("#openSongFilters")?.addEventListener("click", openSongFilters);
 
   applyFilter();
+
   // Restore scroll position when returning from a song detail view
   if (songsListScrollTop > 0) {
     activeScreenEl.scrollTop = songsListScrollTop;
+  }
+
+  // Collapse title: fade small title in proportion to big title scrolling behind topbar
+  // Remove any previous listener to avoid stacking
+  if (activeScreenEl._collapseTitleScroll) {
+    activeScreenEl.removeEventListener("scroll", activeScreenEl._collapseTitleScroll);
+    activeScreenEl._collapseTitleScroll = null;
+  }
+  const _screen = activeScreenEl;
+  const _sm = document.querySelector(".app.collapseTitle .titleblock h1");
+  if (_sm) {
+    // Measure once after layout is complete — no getBoundingClientRect in the handler
+    requestAnimationFrame(() => {
+      const bt = _screen.querySelector(".songsPageTitle");
+      if (!bt) return;
+      const topbarEl = document.querySelector(".topbar");
+      // Screen's top edge in viewport (fixed — doesn't change with scroll)
+      const screenTop = _screen.getBoundingClientRect().top;
+      const topbarBottom = topbarEl ? topbarEl.getBoundingClientRect().bottom : 80;
+      // bt.offsetTop = big title's position within the scroll content
+      const fadeStart = bt.offsetTop - (topbarBottom - screenTop);
+      const fadeEnd = fadeStart + (bt.offsetHeight || 40);
+      const range = fadeEnd - fadeStart;
+
+      const onScroll = () => {
+        const progress = Math.min(1, Math.max(0, (_screen.scrollTop - fadeStart) / range));
+        _sm.style.opacity = progress;
+      };
+      _screen._collapseTitleScroll = onScroll;
+      _screen.addEventListener("scroll", onScroll, { passive: true });
+      onScroll();
+    });
   }
 }
 
@@ -6262,103 +8213,152 @@ function iconFilter(){
 // ---------------------
 // Song detail
 // ---------------------
+function openSongDetailMenu(songId) {
+  sheetSongMenuId = songId;
+  openSheet("songDetailMenu");
+}
+
+function songReleaseLabel(song) {
+  const rel = (state.releases || []).find(r => (r.songIds || []).includes(song.id));
+  if (!rel) {
+    const vCount = song.versions?.length || 0;
+    return `${vCount} version${vCount === 1 ? "" : "s"}`;
+  }
+  const today = new Date(); today.setHours(0,0,0,0);
+  const rd = rel.releaseDate ? new Date(rel.releaseDate + "T00:00:00") : null;
+  return rd && rd <= today ? "Released" : "Upcoming";
+}
+
 function renderSongDetail(id) {
   const song = getSong(id);
   if (!song) {
     selectedSongId = null;
     selectedVersionId = null;
-    return renderSongsList();
+    return render();
   }
 
-  setHeader("Song");
+  setHeader(song.title);
+  // Hide topbar title — the hero has its own large title
+  const _tbH1 = document.querySelector(".topbar h1");
+  if (_tbH1) _tbH1.textContent = "";
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("pdActive");
+  appEl?.classList.remove("pdScrolled");
+  activeScreenEl.style.paddingBottom = "0px";
+  const topbarEl = document.querySelector(".topbar");
+  const topbarH = topbarEl ? topbarEl.offsetHeight : 0;
+  activeScreenEl.style.setProperty("--pd-topbar-h", topbarH + "px");
 
-    // ✅ Fix: entering Song detail should not inherit Songs list scroll position
-  if (activeScreenEl) activeScreenEl.scrollTop = 0;
-  try { window.scrollTo(0, 0); } catch {}
-  try { document.documentElement.scrollTop = 0; } catch {}
-  try { document.body.scrollTop = 0; } catch {}
-  requestAnimationFrame(() => { if (screens.home) screens.home.scrollTop = 0; });
+  activeScreenEl.style.overflowY = "scroll";
 
   const fv = featuredVersion(song);
-  const vCount = song.versions?.length || 0;
-
-  // hero cover uses your neon generator
   const heroCover = coverSvg(song);
-  const rowCover  = coverSvg(song, { lite: true }); // always lite for version rows
+  const rowCover = coverSvg(song, { lite: true });
 
-  const featuredTag = fv?.isBest ? "⭐ Best" : fv?.isActive ? "🎧 Active" : "Featured";
-  const featuredSub = fv
-    ? `${escapeHtml(fv.label || "Version")} ${fv.notes ? `• ${escapeHtml(fv.notes)}` : ""}`
-    : "No versions yet — add one below";
+  // Build playable items list for play/shuffle
+  const allV = (song.versions || []).slice();
+  const activeV = allV.find(v => v.isActive) || allV[0];
+  const others = allV
+    .filter(v => v.id !== activeV?.id)
+    .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+  const items = [activeV, ...others]
+    .filter(v => v && isPlayable(v))
+    .map(v => ({ songId: song.id, versionId: v.id }));
 
-activeScreenEl.innerHTML = `
-  <div class="albumHero">
-    <div class="albumBg" aria-hidden="true">
-      ${heroCover}
+  const versions = (song.versions || []).slice();
+
+  // Purple checkmark SVG for active versions
+  const activeCheck = `<svg class="sdActiveCheck" viewBox="0 0 20 20" fill="none" width="14" height="14"><path d="M3.5 10.5l4.5 4.5 8.5-9" stroke="#a855f7" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+  const versionRows = versions.map((v, i) => {
+    const sub = v.isActive
+      ? `${activeCheck}<span style="color:#a855f7;font-weight:600">Active</span>${v.notes ? ` · ${escapeHtml(v.notes)}` : ""}`
+      : `${escapeHtml(v.createdAt || "—")}${v.notes ? ` · ${escapeHtml(v.notes)}` : ""}`;
+
+    return `
+      <div class="pdSongRow" data-vrow="${v.id}">
+        <span class="pdSongNum">${i + 1}</span>
+        <div class="songThumb" aria-hidden="true">
+          ${rowCover}
+        </div>
+        <div class="songMain">
+          <div class="songTop">
+            <div class="songTitleRow">
+              <div class="songTitle">${escapeHtml(v.label || "Version")}</div>
+            </div>
+            <button class="songMore" data-vmore="${v.id}" aria-label="Version menu">&#x22EF;</button>
+          </div>
+          <div class="songSub sdVersionSub">${sub}</div>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  activeScreenEl.innerHTML = `
+    <div class="pdHero">
+      <div class="pdHeroBg" aria-hidden="true">${heroCover}</div>
+      <div class="pdHeroContent">
+        <div class="pdHeroTitle">${escapeHtml(song.title)}</div>
+        <div class="pdHeroMeta">${escapeHtml(song.project || "—")} · ${songReleaseLabel(song)}</div>
+      </div>
     </div>
 
-    <div class="albumTop">
-      <div class="albumArt" aria-hidden="true">
-        ${heroCover}
-      </div>
+    <div class="pdActions">
+      <button class="pdPlayBtn" id="songBigPlay" ${!items.length ? "disabled" : ""}>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+      </button>
+      <button class="pdShuffleBtn" id="songShuffle" ${!items.length ? "disabled" : ""}>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+      </button>
+      <button class="pdMoreBtn" id="songMoreMenu" aria-label="Song menu">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
+      </button>
+    </div>
 
-      <div class="albumText">
-        <div class="albumTitle">${escapeHtml(song.title)}</div>
-        <div class="albumMeta">
-          ${escapeHtml(song.project || "—")} • ${escapeHtml(song.genre || "—")} •
-          ${vCount} version${vCount===1?"":"s"}
+    <div class="pdSticky">
+      <div class="pdTabs">
+        <button class="pdTab pdTabActive" data-sd-tab="list">List</button>
+        <button class="pdTab" data-sd-tab="evolution">Evolution</button>
+      </div>
+      <div class="pdTabBody" id="pdTabBody">
+        <div class="pdSongList">
+          ${versionRows || `<div class="small" style="padding:24px 0; text-align:center">No versions yet.</div>`}
         </div>
       </div>
     </div>
 
-    <div class="albumActions">
-      <button class="songHeroPlay" id="songBigPlay" ${(fv?.link || fv?.fileId || fv?.localAudioId || fv?.driveFileId) ? "" : "disabled"}>
-        ▶ Play
-      </button>
-      <button class="songHeroQueue" id="songBigQueue" ${(fv?.link || fv?.fileId || fv?.localAudioId || fv?.driveFileId) ? "" : "disabled"}>
-        + Queue
-      </button>
-      <button class="songHeroDetails" id="songDetailsBtn">
-        Details
-      </button>
-      <button class="songHeroQueue" id="genArtBtn" title="Generate AI cover art" ${generatingArtSongs.has(song.id) || Date.now() < artCooldownUntil ? "disabled" : ""}>
-        ${generatingArtSongs.has(song.id) ? "✨ Generating…" : Date.now() < artCooldownUntil ? "⏳ Please wait…" : song.coverImageUrl ? "🔄 Regen Art" : "✨ Gen Art"}
-      </button>
-    </div>
-  </div>
+    <button class="sdFab" id="sdAddVersion" aria-label="Add version">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+    </button>
+  `;
 
-  <div class="versionsWrap">
-    <div class="versionsHeader">
-      <div class="versionsTitle">Versions</div>
-      <div class="versionsHeaderRight">
-        <div class="evoToggle">
-          <button id="evoToggleList" class="is-active">List</button>
-          <button id="evoToggleEvo">Evolution</button>
-        </div>
-        <button class="btn" id="addVersionJump">Add version</button>
-      </div>
-    </div>
+  // Reset scroll AFTER innerHTML so the hero is visible on load
+  activeScreenEl.scrollTop = 0;
 
-    <div id="versionsRows" class="versionsRows"></div>
-    <div id="evolutionView" style="display:none"></div>
-  </div>
-`;
+  /* ── Tab switching ── */
+  const tabBody = $("#pdTabBody");
+  activeScreenEl.querySelectorAll(".pdTab").forEach(tab => {
+    tab.addEventListener("click", () => {
+      activeScreenEl.querySelectorAll(".pdTab").forEach(t => t.classList.remove("pdTabActive"));
+      tab.classList.add("pdTabActive");
+      const which = tab.getAttribute("data-sd-tab");
+      if (which === "list") {
+        tabBody.innerHTML = `<div class="pdSongList">${versionRows || `<div class="small" style="padding:24px 0; text-align:center">No versions yet.</div>`}</div>`;
+        attachVersionListeners();
+      } else {
+        tabBody.innerHTML = `<div id="evolutionView"></div>`;
+        renderEvolutionView($("#evolutionView"), song);
+      }
+    });
+  });
 
+  /* ── Play all ── */
   $("#songBigPlay")?.addEventListener("click", async () => {
-    if (!(fv?.link || fv?.fileId || fv?.localAudioId || fv?.driveFileId)) return toast("No playable audio yet 😅");
-    // Play all versions: active first, then remaining sorted newest to oldest
-    const allV = (song.versions || []).slice();
-    const activeV = allV.find(v => v.isActive) || allV[0];
-    const others = allV
-      .filter(v => v.id !== activeV?.id)
-      .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
-    const items = [activeV, ...others]
-      .filter(v => v && isPlayable(v))
-      .map(v => ({ songId: song.id, versionId: v.id }));
-    if (!items.length) return toast("No playable audio yet 😅");
-    state.player.nowPlaying = items[0];
-    state.player.queue = items.slice(1);
-    state.player.repeatQueue = items;
+    if (!items.length) return toast("No playable versions");
+    const all = [...items];
+    state.player.nowPlaying = all[0];
+    state.player.queue = all.slice(1);
+    state.player.repeatQueue = all;
     state.player.shuffle = false;
     state.player.repeat = false;
     saveState();
@@ -6367,143 +8367,87 @@ activeScreenEl.innerHTML = `
     syncMiniPlayerUI();
   });
 
-  $("#songBigQueue")?.addEventListener("click", () => {
-    if (!(fv?.link || fv?.fileId || fv?.localAudioId || fv?.driveFileId)) return toast("No playable audio yet 😅");
-    addToQueue(song.id, fv.id);
-  });
-
-  // For now, keep your existing "Details" as the old long form screen:
-  // We’ll implement it as: details = version detail of the featured? or a new view later.
-  // For today: send you to the existing song form by reusing your old renderSongDetail UI? (we replaced it)
-  // So: we’ll open the featured version detail as "Details" as a first step.
-$("#songDetailsBtn")?.addEventListener("click", () => {
-  // If no versions yet, create the first one and open it
-  if (!fv) {
-    const first = createVersion(song);
-    if (!first) return toast("Couldn’t create version 😅");
-    selectedVersionId = first.id;
-    render();
-    return;
-  }
-
-  selectedVersionId = fv.id;
-  render();
-});
-
-$("#genArtBtn")?.addEventListener("click", async () => {
-  if (generatingArtSongs.has(song.id) || Date.now() < artCooldownUntil) return;
-
-  const apiKey = state.settings.replicateKey || "";
-  if (!apiKey) {
-    toast("Add your Replicate API key in Settings first");
-    return;
-  }
-
-  generatingArtSongs.add(song.id);
-  artCooldownUntil = Date.now() + 10000;
-  coverCache.clear();
-  render();
-
-  try {
-    await generateArtForSong(song, apiKey);
-    coverCache.clear();
+  /* ── Shuffle ── */
+  $("#songShuffle")?.addEventListener("click", async () => {
+    if (!items.length) return toast("No playable versions");
+    const all = shuffleArray([...items]);
+    state.player.nowPlaying = all[0];
+    state.player.queue = all.slice(1);
+    state.player.repeatQueue = all;
     saveState();
-    toast("Art generated ✨");
-  } catch (e) {
-    console.error("Art generation failed:", e);
-    toast(e.message || "Art generation failed — try again");
-  } finally {
-    generatingArtSongs.delete(song.id);
-    coverCache.clear();
-    render();
-    const remaining = artCooldownUntil - Date.now();
-    if (remaining > 0) setTimeout(() => render(), remaining + 50);
+    unlockAudioOnce();
+    await playNowPlaying({ autoplay: true });
+    syncMiniPlayerUI();
+  });
+
+  /* ── Song more menu (Details, Regen Art, Delete) ── */
+  $("#songMoreMenu")?.addEventListener("click", () => {
+    openSongDetailMenu(song.id);
+  });
+
+  /* ── FAB: Add version ── */
+  $("#sdAddVersion")?.addEventListener("click", () => {
+    const newV = createVersion(song);
+    if (!newV) return toast("Couldn’t create version");
+    navigateForward(() => {
+      selectedVersionId = newV.id;
+    });
+  });
+
+  /* ── Version row listeners ── */
+  function attachVersionListeners() {
+    activeScreenEl.querySelectorAll("[data-vrow]").forEach(row => {
+      row.addEventListener("click", (e) => {
+        if (e.target.closest("[data-vmore]")) return;
+        navigateForward(() => {
+          selectedVersionId = row.getAttribute("data-vrow");
+        });
+      });
+    });
+
+    activeScreenEl.querySelectorAll("[data-vmore]").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openVersionMenu(song.id, btn.getAttribute("data-vmore"));
+      });
+    });
   }
-});
 
-$("#addVersionJump")?.addEventListener("click", () => {
-  // Always create a brand new version (even if versions already exist)
-  const newV = createVersion(song);
-  if (!newV) return toast("Couldn’t create version 😅");
-  selectedVersionId = newV.id;
-  render();
-});
+  attachVersionListeners();
 
-  // Render version rows
-  const rowsEl = $("#versionsRows");
-  const versions = (song.versions || []).slice();
-
-  rowsEl.innerHTML = versions.length
-    ? versions.map((v) => {
-        const sub = `${escapeHtml(v.createdAt || "")}${v.notes ? ` • ${escapeHtml(v.notes)}` : ""}`;
-        const activeOverlay = v.isActive
-          ? `<div class="vThumbCheck"><svg viewBox="0 0 20 20" fill="none" width="16" height="16"><path d="M3.5 10.5l4.5 4.5 8.5-9" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div>`
-          : "";
-
-        return `
-          <div class="vRow" data-vrow="${v.id}">
-            <div class="vThumb ${v.isActive ? "is-active" : ""}" data-vactive="${v.id}" role="button" aria-label="Set active">${rowCover}${activeOverlay}</div>
-
-            <div class="vMain">
-              <div class="vTop">
-                <div class="vTitle">${escapeHtml(v.label || "Version")}</div>
-              </div>
-              <div class="vSub">${sub}</div>
-            </div>
-
-            <button class="vMore" data-vmore="${v.id}" aria-label="Version menu">⋯</button>
-          </div>
-        `;
-      }).join("")
-    : `<div class="small" style="padding:12px 2px">No versions yet. Add one from Details.</div>`;
-
-  rowsEl.querySelectorAll("[data-vrow]").forEach((row) => {
-    row.addEventListener("click", () => {
-      captureNavState();
-      selectedVersionId = row.getAttribute("data-vrow");
-      render();
-      triggerForwardSlide();
+  /* ── Fade hero + actions to black, solid topbar as user scrolls ── */
+  const heroEl = activeScreenEl.querySelector(".pdHero");
+  const heroBgEl = heroEl?.querySelector(".pdHeroBg");
+  const heroContentEl = heroEl?.querySelector(".pdHeroContent");
+  const actionsEl = activeScreenEl.querySelector(".pdActions");
+  const stickyEl = activeScreenEl.querySelector(".pdSticky");
+  if (stickyEl && heroEl) {
+    let maxScroll = 0;
+    const FADE_PX = 200;
+    requestAnimationFrame(() => {
+      maxScroll = activeScreenEl.scrollHeight - activeScreenEl.clientHeight;
     });
-  });
 
-  rowsEl.querySelectorAll("[data-vactive]").forEach((thumb) => {
-    thumb.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const vid = thumb.getAttribute("data-vactive");
-      song.versions.forEach(vv => { vv.isActive = vv.id === vid; });
-      song.updatedAt = nowStamp();
-      saveState();
-      render();
-    });
-  });
-
-  rowsEl.querySelectorAll("[data-vmore]").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const vid = btn.getAttribute("data-vmore");
-      openVersionMenu(song.id, vid);
-    });
-  });
-
-  // ── Evolution View toggle ──
-  const evoViewEl = $("#evolutionView");
-  const listBtn = $("#evoToggleList");
-  const evoBtn  = $("#evoToggleEvo");
-
-  listBtn.addEventListener("click", () => {
-    listBtn.classList.add("is-active");
-    evoBtn.classList.remove("is-active");
-    rowsEl.style.display = "";
-    evoViewEl.style.display = "none";
-  });
-
-  evoBtn.addEventListener("click", () => {
-    evoBtn.classList.add("is-active");
-    listBtn.classList.remove("is-active");
-    rowsEl.style.display = "none";
-    evoViewEl.style.display = "";
-    renderEvolutionView(evoViewEl, song);
-  });
+    activeScreenEl.addEventListener("scroll", () => {
+      const scrolled = activeScreenEl.scrollTop;
+      if (maxScroll > 0) {
+        const remaining = maxScroll - scrolled;
+        const opacity = remaining < FADE_PX ? Math.max(0, remaining / FADE_PX) : 1;
+        if (heroBgEl) heroBgEl.style.opacity = opacity;
+        if (heroContentEl) heroContentEl.style.opacity = opacity;
+        if (actionsEl) actionsEl.querySelectorAll("button").forEach(b => b.style.opacity = opacity);
+      }
+      if (appEl) {
+        const heroBottom = heroEl.getBoundingClientRect().bottom;
+        const screenTop = activeScreenEl.getBoundingClientRect().top;
+        if (heroBottom - screenTop < 60) {
+          appEl.classList.add("pdScrolled");
+        } else {
+          appEl.classList.remove("pdScrolled");
+        }
+      }
+    }, { passive: true });
+  }
 }
 
 // ── Evolution View — constellation visualization ──
@@ -6734,13 +8678,9 @@ function showEvoActionMenu(container, nodeEl, song, versionId) {
       selectedVersionId = newV.id;
       render();
     } else if (action === "rename") {
-      selectedVersionId = versionId;
-      render();
-      triggerForwardSlide();
+      navigateForward(() => { selectedVersionId = versionId; });
     } else if (action === "notes") {
-      selectedVersionId = versionId;
-      render();
-      triggerForwardSlide();
+      navigateForward(() => { selectedVersionId = versionId; });
     }
   });
 }
@@ -6751,7 +8691,7 @@ function renderVersionDetail(songId, versionId) {
 
   if (!song || !v) {
     selectedVersionId = null;
-    return renderSongDetail(songId);
+    return render();
   }
 
   setHeader("Version");
@@ -6818,46 +8758,49 @@ function renderVersionDetail(songId, versionId) {
         </div>
 
         <div class="vDetailRow">
-          <div class="vDetailLabel">Local file</div>
-          <div class="vDetailValue">
-            ${hasLocal
-              ? `<span style="opacity:.85">${escapeHtml(v.fileName || v.originalFileName || "audio file")}${v.fileSize ? ` • ${(v.fileSize/1024/1024).toFixed(1)} MB` : ""}</span>`
-              : `<span style="opacity:.45">No local file attached.</span>`
-            }
-          </div>
-        </div>
-
-        ${hasDrive ? `
-        <div class="vDetailRow">
-          <div class="vDetailLabel">Drive</div>
-          <div class="vDetailValue" style="color:#4ecdc4">
-            ☁️ ${escapeHtml(v.fileName || v.originalFileName || "audio")}
-            ${v.driveWebViewLink ? `<a href="${escapeHtml(v.driveWebViewLink)}" target="_blank" id="openLinkBtn" style="color:#4ecdc4; text-decoration:underline; margin-left:6px;">View ↗</a>` : ""}
-          </div>
-        </div>
-        ` : driveConnected ? `
-        <div class="vDetailRow">
-          <div class="vDetailLabel">Drive</div>
-          <div class="vDetailValue" style="opacity:.45">☁️ Not yet synced.</div>
-        </div>
-        ` : ""}
-
-        <div class="vDetailRow">
           <div class="vDetailLabel">Status</div>
           <div class="vDetailValue">
-            <button class="songHeroQueue" id="toggleActiveBtn" style="padding:6px 14px; font-size:13px">${v.isActive ? "✅ Active" : "Set Active"}</button>
+            <button class="vdChip ${v.isActive ? "vdChipActive" : ""}" id="toggleActiveBtn">${v.isActive ? "Active" : "Set Active"}</button>
           </div>
         </div>
 
-        <div class="vDetailRow">
-          <div class="vDetailLabel">Audio</div>
-          <div class="vDetailValue" style="display:flex; gap:8px; flex-wrap:wrap">
-            <button class="songHeroQueue" id="importAudioBtn" style="padding:6px 14px; font-size:13px">Import file 📁</button>
-            ${hasLocal ? `<button class="songHeroQueue" id="clearLocalBtn" style="padding:6px 14px; font-size:13px">Remove local</button>` : ""}
-            ${hasLocal && driveConnected && !hasDrive ? `<button class="songHeroQueue" id="uploadToDriveBtn" style="padding:6px 14px; font-size:13px">Upload ☁️</button>` : ""}
-            ${v.link && !hasDrive ? `<button class="songHeroQueue" id="openLinkBtn" style="padding:6px 14px; font-size:13px">Open link ↗</button>` : ""}
+      </div>
+
+      <div class="vdAudioSection">
+        ${hasLocal || hasDrive || v.link ? `
+          <div class="vdAudioCard">
+            <div class="vdAudioIcon">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+            </div>
+            <div class="vdAudioInfo">
+              <div class="vdAudioName">${escapeHtml(v.fileName || v.originalFileName || "audio file")}</div>
+              <div class="vdAudioMeta">
+                ${v.fileSize ? `${(v.fileSize/1024/1024).toFixed(1)} MB` : ""}
+                ${hasLocal ? `<span class="vdAudioBadge vdBadgeLocal">Local</span>` : ""}
+                ${hasDrive ? `<span class="vdAudioBadge vdBadgeDrive">Drive</span>` : ""}
+                ${v.link ? `<span class="vdAudioBadge vdBadgeLink">URL</span>` : ""}
+              </div>
+            </div>
+            <div class="vdAudioActions">
+              <button class="vdAudioActionBtn" id="importAudioBtn" aria-label="Replace file">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              </button>
+              ${hasLocal ? `<button class="vdAudioActionBtn vdAudioDanger" id="clearLocalBtn" aria-label="Remove local"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>` : ""}
+              ${hasLocal && driveConnected && !hasDrive ? `<button class="vdAudioActionBtn vdAudioCloud" id="uploadToDriveBtn" aria-label="Upload to Drive"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></button>` : ""}
+              ${v.link ? `<button class="vdAudioActionBtn" id="openLinkBtn" aria-label="Open link"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></button>` : ""}
+              ${hasDrive && v.driveWebViewLink ? `<a href="${escapeHtml(v.driveWebViewLink)}" target="_blank" class="vdAudioActionBtn" aria-label="View on Drive"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>` : ""}
+            </div>
           </div>
-        </div>
+        ` : `
+          <button class="vdUploadBtn" id="importAudioBtn">
+            <div class="vdUploadIcon">
+              <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            </div>
+            <div class="vdUploadLabel">Upload Song</div>
+            <div class="vdUploadSub">WAV, MP3, M4A, AIFF, FLAC, OGG</div>
+          </button>
+        `}
+      </div>
 
       </div>
     </div>
@@ -7036,7 +8979,7 @@ function renderVersionDetail(songId, versionId) {
     toast("Deleted 🗑️");
 
     selectedVersionId = null;
-    renderSongDetail(songId);
+    render();
   });
 }
 
@@ -7044,10 +8987,20 @@ function renderVersionDetail(songId, versionId) {
 // Player
 // ---------------------
 function renderPlayer() {
-  setHeader("Player");
+  setHeader("");
 
   // Build playlist rows (one row per version where playerYes === true)
-  const items = playerItems(state); // uses playerFilter/playerSort globals
+  const allItems = playerItems(state); // uses playerFilter/playerSort globals
+
+  // Apply search filter
+  const pq = playerQuery.toLowerCase();
+  const items = pq
+    ? allItems.filter(it => {
+        const s = getSong(it.songId);
+        const hay = `${it.songName || s?.title || ""} ${s?.project || ""} ${it.versionLabel || ""}`.toLowerCase();
+        return hay.includes(pq);
+      })
+    : allItems;
 
   function openPlayerActionSheet(item) {
     // Remove any existing sheet
@@ -7151,25 +9104,38 @@ function renderPlayer() {
     document.body.appendChild(sheet);
   }
 
-  // ── Layout: Actions → Filters → List ──
+  // ── Layout: Title row → Search → Filters → List ──
   activeScreenEl.innerHTML = `
-    <div class="playerActions">
-      <button class="playerShuffleBtn ${state.player?.shuffle ? "is-active" : ""}" id="playerShuffle" aria-label="Shuffle">
-        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/>
-          <polyline points="21 16 21 21 16 21"/><line x1="4" y1="4" x2="21" y2="21"/>
-        </svg>
-      </button>
-      <button class="playerPlayBtn" id="playerPlayAll" aria-label="Play">
-        <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-      </button>
+    <div class="playerHead">
+      <div class="playerTitleRow">
+        <div class="playerPageTitle">Player</div>
+        <div class="playerActions">
+          <button class="playerShuffleBtn ${state.player?.shuffle ? "is-active" : ""}" id="playerShuffle" aria-label="Shuffle">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/>
+              <polyline points="21 16 21 21 16 21"/><line x1="4" y1="4" x2="21" y2="21"/>
+            </svg>
+          </button>
+          <button class="playerPlayBtn" id="playerPlayAll" aria-label="Play">
+            <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          </button>
+        </div>
+      </div>
+      <input
+        id="playerSearch"
+        type="text"
+        placeholder="Search player..."
+        value="${escapeHtml(playerQuery)}"
+      />
     </div>
 
-    <div class="chipsRow" aria-label="Player filters">
-      <button class="chip ${playerFilter === "all" ? "active" : ""}" data-pf="all">Riffs</button>
-      <button class="chip ${playerFilter === "playlists" ? "active" : ""}" data-pf="playlists">Playlists</button>
-      <button class="chip ${playerFilter === "projects" ? "active" : ""}" data-pf="projects">Projects</button>
-      <button class="chip ${playerFilter === "releases" ? "active" : ""}" data-pf="releases">Releases</button>
+    <div class="playerChipsSticky">
+      <div class="chipsRow" aria-label="Player filters">
+        <button class="chip ${playerFilter === "all" ? "active" : ""}" data-pf="all">Riffs</button>
+        <button class="chip ${playerFilter === "playlists" ? "active" : ""}" data-pf="playlists">Playlists</button>
+        <button class="chip ${playerFilter === "projects" ? "active" : ""}" data-pf="projects">Projects</button>
+        <button class="chip ${playerFilter === "releases" ? "active" : ""}" data-pf="releases">Releases</button>
+      </div>
     </div>
 
     <div class="playerList">
@@ -7200,6 +9166,9 @@ function renderPlayer() {
                       ${fav ? `<span class="playerBadge fav">♥</span>` : ``}
                     </div>
                   </div>
+                  <button class="playerMore" data-more-song="${it.songId}" data-more-ver="${it.versionId}" aria-label="More options">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+                  </button>
                 </div>
               `;
             }).join("")
@@ -7208,6 +9177,18 @@ function renderPlayer() {
       }
     </div>
   `;
+
+  // Search input — live filter
+  const searchInput = $("#playerSearch");
+  if (searchInput) {
+    searchInput.addEventListener("input", () => {
+      playerQuery = searchInput.value;
+      renderPlayer();
+      // Re-focus and restore cursor position
+      const el = $("#playerSearch");
+      if (el) { el.focus(); el.selectionStart = el.selectionEnd = el.value.length; }
+    });
+  }
 
   // Filter chips (single-select mode filters)
   activeScreenEl.querySelectorAll("[data-pf]").forEach(btn => {
@@ -7243,6 +9224,18 @@ function renderPlayer() {
     await playNowPlaying({ autoplay: true });
     toast("Shuffled ▶️");
     renderPlayer();
+  });
+
+  // More (...) buttons — open action sheet
+  activeScreenEl.querySelectorAll(".playerMore").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const songId = btn.getAttribute("data-more-song");
+      const verId = btn.getAttribute("data-more-ver");
+      if (!songId || !verId) return;
+      const item = items.find(x => x.songId === songId && x.versionId === verId);
+      if (item) openPlayerActionSheet(item);
+    });
   });
 
   // Row interactions: tap to play, long-press for action sheet
@@ -7282,6 +9275,7 @@ function renderPlayer() {
       renderPlayer();
     });
   });
+
 }
 
 function renderNowPlaying() {
@@ -7639,10 +9633,12 @@ function renderNowPlaying() {
   });
 
   $("#npNext")?.addEventListener("click", () => {
+    if (state.player?.repeat === "one") return;
     if (!advanceToNextTrack({ render: true })) toast("Queue empty 😅");
   });
 
   $("#npPrev")?.addEventListener("click", () => {
+    if (state.player?.repeat === "one") return;
     advanceToPrevTrack({ render: true });
   });
 
@@ -7836,6 +9832,19 @@ function renderSettings() {
       </div>
 
       <div class="hr"></div>
+      <h2>Debug Tools</h2>
+      <div class="row" style="gap:10px; align-items:center">
+        <button id="toggleSyncDebug" class="btn" style="flex:1; ${window.RIFFBANK_DEBUG_SYNC ? "background:rgba(78,205,196,.12); border-color:rgba(78,205,196,.3); color:#4ecdc4" : ""}">${window.RIFFBANK_DEBUG_SYNC ? "Sync Debug: ON" : "Sync Debug: OFF"}</button>
+        <button id="runSyncAudit" class="btn" style="flex:1">Run Sync Audit</button>
+      </div>
+      <div class="small" style="margin-top:4px">
+        Sync Debug shows colored dots on song cards:
+        <span style="color:#4ade80">●</span> local audio
+        <span style="color:#facc15">●</span> Drive-only
+        <span style="color:#f87171">●</span> no audio
+      </div>
+
+      <div class="hr"></div>
       <h2>Danger zone</h2>
       <button id="wipe" class="btn">Wipe local data</button>
       <div class="small">This only affects this device/browser. Export first if you care.</div>
@@ -7911,8 +9920,9 @@ function renderSettings() {
       state = driveState;
       normalizeState();
       localStorage.setItem(LS_KEY, JSON.stringify(state));
-      toast("Synced from Drive ✅ ☁️");
+      toast("Synced from Drive — caching audio…");
       render();
+      await cacheAllDriveAudio();
     } else {
       toast("No state found on Drive (or token expired) 😅");
     }
@@ -7968,8 +9978,9 @@ function renderSettings() {
     state.songs = songs;
     normalizeState();
     saveState();
-    toast(`Rebuilt ${songs.length} songs from Drive ✅ 🔄`);
+    toast(`Rebuilt ${songs.length} songs — caching audio…`);
     render();
+    await cacheAllDriveAudio();
   });
 
   // Existing settings
@@ -7998,26 +10009,49 @@ function renderSettings() {
   $("#genMissingArt")?.addEventListener("click", () => startBulkGenArt(true));
   $("#regenAllArt")?.addEventListener("click", () => startBulkGenArt(false));
 
+  $("#toggleSyncDebug")?.addEventListener("click", () => {
+    window.RIFFBANK_DEBUG_SYNC = !window.RIFFBANK_DEBUG_SYNC;
+    toast(`Sync debug ${window.RIFFBANK_DEBUG_SYNC ? "ON" : "OFF"}`);
+    renderSettings();
+  });
+
+  $("#runSyncAudit")?.addEventListener("click", async () => {
+    toast("Running sync audit…");
+    const results = await window.auditSync();
+    const reds = results.filter(r => r.status === "red");
+    const yellows = results.filter(r => r.status === "yellow");
+    const greens = results.length - reds.length - yellows.length;
+    let msg = `${results.length} versions: ${greens} local, ${yellows.length} Drive-only, ${reds.length} broken`;
+    if (reds.length) msg += `\n\nBroken:\n${reds.map(r => `• ${r.song} / ${r.version}`).join("\n")}`;
+    alert(msg);
+  });
+
   $("#wipe").addEventListener("click", async () => {
     if (!confirm("Wipe all local RiffBank data on this browser?")) return;
 
     localStorage.removeItem(LS_KEY);
+    localStorage.removeItem("salOnboardingDone");
     state = loadState();
     normalizeState();
     // Save locally only — do NOT sync empty state to Drive
     localStorage.setItem(LS_KEY, JSON.stringify(state));
 
-    toast("Wiped 🧼 (Drive state untouched)");
     currentTab = "home";
+    drawerView = null;
+    overlayView = null;
     setHeader("RiffBank");
 
     if (screens.home) screens.home.scrollTop = 0;
     try { window.scrollTo(0, 0); } catch {}
     try { document.documentElement.scrollTop = 0; } catch {}
     try { document.body.scrollTop = 0; } catch {}
-    requestAnimationFrame(() => { if (activeScreenEl) activeScreenEl.scrollTop = 0; });
 
     render();
+
+    // Replay splash like a fresh start, then show Sal onboarding
+    await replaySplash();
+    document.body.classList.remove("splashing");
+    openSalOnboarding();
   });
 }
 
