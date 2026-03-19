@@ -372,3 +372,403 @@ export async function supabaseFetchCoverBlob(coverPath) {
   if (error || !data) return null;
   return data;
 }
+
+// ── Sharing & Collaboration ──────────────────────────
+
+// Create an invite token for a project or song
+export async function createShareInvite({ projectId, songId, role }) {
+  const userId = await getUserId();
+  if (!userId) throw new Error("Not authenticated");
+
+  const row = {
+    from_user: userId,
+    role: role || "viewer",
+  };
+  if (projectId) row.project_id = projectId;
+  if (songId) row.song_id = songId;
+
+  const { data, error } = await supabase
+    .from("share_invites")
+    .insert(row)
+    .select("token, role, project_id, song_id, expires_at")
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+// Look up an invite by token (for the accept page)
+export async function getShareInvite(token) {
+  const { data, error } = await supabase
+    .from("share_invites")
+    .select(`
+      id, token, role, accepted, expires_at,
+      from_user, project_id, song_id
+    `)
+    .eq("token", token)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) return null;
+
+  // Fetch sharer's display name
+  let fromName = null;
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("display_name")
+    .eq("id", data.from_user)
+    .maybeSingle();
+  if (profile) fromName = profile.display_name;
+
+  // Fetch project/song name for display
+  let targetName = null;
+  let targetType = null;
+  if (data.project_id) {
+    targetType = "project";
+    const { data: proj } = await supabase
+      .from("projects").select("name").eq("id", data.project_id).maybeSingle();
+    if (proj) targetName = proj.name;
+  } else if (data.song_id) {
+    targetType = "song";
+    const { data: song } = await supabase
+      .from("songs").select("title").eq("id", data.song_id).maybeSingle();
+    if (song) targetName = song.title;
+  }
+
+  return {
+    ...data,
+    fromName,
+    targetType,
+    targetName,
+  };
+}
+
+// Accept an invite — creates project_members or song_shares row
+export async function acceptShareInvite(token) {
+  const userId = await getUserId();
+  if (!userId) throw new Error("Not authenticated");
+
+  // 1. Fetch the invite
+  const { data: invite, error: fetchErr } = await supabase
+    .from("share_invites")
+    .select("*")
+    .eq("token", token)
+    .maybeSingle();
+
+  if (fetchErr) throw fetchErr;
+  if (!invite) throw new Error("Invite not found");
+  if (invite.accepted) throw new Error("Invite already used");
+  if (invite.expires_at && new Date(invite.expires_at) < new Date()) throw new Error("Invite expired");
+  if (invite.from_user === userId) throw new Error("Cannot accept your own invite");
+
+  // 2. Create membership
+  if (invite.project_id) {
+    const { error } = await supabase.from("project_members").upsert({
+      project_id: invite.project_id,
+      user_id: userId,
+      role: invite.role,
+      invited_by: invite.from_user,
+    }, { onConflict: "project_id,user_id" });
+    if (error) throw error;
+  } else if (invite.song_id) {
+    const { error } = await supabase.from("song_shares").upsert({
+      song_id: invite.song_id,
+      user_id: userId,
+      role: invite.role,
+      invited_by: invite.from_user,
+    }, { onConflict: "song_id,user_id" });
+    if (error) throw error;
+  }
+
+  // 3. Mark invite as accepted
+  await supabase.from("share_invites")
+    .update({ accepted: true, accepted_by: userId, accepted_at: new Date().toISOString() })
+    .eq("id", invite.id);
+
+  // 4. Ensure acceptor has a profile row
+  await supabase.from("profiles").upsert({
+    id: userId,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: "id" });
+
+  return { role: invite.role, projectId: invite.project_id, songId: invite.song_id };
+}
+
+// Fetch all projects shared WITH the current user (+ their songs)
+export async function pullSharedProjects() {
+  const userId = await getUserId();
+  if (!userId) return [];
+
+  // Get memberships
+  const { data: memberships, error: memErr } = await supabase
+    .from("project_members")
+    .select("project_id, role, invited_by")
+    .eq("user_id", userId);
+
+  if (memErr || !memberships?.length) return [];
+
+  const projectIds = memberships.map(m => m.project_id);
+
+  // Fetch projects
+  const { data: projects } = await supabase
+    .from("projects")
+    .select("id, name, owner_id")
+    .in("id", projectIds);
+
+  if (!projects?.length) return [];
+
+  // Fetch songs + versions for those projects
+  const { data: dbSongs } = await supabase
+    .from("songs")
+    .select("*, versions(*)")
+    .in("project_id", projectIds);
+
+  // Fetch owner profiles
+  const ownerIds = [...new Set(projects.map(p => p.owner_id))];
+  const { data: profiles } = await supabase
+    .from("profiles")
+    .select("id, display_name")
+    .in("id", ownerIds);
+  const profileMap = {};
+  for (const p of (profiles || [])) profileMap[p.id] = p.display_name;
+
+  // Build project map
+  const projectMap = {};
+  for (const p of projects) projectMap[p.id] = p;
+
+  // Map songs to app format
+  const mapSong = (s) => ({
+    id: s.id,
+    title: s.title || "",
+    project: projectMap[s.project_id]?.name || "",
+    genre: s.genre || "",
+    sprint: s.sprint || "",
+    instrumentation: s.instrumentation || "",
+    collaborators: s.collaborators || "",
+    status: s.status || "",
+    stuckState: s.stuck_state || "",
+    nextAction: s.next_action || "",
+    vibes: s.vibes || "",
+    lyrics: s.lyrics || "",
+    notes: s.notes || "",
+    featuredVersionId: s.featured_version_id || null,
+    coverPath: s.cover_path || null,
+    coverImageUrl: null,
+    userCoverPath: s.user_cover_path || null,
+    userCoverImageUrl: null,
+    coverSource: s.cover_source || "ai",
+    createdAt: s.created_at,
+    updatedAt: s.updated_at,
+    versions: (s.versions || []).map(v => ({
+      id: v.id,
+      label: v.label || "",
+      notes: v.notes || "",
+      link: v.link || "",
+      fileName: v.file_name || "",
+      fileType: v.file_type || "",
+      fileSize: v.file_size || 0,
+      fileId: null,
+      localAudioId: null,
+      audioPath: v.audio_path || null,
+      isActive: !!v.is_active,
+      isBest: !!v.is_best,
+      playerYes: !!v.player_yes,
+      favorite: !!v.favorite,
+      createdAt: v.created_at,
+      updatedAt: v.updated_at,
+    })),
+  });
+
+  // Group by project
+  return memberships.map(m => {
+    const proj = projectMap[m.project_id];
+    if (!proj) return null;
+    const songs = (dbSongs || []).filter(s => s.project_id === m.project_id).map(mapSong);
+    return {
+      projectId: m.project_id,
+      projectName: proj.name,
+      ownerName: profileMap[proj.owner_id] || "Someone",
+      ownerId: proj.owner_id,
+      role: m.role,
+      songs,
+    };
+  }).filter(Boolean);
+}
+
+// Fetch individual songs shared directly with the current user
+export async function pullSharedSongs() {
+  const userId = await getUserId();
+  if (!userId) return [];
+
+  const { data: shares, error } = await supabase
+    .from("song_shares")
+    .select("song_id, role, invited_by")
+    .eq("user_id", userId);
+
+  if (error || !shares?.length) return [];
+
+  const songIds = shares.map(s => s.song_id);
+
+  const { data: dbSongs } = await supabase
+    .from("songs")
+    .select("*, versions(*), project_id")
+    .in("id", songIds);
+
+  if (!dbSongs?.length) return [];
+
+  // Get project names & owner profiles
+  const projectIds = [...new Set(dbSongs.map(s => s.project_id).filter(Boolean))];
+  const { data: projects } = await supabase
+    .from("projects").select("id, name, owner_id").in("id", projectIds);
+  const projMap = {};
+  const ownerIds = new Set();
+  for (const p of (projects || [])) { projMap[p.id] = p; ownerIds.add(p.owner_id); }
+
+  const { data: profiles } = await supabase
+    .from("profiles").select("id, display_name").in("id", [...ownerIds]);
+  const profileMap = {};
+  for (const p of (profiles || [])) profileMap[p.id] = p.display_name;
+
+  const shareMap = {};
+  for (const s of shares) shareMap[s.song_id] = s;
+
+  return dbSongs.map(s => {
+    const share = shareMap[s.id];
+    const proj = projMap[s.project_id];
+    return {
+      song: {
+        id: s.id,
+        title: s.title || "",
+        project: proj?.name || "",
+        genre: s.genre || "",
+        lyrics: s.lyrics || "",
+        notes: s.notes || "",
+        coverPath: s.cover_path || null,
+        coverImageUrl: null,
+        coverSource: s.cover_source || "ai",
+        createdAt: s.created_at,
+        updatedAt: s.updated_at,
+        versions: (s.versions || []).map(v => ({
+          id: v.id,
+          label: v.label || "",
+          notes: v.notes || "",
+          link: v.link || "",
+          audioPath: v.audio_path || null,
+          isActive: !!v.is_active,
+          favorite: !!v.favorite,
+          createdAt: v.created_at,
+          updatedAt: v.updated_at,
+        })),
+      },
+      role: share.role,
+      ownerName: proj ? (profileMap[proj.owner_id] || "Someone") : "Someone",
+    };
+  });
+}
+
+// List pending invites sent by the current user
+export async function listMyInvites() {
+  const userId = await getUserId();
+  if (!userId) return [];
+
+  const { data, error } = await supabase
+    .from("share_invites")
+    .select("id, token, role, accepted, created_at, expires_at, project_id, song_id")
+    .eq("from_user", userId)
+    .order("created_at", { ascending: false });
+
+  if (error || !data?.length) return [];
+
+  // Enrich with project/song names
+  const projectIds = [...new Set(data.map(d => d.project_id).filter(Boolean))];
+  const songIds = [...new Set(data.map(d => d.song_id).filter(Boolean))];
+
+  const projMap = {};
+  if (projectIds.length) {
+    const { data: projs } = await supabase.from("projects").select("id, name").in("id", projectIds);
+    for (const p of (projs || [])) projMap[p.id] = p.name;
+  }
+  const songMap = {};
+  if (songIds.length) {
+    const { data: songs } = await supabase.from("songs").select("id, title").in("id", songIds);
+    for (const s of (songs || [])) songMap[s.id] = s.title;
+  }
+
+  return data.map(inv => ({
+    ...inv,
+    targetName: inv.project_id ? projMap[inv.project_id] : songMap[inv.song_id],
+    targetType: inv.project_id ? "project" : "song",
+    expired: inv.expires_at && new Date(inv.expires_at) < new Date(),
+  }));
+}
+
+// Delete an invite
+export async function deleteShareInvite(inviteId) {
+  const { error } = await supabase.from("share_invites").delete().eq("id", inviteId);
+  if (error) throw error;
+}
+
+// Remove a member from a project (owner action) or leave
+export async function removeProjectMember(projectId, userId) {
+  const { error } = await supabase
+    .from("project_members")
+    .delete()
+    .eq("project_id", projectId)
+    .eq("user_id", userId);
+  if (error) throw error;
+}
+
+// Ensure user profile exists with display name (+ optional extra fields)
+export async function upsertProfile({ displayName, location, instrument, genre, bio, avatarUrl } = {}) {
+  const userId = await getUserId();
+  if (!userId) return;
+  const row = { id: userId, updated_at: new Date().toISOString() };
+  if (displayName !== undefined) row.display_name = displayName;
+  if (location !== undefined) row.location = location;
+  if (instrument !== undefined) row.instrument = instrument;
+  if (genre !== undefined) row.genre = genre;
+  if (bio !== undefined) row.bio = bio;
+  if (avatarUrl !== undefined) row.avatar_url = avatarUrl;
+  await supabase.from("profiles").upsert(row, { onConflict: "id" });
+}
+
+// Search users by display name (for in-app share picker)
+export async function searchUsers(query) {
+  const userId = await getUserId();
+  if (!userId || !query?.trim()) return [];
+
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("id, display_name, avatar_url, location, instrument, genre, bio")
+    .neq("id", userId)
+    .ilike("display_name", `%${query.trim()}%`)
+    .limit(10);
+
+  if (error) { console.warn("[Supabase] searchUsers:", error); return []; }
+  return data || [];
+}
+
+// Share directly with a user (no invite token needed)
+export async function shareWithUser({ targetUserId, projectId, songId, role }) {
+  const userId = await getUserId();
+  if (!userId) throw new Error("Not authenticated");
+  if (targetUserId === userId) throw new Error("Can't share with yourself");
+
+  if (projectId) {
+    const { error } = await supabase.from("project_members").upsert({
+      project_id: projectId,
+      user_id: targetUserId,
+      role: role || "viewer",
+      invited_by: userId,
+    }, { onConflict: "project_id,user_id" });
+    if (error) throw error;
+  } else if (songId) {
+    const { error } = await supabase.from("song_shares").upsert({
+      song_id: songId,
+      user_id: targetUserId,
+      role: role || "viewer",
+      invited_by: userId,
+    }, { onConflict: "song_id,user_id" });
+    if (error) throw error;
+  }
+}

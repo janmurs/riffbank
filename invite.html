@@ -110,6 +110,47 @@
       font-size: 14px; color: #22c55e;
       font-weight: 700; margin-bottom: 20px;
     }
+
+    /* Role badge */
+    .roleBadge {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 999px;
+      font-weight: 700; font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 16px;
+    }
+    .roleBadge.collaborator {
+      background: rgba(167, 139, 250, .2);
+      color: #a78bfa;
+      border: 1px solid rgba(167, 139, 250, .3);
+    }
+    .roleBadge.viewer {
+      background: rgba(34, 197, 94, .15);
+      color: #22c55e;
+      border: 1px solid rgba(34, 197, 94, .25);
+    }
+
+    /* Accept button */
+    .acceptBtn {
+      display: block; width: 100%; max-width: 360px;
+      padding: 16px 0; margin-bottom: 12px;
+      background: linear-gradient(135deg, #a78bfa, #f472b6);
+      border: none; border-radius: 999px;
+      color: #fff; font-family: 'Montserrat', sans-serif;
+      font-weight: 800; font-size: 16px;
+      cursor: pointer; transition: opacity .2s;
+    }
+    .acceptBtn:active { opacity: .8; }
+    .acceptBtn:disabled { opacity: .5; cursor: not-allowed; }
+
+    .acceptStatus {
+      font-size: 14px; font-weight: 700;
+      margin-bottom: 20px; display: none;
+    }
+    .acceptStatus.success { color: #22c55e; display: block; }
+    .acceptStatus.error { color: #ef4444; display: block; }
   </style>
 </head>
 <body>
@@ -123,8 +164,12 @@
     Your bandmate wants to collaborate with you on <strong>RiffBank</strong> — the app for managing songs, versions, and releases.
   </div>
 
+  <div id="roleBadgeWrap"></div>
+
+  <div class="acceptStatus" id="acceptStatus"></div>
+
   <div class="alreadyInstalled" id="alreadyInstalled">
-    RiffBank is already installed! Open it to sign in.
+    RiffBank is already installed!
   </div>
 
   <div class="installCard" id="installCard">
@@ -132,9 +177,11 @@
     <div id="installSteps"></div>
   </div>
 
+  <button class="acceptBtn" id="acceptBtn" style="display:none">Accept Invite</button>
+
   <a class="inviteBtn" href="./" id="openBtn">Open RiffBank</a>
 
-  <div class="inviteNote">
+  <div class="inviteNote" id="inviteNote">
     After installing, open RiffBank and create your account. You'll enter a 6-digit code from your email to verify — no redirect needed.
   </div>
 
@@ -195,9 +242,142 @@
 
     // Parse invite params
     const params = new URLSearchParams(window.location.search);
+    const token = params.get("token");
     const from = params.get("from");
     const project = params.get("project");
-    if (from || project) {
+
+    if (token) {
+      // ── New token-based invite ──
+      (async () => {
+        try {
+          const { createClient } = await import("https://esm.sh/@supabase/supabase-js@2");
+          const sb = createClient(
+            "https://hbgaoejdslftbwuhggtv.supabase.co",
+            "sb_publishable_txkI4NbwclNsBW_geDj_bw_xQNL4vqO"
+          );
+
+          // Look up invite details
+          const { data: invite, error } = await sb
+            .from("share_invites")
+            .select("id, token, role, accepted, expires_at, from_user, project_id, song_id")
+            .eq("token", token)
+            .maybeSingle();
+
+          if (error || !invite) {
+            document.getElementById("inviteSub").textContent = "This invite link is invalid or has expired.";
+            return;
+          }
+
+          // Fetch sharer profile
+          let fromName = "Someone";
+          const { data: profile } = await sb.from("profiles").select("display_name").eq("id", invite.from_user).maybeSingle();
+          if (profile?.display_name) fromName = profile.display_name;
+
+          // Fetch target name
+          let targetName = "";
+          let targetType = "";
+          if (invite.project_id) {
+            targetType = "project";
+            const { data: proj } = await sb.from("projects").select("name").eq("id", invite.project_id).maybeSingle();
+            targetName = proj?.name || "a project";
+          } else if (invite.song_id) {
+            targetType = "song";
+            const { data: song } = await sb.from("songs").select("title").eq("id", invite.song_id).maybeSingle();
+            targetName = song?.title || "a song";
+          }
+
+          // Update UI
+          const sub = document.getElementById("inviteSub");
+          const roleLabel = invite.role === "collaborator" ? "collaborate on" : "listen to";
+          sub.innerHTML = `<strong>${fromName}</strong> invited you to ${roleLabel} ${targetType} <strong>"${targetName}"</strong> on RiffBank.`;
+
+          // Show role badge
+          const badgeWrap = document.getElementById("roleBadgeWrap");
+          badgeWrap.innerHTML = `<div class="roleBadge ${invite.role}">${invite.role === "collaborator" ? "Collaborator — Full Edit" : "Viewer — Listen Only"}</div>`;
+
+          if (invite.accepted) {
+            const status = document.getElementById("acceptStatus");
+            status.textContent = "This invite has already been accepted.";
+            status.className = "acceptStatus success";
+            return;
+          }
+
+          if (invite.expires_at && new Date(invite.expires_at) < new Date()) {
+            document.getElementById("inviteSub").textContent = "This invite has expired.";
+            return;
+          }
+
+          // Show accept button if in standalone mode (app is installed & user may be logged in)
+          if (isStandalone) {
+            const acceptBtn = document.getElementById("acceptBtn");
+            acceptBtn.style.display = "block";
+            acceptBtn.addEventListener("click", async () => {
+              acceptBtn.disabled = true;
+              acceptBtn.textContent = "Accepting...";
+              const status = document.getElementById("acceptStatus");
+              try {
+                const { data: { session } } = await sb.auth.getSession();
+                if (!session) {
+                  status.textContent = "Please open RiffBank and sign in first, then come back to accept.";
+                  status.className = "acceptStatus error";
+                  acceptBtn.textContent = "Accept Invite";
+                  acceptBtn.disabled = false;
+                  return;
+                }
+
+                // Accept the invite
+                const userId = session.user.id;
+                if (invite.from_user === userId) {
+                  status.textContent = "You can't accept your own invite!";
+                  status.className = "acceptStatus error";
+                  acceptBtn.disabled = false;
+                  acceptBtn.textContent = "Accept Invite";
+                  return;
+                }
+
+                if (invite.project_id) {
+                  await sb.from("project_members").upsert({
+                    project_id: invite.project_id,
+                    user_id: userId,
+                    role: invite.role,
+                    invited_by: invite.from_user,
+                  }, { onConflict: "project_id,user_id" });
+                } else if (invite.song_id) {
+                  await sb.from("song_shares").upsert({
+                    song_id: invite.song_id,
+                    user_id: userId,
+                    role: invite.role,
+                    invited_by: invite.from_user,
+                  }, { onConflict: "song_id,user_id" });
+                }
+
+                await sb.from("share_invites").update({
+                  accepted: true,
+                  accepted_by: userId,
+                  accepted_at: new Date().toISOString(),
+                }).eq("id", invite.id);
+
+                status.textContent = "Invite accepted! Open RiffBank to see your shared content.";
+                status.className = "acceptStatus success";
+                acceptBtn.style.display = "none";
+              } catch (e) {
+                status.textContent = e.message || "Something went wrong.";
+                status.className = "acceptStatus error";
+                acceptBtn.disabled = false;
+                acceptBtn.textContent = "Accept Invite";
+              }
+            });
+          } else {
+            // Not installed — update note to mention accepting after install
+            document.getElementById("inviteNote").innerHTML =
+              "Install RiffBank, create your account, then <strong>come back to this page</strong> to accept the invite.";
+          }
+        } catch (e) {
+          console.error("Invite page error:", e);
+        }
+      })();
+    } else if (from || project) {
+      // ── Legacy invite (no token) ──
       const sub = document.getElementById("inviteSub");
       let msg = "";
       if (from && project) {
