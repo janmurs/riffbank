@@ -30,8 +30,11 @@ import {
   supabaseUploadAudio, supabaseFetchAudioBlob, supabaseDeleteAudio, supabaseDiscoverAudioPaths,
   supabaseUploadCover, supabaseFetchCoverBlob, supabaseCountUserSongs,
   createShareInvite, getShareInvite, acceptShareInvite,
-  pullSharedProjects, pullSharedSongs, listMyInvites, deleteShareInvite,
+  pullSharedProjects, pullSharedSongs, pullMySharedProjects, pullMySharedSongs,
+  listMyInvites, deleteShareInvite,
   removeProjectMember, upsertProfile, searchUsers, shareWithUser,
+  sendFriendRequest, acceptFriendRequest, removeFriendship,
+  getMyFriends, getPendingFriendRequests, getPendingFriendCount,
 } from "./supabase.js";
 
 const LS_KEY = "riffbank_v1";
@@ -934,7 +937,7 @@ function captureNavState() {
   nav.captureState({
     currentTab, drawerView, projectDetailScreen, releaseDetailId,
     selectedSongId, selectedVersionId, songsView, overlayView,
-    songsBackTarget, lyricsEditSongId, headerTitle: headerTitle?.textContent ?? "RiffBank"
+    songsBackTarget, lyricsEditSongId, collabMode, headerTitle: headerTitle?.textContent ?? "RiffBank"
   });
 }
 function triggerForwardSlide() { nav.forward(activeScreenEl); }
@@ -945,7 +948,7 @@ function navigateForward(mutateFn) {
   const captured = {
     currentTab, drawerView, projectDetailScreen, releaseDetailId,
     selectedSongId, selectedVersionId, songsView, overlayView,
-    songsBackTarget, lyricsEditSongId, headerTitle: headerTitle?.textContent ?? "RiffBank"
+    songsBackTarget, lyricsEditSongId, collabMode, headerTitle: headerTitle?.textContent ?? "RiffBank"
   };
   nav.captureState(captured);
   nav.slideTransition({
@@ -1765,7 +1768,7 @@ function loadState() {
 let state = loadState();
 
 // Shared content cache (runtime only, fetched from Supabase on Collab tab)
-let sharedData = { projects: [], songs: [], invites: [], loaded: false };
+let sharedData = { projects: [], songs: [], invites: [], myProjects: [], mySongs: [], loaded: false };
 
 function normalizeState() {
   state.settings = state.settings || {};
@@ -2874,6 +2877,7 @@ let drawerView = null;
 let songsBackTarget = null; // e.g. "projects" | "collabs"
 let drawerOpen = false;
 let overlayView = null;
+let collabMode = false; // true when drilling into shared content from Collab tab
 
 // ---------------------
 // Drawer open/close
@@ -2914,8 +2918,8 @@ function setHeader(t) {
 const ROOT_TABS = new Set(["home", "player", "collab"]);
 function syncBackButton() {
   if (!headerBackEl) return;
-  // Collab is always a root — never show back button there
-  if (currentTab === "collab" || currentTab === "profile") { headerBackEl.style.display = "none"; return; }
+  // Profile is always root — never show back button
+  if (currentTab === "profile") { headerBackEl.style.display = "none"; return; }
   const onRoot =
     ROOT_TABS.has(currentTab) &&
     !drawerView &&
@@ -3311,6 +3315,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
         releaseDetailId = null;
         songsView = "list";
         songsListScrollTop = 0;
+        collabMode = false;
         currentTab = "home";
         if (screens.home) screens.home.scrollTop = 0;
         try { window.scrollTo(0, 0); } catch {}
@@ -3335,6 +3340,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
     releaseDetailId = null;
     songsView = "list";
     songsListScrollTop = 0;
+    collabMode = false;
 
     currentTab = targetTab;
     if (targetTab === "player") {
@@ -3365,6 +3371,7 @@ headerTitle?.addEventListener("click", () => {
     releaseDetailId = null;
     songsView = "list";
     songsListScrollTop = 0;
+    collabMode = false;
     currentTab = "home";
     songsBackTarget = null;
     nav.clearStacks();
@@ -3455,6 +3462,7 @@ function goBack({ animate = false } = {}) {
       overlayView = restoreState.overlayView;
       songsBackTarget = restoreState.songsBackTarget;
       lyricsEditSongId = restoreState.lyricsEditSongId ?? null;
+      collabMode = restoreState.collabMode ?? false;
       // Going back to home resets songs scroll so next visit starts fresh
       if (restoreState.currentTab === "home" && !restoreState.drawerView) songsListScrollTop = 0;
       setHeader(restoreState.headerTitle);
@@ -3493,6 +3501,7 @@ function goBack({ animate = false } = {}) {
       songsListScrollTop = 0;
       selectedSongId = null;
       selectedVersionId = null;
+      collabMode = false;
       nav.clearStacks();
       setHeader("RiffBank");
       syncTabs();
@@ -3525,8 +3534,9 @@ document.addEventListener("touchstart", (e) => {
 
 // Left-edge gesture
 if (!drawerOpen && t.clientX <= 24) {
-  // Player and Collab have nothing to go back to; bare home screen (no drawer) has nothing to go back to
-  if (currentTab === "player" || currentTab === "collab") return;
+  // Player has nothing to go back to; bare home/collab root has nothing to go back to
+  if (currentTab === "player") return;
+  if (currentTab === "collab" && !projectDetailScreen && !selectedSongId) return;
   if (currentTab === "home" && !drawerView && !overlayView) return;
 
   touchTracking = true;
@@ -3577,6 +3587,21 @@ if (!drawerOpen && t.clientX <= 24) {
     const capture = nav._captureApp();
     if (capture) {
       swipeQueenEl = positionAppClone(capture.clone, 501);
+      // Bake fixed-position FAB into absolute pixel coords so it stays
+      // visible inside the overflow:hidden clone (same as nav.back())
+      const queenFab = swipeQueenEl.querySelector('.sdFab');
+      if (queenFab) {
+        const liveFab = document.querySelector('.sdFab');
+        if (liveFab) {
+          const fr = liveFab.getBoundingClientRect();
+          queenFab.style.position = 'absolute';
+          queenFab.style.top = `${fr.top}px`;
+          queenFab.style.left = `${fr.left}px`;
+          queenFab.style.bottom = 'auto';
+          queenFab.style.right = 'auto';
+          swipeQueenEl.appendChild(queenFab);
+        }
+      }
       document.body.appendChild(swipeQueenEl);
       restoreCloneScroll(swipeQueenEl, capture.scrollTop);
     }
@@ -5324,7 +5349,35 @@ function render() {
     if (playerScreen === "now") return renderNowPlaying();
     return renderPlayer();
   }
-  if (currentTab === "collab") { setActiveScreen("collab"); return renderCollab(); }
+  if (currentTab === "collab") {
+    if (projectDetailScreen) {
+      if (selectedSongId && selectedVersionId) {
+        setActiveScreen("versionDetail");
+        if (!_isBack) activeScreenEl.scrollTop = 0;
+        return renderVersionDetail(selectedSongId, selectedVersionId);
+      }
+      if (selectedSongId) {
+        setActiveScreen("songDetail");
+        if (!_isBack) activeScreenEl.scrollTop = 0;
+        return renderSongDetail(selectedSongId);
+      }
+      setActiveScreen("projectDetail");
+      if (!_isBack) activeScreenEl.scrollTop = 0;
+      return renderProjectSongs(projectDetailScreen);
+    }
+    if (selectedSongId && selectedVersionId) {
+      setActiveScreen("versionDetail");
+      if (!_isBack) activeScreenEl.scrollTop = 0;
+      return renderVersionDetail(selectedSongId, selectedVersionId);
+    }
+    if (selectedSongId) {
+      setActiveScreen("songDetail");
+      if (!_isBack) activeScreenEl.scrollTop = 0;
+      return renderSongDetail(selectedSongId);
+    }
+    setActiveScreen("collab");
+    return renderCollab();
+  }
   if (currentTab === "profile") { setActiveScreen("collab"); return renderProfile(); }
   if (currentTab === "settings") { setActiveScreen("settings"); return renderSettings(); }
 }
@@ -7371,7 +7424,20 @@ function renderProjectSongs(projectName) {
 
   activeScreenEl.style.overflowY = "scroll";
 
-  const songs = state.songs.filter(s => (s.project || "").trim() === projectName);
+  // In collab mode, pull songs from the shared project data; otherwise use local state
+  const songs = collabMode
+    ? (sharedData.projects.find(sp => sp.projectName === projectName)?.songs || [])
+    : state.songs.filter(s => (s.project || "").trim() === projectName);
+
+  // Ensure shared songs are in the cache so getSong() can find them
+  if (collabMode) {
+    if (!state._sharedSongsCache) state._sharedSongsCache = [];
+    for (const s of songs) {
+      if (!state._sharedSongsCache.find(cs => cs.id === s.id)) {
+        state._sharedSongsCache.push(s);
+      }
+    }
+  }
 
   const items = songs
     .filter(s => (s.versions || []).length)
@@ -8947,12 +9013,51 @@ function openShareOverlay({ projectId, projectName, songId, songTitle }) {
       ` : ""}
 
       <div class="shareResults" id="shareResults">
-        <div class="shareResultsEmpty">Start typing to find people on RiffBank</div>
+        <div class="shareResultsEmpty"><div class="collabSpinner"></div></div>
       </div>
     `;
 
     // Wire close
     $("#shareClose")?.addEventListener("click", closeShareOverlay);
+
+    // Load friends as default list
+    const resultsDefault = $("#shareResults");
+    if (resultsDefault && !selectedUser) {
+      getMyFriends().then(friends => {
+        const cur = $("#shareResults");
+        if (!cur || $("#shareSearch")?.value?.trim()) return; // user already typed
+        if (!friends.length) {
+          cur.innerHTML = `<div class="shareResultsEmpty">Search for people or add friends from the Collab tab</div>`;
+          return;
+        }
+        cur.innerHTML = `<div class="shareRoleLabel" style="padding:0 4px 8px;font-size:12px">Your Friends</div><div class="shareResultsList">${friends.map(f => {
+          const u = f.profile || {};
+          const meta = [u.instrument, u.genre, u.location].filter(Boolean).join(" · ");
+          return `
+            <button class="shareUserRow" data-uid="${u.id}">
+              ${u.avatar_url && !u.avatar_url.startsWith("preset:")
+                ? `<img class="shareUserAvatar" src="${escapeHtml(u.avatar_url)}" />`
+                : `<div class="shareUserAvatar shareUserAvatarFallback">${escapeHtml((u.display_name || "?").charAt(0).toUpperCase())}</div>`
+              }
+              <div class="shareUserInfo">
+                <div class="shareUserName">${escapeHtml(u.display_name || "Unknown")}</div>
+                <div class="shareUserMeta">${meta ? escapeHtml(meta) : "RiffBank user"}</div>
+              </div>
+            </button>
+          `;
+        }).join("")}</div>`;
+        cur.querySelectorAll(".shareUserRow").forEach(row => {
+          row.addEventListener("click", () => {
+            const uid = row.getAttribute("data-uid");
+            selectedUser = friends.find(f => f.profile?.id === uid)?.profile;
+            renderOverlay();
+          });
+        });
+      }).catch(() => {
+        const cur = $("#shareResults");
+        if (cur) cur.innerHTML = `<div class="shareResultsEmpty">Search for people on RiffBank</div>`;
+      });
+    }
 
     // Wire search
     const searchInput = $("#shareSearch");
@@ -8965,7 +9070,8 @@ function openShareOverlay({ projectId, projectName, songId, songTitle }) {
           if (!resultsEl) return;
 
           if (!q) {
-            resultsEl.innerHTML = `<div class="shareResultsEmpty">Start typing to find people on RiffBank</div>`;
+            // Re-show friends list
+            renderOverlay();
             return;
           }
 
@@ -9053,31 +9159,53 @@ function openShareRoleSheet(opts) {
 
 async function refreshSharedData() {
   try {
-    const [projects, songs, invites] = await Promise.all([
+    const [projects, songs, invites, myProjects, mySongs] = await Promise.all([
       pullSharedProjects(),
       pullSharedSongs(),
       listMyInvites(),
+      pullMySharedProjects(),
+      pullMySharedSongs(),
     ]);
-    sharedData = { projects: projects || [], songs: songs || [], invites: invites || [], loaded: true };
+    sharedData = { projects: projects || [], songs: songs || [], invites: invites || [], myProjects: myProjects || [], mySongs: mySongs || [], loaded: true };
   } catch (e) {
     console.warn("[Collab] Failed to fetch shared data:", e);
-    if (!sharedData.loaded) sharedData = { projects: [], songs: [], invites: [], loaded: true };
+    if (!sharedData.loaded) sharedData = { projects: [], songs: [], invites: [], myProjects: [], mySongs: [], loaded: true };
   }
 }
 
+// ── Friends sidebar state ──
+let _collabSidebarOpen = false;
+let _friendsOverlayEl = null;
+let _pendingFriendCount = 0;
+
 function renderCollab() {
   setHeader("Collab");
+  _collabSidebarOpen = false;
+
+  // Fetch pending friend count in background for badge
+  getPendingFriendCount().then(c => {
+    _pendingFriendCount = c;
+    const badge = activeScreenEl.querySelector(".friendsBadge");
+    if (badge) badge.textContent = c || "";
+    if (badge) badge.style.display = c ? "flex" : "none";
+  }).catch(() => {});
 
   // Show loading state first, then fetch
   if (!sharedData.loaded) {
     activeScreenEl.innerHTML = `
-      <div class="collabWrap">
-        <div class="collabEmpty" style="text-align:center; padding-top:60px;">
-          <div class="collabSpinner"></div>
-          <div style="margin-top:16px">Loading shared content...</div>
+      <div class="collabShell">
+        <div class="collabSidebar">${_collabSidebarHTML()}</div>
+        <div class="collabMain">
+          <div class="collabWrap">
+            <div class="collabEmpty" style="text-align:center; padding-top:60px;">
+              <div class="collabSpinner"></div>
+              <div style="margin-top:16px">Loading shared content...</div>
+            </div>
+          </div>
         </div>
       </div>
     `;
+    _wireCollabSidebar();
     refreshSharedData().then(() => renderCollabContent());
     return;
   }
@@ -9085,8 +9213,76 @@ function renderCollab() {
   renderCollabContent();
 }
 
+function _collabSidebarHTML() {
+  const badgeDisplay = _pendingFriendCount ? "flex" : "none";
+  return `
+    <button class="collabSidebarBtn" data-sidebar="requests">
+      <span class="friendsBadge" style="display:${badgeDisplay}">${_pendingFriendCount || ""}</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>
+      Requests
+    </button>
+    <button class="collabSidebarBtn" data-sidebar="friends">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+      Friends
+    </button>
+    <button class="collabSidebarBtn" data-sidebar="add">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      Add
+    </button>
+  `;
+}
+
+function _wireCollabSidebar() {
+  const shell = activeScreenEl.querySelector(".collabShell");
+  if (!shell) return;
+
+  // Swipe from left edge to reveal sidebar
+  let startX = 0, startY = 0, swiping = false;
+  const mainEl = shell.querySelector(".collabMain");
+
+  mainEl.addEventListener("touchstart", (e) => {
+    const t = e.touches[0];
+    if (t.clientX < 30 && !_collabSidebarOpen) {
+      startX = t.clientX; startY = t.clientY; swiping = true;
+    }
+  }, { passive: true });
+
+  mainEl.addEventListener("touchmove", (e) => {
+    if (!swiping) return;
+    const dx = e.touches[0].clientX - startX;
+    const dy = Math.abs(e.touches[0].clientY - startY);
+    if (dy > 30) { swiping = false; return; }
+    if (dx > 40) {
+      swiping = false;
+      _collabSidebarOpen = true;
+      shell.classList.add("sidebarOpen");
+    }
+  }, { passive: true });
+
+  // Tap on shifted main content → close sidebar
+  mainEl.addEventListener("click", (e) => {
+    if (_collabSidebarOpen) {
+      e.preventDefault(); e.stopPropagation();
+      _collabSidebarOpen = false;
+      shell.classList.remove("sidebarOpen");
+    }
+  }, true);
+
+  // Sidebar button taps
+  shell.querySelectorAll("[data-sidebar]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const action = btn.getAttribute("data-sidebar");
+      _collabSidebarOpen = false;
+      shell.classList.remove("sidebarOpen");
+      if (action === "requests") openFriendsRequests();
+      else if (action === "friends") openFriendsList();
+      else if (action === "add") openAddFriend();
+    });
+  });
+}
+
 function renderCollabContent() {
-  const { projects: sharedProjects, songs: sharedSongs, invites } = sharedData;
+  const { projects: sharedProjects, songs: sharedSongs, invites, myProjects, mySongs } = sharedData;
 
   // Gather local collaborators from songs
   const counts = {};
@@ -9161,49 +9357,90 @@ function renderCollabContent() {
 
   const hasShared = sharedProjects.length || sharedSongs.length;
 
-  activeScreenEl.innerHTML = `
-    <div class="collabWrap">
-      ${hasShared ? `
-        <!-- Shared With Me -->
-        <div class="collabSection">
-          <div class="collabSectionTitle">Shared With Me</div>
-          ${sharedProjCards}
-          ${sharedSongCards}
-        </div>
-      ` : `
-        <div class="collabSection">
-          <div class="collabSectionTitle">Shared With Me</div>
-          <div class="collabEmpty">
-            Nothing shared with you yet. When someone shares a project or song, it'll appear here.
-          </div>
-        </div>
-      `}
-
-      ${pendingInvites.length ? `
-        <div class="collabSection">
-          <div class="collabSectionTitle">Pending Invites</div>
-          ${pendingHtml}
-        </div>
-      ` : ""}
-
-      <!-- Your Collaborators -->
-      <div class="collabSection">
-        <div class="collabSectionTitle">Your Collaborators</div>
-        ${collabRows || `
-          <div class="collabEmpty">
-            No collaborators yet. Add names to the "Collaborators" field on any song, or send an invite!
-          </div>
-        `}
+  // "Shared By Me" cards — projects & songs the user has shared with others
+  const mySharedProjCards = myProjects.map(mp => `
+    <div class="collabRow">
+      <div class="collabAvatar" style="background:linear-gradient(135deg,#8b5cf6,#a78bfa);font-size:13px">P</div>
+      <div class="collabInfo" style="flex:1">
+        <div class="collabName">${escapeHtml(mp.projectName)}</div>
+        <div class="collabMeta">to ${escapeHtml(mp.recipientName)} · ${escapeHtml(mp.role)}</div>
       </div>
     </div>
+  `).join("");
 
-    <button class="sdFab" id="collabShareFab" aria-label="Share">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="24" height="24">
-        <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
-        <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
-      </svg>
-    </button>
+  const mySharedSongCards = mySongs.map(ms => `
+    <div class="collabRow">
+      <div class="collabAvatar" style="background:linear-gradient(135deg,#8b5cf6,#a78bfa);font-size:13px">S</div>
+      <div class="collabInfo" style="flex:1">
+        <div class="collabName">${escapeHtml(ms.songTitle)}</div>
+        <div class="collabMeta">to ${escapeHtml(ms.recipientName)} · ${escapeHtml(ms.role)}</div>
+      </div>
+    </div>
+  `).join("");
+
+  const hasMyShared = myProjects.length || mySongs.length;
+
+  activeScreenEl.innerHTML = `
+    <div class="collabShell">
+      <div class="collabSidebar">${_collabSidebarHTML()}</div>
+      <div class="collabMain">
+        <div class="collabWrap">
+          ${hasShared ? `
+            <!-- Shared With Me -->
+            <div class="collabSection">
+              <div class="collabSectionTitle">Shared With Me</div>
+              ${sharedProjCards}
+              ${sharedSongCards}
+            </div>
+          ` : `
+            <div class="collabSection">
+              <div class="collabSectionTitle">Shared With Me</div>
+              <div class="collabEmpty">
+                Nothing shared with you yet. When someone shares a project or song, it'll appear here.
+              </div>
+            </div>
+          `}
+
+          <!-- Shared By Me -->
+          <div class="collabSection">
+            <div class="collabSectionTitle">Shared By Me</div>
+            ${hasMyShared ? `${mySharedProjCards}${mySharedSongCards}` : `
+              <div class="collabEmpty">
+                You haven't shared anything yet. Tap the share button to send a project or song to a collaborator.
+              </div>
+            `}
+          </div>
+
+          ${pendingInvites.length ? `
+            <div class="collabSection">
+              <div class="collabSectionTitle">Pending Invites</div>
+              ${pendingHtml}
+            </div>
+          ` : ""}
+
+          <!-- Your Collaborators -->
+          <div class="collabSection">
+            <div class="collabSectionTitle">Your Collaborators</div>
+            ${collabRows || `
+              <div class="collabEmpty">
+                No collaborators yet. Add names to the "Collaborators" field on any song, or send an invite!
+              </div>
+            `}
+          </div>
+        </div>
+
+        <button class="sdFab" id="collabShareFab" aria-label="Share">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="24" height="24">
+            <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+            <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+          </svg>
+        </button>
+      </div>
+    </div>
   `;
+
+  // Wire sidebar swipe + buttons
+  _wireCollabSidebar();
 
   // Wire FAB → share picker
   $("#collabShareFab")?.addEventListener("click", () => {
@@ -9211,21 +9448,34 @@ function renderCollabContent() {
     openCollabSharePicker();
   });
 
-  // Wire shared project taps → view songs
+  // Wire shared project taps → drill into project songs (reuses renderProjectSongs)
   activeScreenEl.querySelectorAll("[data-shared-proj]").forEach(card => {
     card.addEventListener("click", () => {
       const projId = card.getAttribute("data-shared-proj");
       const sp = sharedProjects.find(p => p.projectId === projId);
-      if (sp) openSharedProjectDetail(sp);
+      if (!sp) return;
+      navigateForward(() => {
+        collabMode = true;
+        projectDetailScreen = sp.projectName;
+      });
     });
   });
 
-  // Wire shared song taps → play
+  // Wire shared song taps → drill into song detail (reuses renderSongDetail)
   activeScreenEl.querySelectorAll("[data-shared-song]").forEach(card => {
     card.addEventListener("click", () => {
       const songId = card.getAttribute("data-shared-song");
       const ss = sharedSongs.find(s => s.song.id === songId);
-      if (ss) openSharedSongDetail(ss);
+      if (!ss) return;
+      // Ensure the shared song is in the cache so getSong() can find it
+      if (!state._sharedSongsCache) state._sharedSongsCache = [];
+      if (!state._sharedSongsCache.find(s => s.id === ss.song.id)) {
+        state._sharedSongsCache.push(ss.song);
+      }
+      navigateForward(() => {
+        collabMode = true;
+        selectedSongId = ss.song.id;
+      });
     });
   });
 
@@ -9273,6 +9523,364 @@ function renderCollabContent() {
       // Only re-render if data actually changed
     }).catch(() => {});
   }
+}
+
+// ── Friends Overlays ─────────────────────────────
+
+function _closeFriendsOverlay() {
+  if (!_friendsOverlayEl) return;
+  _friendsOverlayEl.classList.remove("open");
+  setTimeout(() => { _friendsOverlayEl?.remove(); _friendsOverlayEl = null; }, 300);
+}
+
+function _friendAvatarHTML(profile) {
+  if (!profile) return `<div class="friendAvatar">?</div>`;
+  if (profile.avatar_url) {
+    const src = profile.avatar_url.startsWith("preset:")
+      ? "" : escapeHtml(profile.avatar_url);
+    if (src) return `<div class="friendAvatar"><img src="${src}" alt=""></div>`;
+  }
+  const initial = (profile.display_name || "?").charAt(0).toUpperCase();
+  return `<div class="friendAvatar">${escapeHtml(initial)}</div>`;
+}
+
+function _friendMetaText(profile) {
+  if (!profile) return "";
+  const parts = [profile.instrument, profile.genre, profile.location].filter(Boolean);
+  return parts.length ? escapeHtml(parts.join(" · ")) : "";
+}
+
+// ── Friend Requests View ──
+async function openFriendsRequests() {
+  _friendsOverlayEl?.remove();
+  const el = document.createElement("div");
+  el.className = "friendsOverlay";
+  el.innerHTML = `
+    <div class="friendsHeader">
+      <button class="friendsBackBtn" aria-label="Back">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="24" height="24"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <div class="friendsTitle">Friend Requests</div>
+    </div>
+    <div class="friendsBody">
+      <div class="friendsEmpty"><div class="collabSpinner"></div><div style="margin-top:12px">Loading...</div></div>
+    </div>
+  `;
+  document.body.appendChild(el);
+  _friendsOverlayEl = el;
+  requestAnimationFrame(() => el.classList.add("open"));
+
+  el.querySelector(".friendsBackBtn").addEventListener("click", _closeFriendsOverlay);
+
+  try {
+    const requests = await getPendingFriendRequests();
+    const body = el.querySelector(".friendsBody");
+    if (!requests.length) {
+      body.innerHTML = `<div class="friendsEmpty">No pending friend requests.</div>`;
+      return;
+    }
+    body.innerHTML = requests.map(r => `
+      <div class="friendRow" data-req-id="${r.id}">
+        ${_friendAvatarHTML(r.profile)}
+        <div class="friendInfo">
+          <div class="friendName">${escapeHtml(r.profile?.display_name || "Unknown")}</div>
+          <div class="friendMeta">${_friendMetaText(r.profile)}</div>
+        </div>
+        <div class="friendActions">
+          <button class="friendAcceptBtn" data-accept="${r.id}">Accept</button>
+          <button class="friendDeclineBtn" data-decline="${r.id}">Decline</button>
+        </div>
+      </div>
+    `).join("");
+
+    body.querySelectorAll("[data-accept]").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const id = btn.getAttribute("data-accept");
+        btn.textContent = "...";
+        try {
+          await acceptFriendRequest(id);
+          const row = btn.closest(".friendRow");
+          row.style.opacity = ".4";
+          setTimeout(() => row.remove(), 300);
+          toast("Friend request accepted!");
+          _pendingFriendCount = Math.max(0, _pendingFriendCount - 1);
+        } catch (err) { toast(err.message || "Failed"); }
+      });
+    });
+
+    body.querySelectorAll("[data-decline]").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const id = btn.getAttribute("data-decline");
+        btn.textContent = "...";
+        try {
+          await removeFriendship(id);
+          const row = btn.closest(".friendRow");
+          row.style.opacity = ".4";
+          setTimeout(() => row.remove(), 300);
+          toast("Request declined");
+          _pendingFriendCount = Math.max(0, _pendingFriendCount - 1);
+        } catch (err) { toast(err.message || "Failed"); }
+      });
+    });
+  } catch (err) {
+    el.querySelector(".friendsBody").innerHTML = `<div class="friendsEmpty">Failed to load requests.</div>`;
+  }
+}
+
+// ── Friends List View ──
+async function openFriendsList() {
+  _friendsOverlayEl?.remove();
+  const el = document.createElement("div");
+  el.className = "friendsOverlay";
+  el.innerHTML = `
+    <div class="friendsHeader">
+      <button class="friendsBackBtn" aria-label="Back">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="24" height="24"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <div class="friendsTitle">Friends</div>
+    </div>
+    <div class="friendsBody">
+      <div class="friendsEmpty"><div class="collabSpinner"></div><div style="margin-top:12px">Loading...</div></div>
+    </div>
+  `;
+  document.body.appendChild(el);
+  _friendsOverlayEl = el;
+  requestAnimationFrame(() => el.classList.add("open"));
+
+  el.querySelector(".friendsBackBtn").addEventListener("click", _closeFriendsOverlay);
+
+  try {
+    const friends = await getMyFriends();
+    const body = el.querySelector(".friendsBody");
+    if (!friends.length) {
+      body.innerHTML = `<div class="friendsEmpty">No friends yet. Swipe left on the Collab tab and tap <strong>Add</strong> to find people.</div>`;
+      return;
+    }
+    body.innerHTML = friends.map(f => `
+      <div class="friendRow" data-friend-id="${f.id}">
+        ${_friendAvatarHTML(f.profile)}
+        <div class="friendInfo">
+          <div class="friendName">${escapeHtml(f.profile?.display_name || "Unknown")}</div>
+          <div class="friendMeta">${_friendMetaText(f.profile)}</div>
+        </div>
+        <button class="friendRemoveBtn" data-remove="${f.id}" aria-label="Remove friend">&times;</button>
+      </div>
+    `).join("");
+
+    body.querySelectorAll("[data-remove]").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const id = btn.getAttribute("data-remove");
+        if (!confirm("Remove this friend?")) return;
+        try {
+          await removeFriendship(id);
+          const row = btn.closest(".friendRow");
+          row.style.opacity = ".4";
+          setTimeout(() => row.remove(), 300);
+          toast("Friend removed");
+        } catch (err) { toast(err.message || "Failed"); }
+      });
+    });
+  } catch (err) {
+    el.querySelector(".friendsBody").innerHTML = `<div class="friendsEmpty">Failed to load friends.</div>`;
+  }
+}
+
+// ── Invite Share Screen (Venmo-style QR + share) ──
+async function openInviteShareScreen() {
+  const inviteUrl = `${location.origin}/invite.html`;
+  const displayName = state.settings?.displayName || "RiffBank User";
+  const avatarUrl = state.settings?.profileAvatarUrl || "";
+  const initial = displayName.charAt(0).toUpperCase();
+
+  const overlay = document.createElement("div");
+  overlay.className = "inviteShareScreen";
+  overlay.innerHTML = `
+    <div class="issHeader">
+      <button class="issCloseBtn" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="24" height="24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+
+    <div class="issBody">
+      <div class="issAvatar">
+        ${avatarUrl && !avatarUrl.startsWith("preset:")
+          ? `<img src="${escapeHtml(avatarUrl)}" alt="">`
+          : escapeHtml(initial)
+        }
+      </div>
+      <div class="issName">${escapeHtml(displayName)}</div>
+      <div class="issSub">Scan to add me on RiffBank</div>
+
+      <div class="issQrCard">
+        <canvas id="issQrCanvas" width="220" height="220"></canvas>
+      </div>
+
+      <div class="issUrl">${escapeHtml(inviteUrl)}</div>
+    </div>
+
+    <div class="issActions">
+      <button class="issActionBtn" id="issCopyBtn">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+        Copy
+      </button>
+      <button class="issActionBtn" id="issShareBtn">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
+        Share
+      </button>
+    </div>
+  `;
+
+  document.body.appendChild(overlay);
+  requestAnimationFrame(() => overlay.classList.add("open"));
+
+  // Close
+  const close = () => {
+    overlay.classList.remove("open");
+    setTimeout(() => overlay.remove(), 300);
+  };
+  overlay.querySelector(".issCloseBtn").addEventListener("click", close);
+
+  // Generate QR code on canvas
+  try {
+    const { default: QRCode } = await import("https://esm.sh/qrcode@1.5.4");
+    const canvas = overlay.querySelector("#issQrCanvas");
+    await QRCode.toCanvas(canvas, inviteUrl, {
+      width: 220,
+      margin: 2,
+      color: { dark: "#000000", light: "#ffffff" },
+      errorCorrectionLevel: "M",
+    });
+  } catch (e) {
+    console.warn("QR generation failed:", e);
+    const card = overlay.querySelector(".issQrCard");
+    card.innerHTML = `<div style="padding:20px;text-align:center;color:var(--muted);font-size:13px">QR code unavailable</div>`;
+  }
+
+  // Copy link
+  overlay.querySelector("#issCopyBtn").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(inviteUrl);
+      const btn = overlay.querySelector("#issCopyBtn");
+      btn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Copied!`;
+      setTimeout(() => {
+        btn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg> Copy`;
+      }, 2000);
+    } catch {
+      toast("Couldn't copy");
+    }
+  });
+
+  // Share
+  overlay.querySelector("#issShareBtn").addEventListener("click", async () => {
+    const msg = `Join me on RiffBank! ${inviteUrl}`;
+    if (navigator.share) {
+      try { await navigator.share({ title: "Join RiffBank", text: msg, url: inviteUrl }); } catch {}
+    } else {
+      await navigator.clipboard.writeText(inviteUrl);
+      toast("Link copied!");
+    }
+  });
+}
+
+// ── Add Friend View ──
+async function openAddFriend() {
+  _friendsOverlayEl?.remove();
+  const el = document.createElement("div");
+  el.className = "friendsOverlay";
+  el.innerHTML = `
+    <div class="friendsHeader">
+      <button class="friendsBackBtn" aria-label="Back">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="24" height="24"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <div class="friendsTitle">Add Friend</div>
+    </div>
+    <div class="friendSearchWrap">
+      <button class="friendInviteBtn" id="friendInvitePhone">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
+        Share a Link
+      </button>
+      <input class="friendSearchInput" type="text" placeholder="Search by name..." autocomplete="off" />
+    </div>
+    <div class="friendsBody">
+      <div class="friendsEmpty">Search for someone to add as a friend.</div>
+    </div>
+  `;
+  document.body.appendChild(el);
+  _friendsOverlayEl = el;
+  requestAnimationFrame(() => el.classList.add("open"));
+
+  el.querySelector(".friendsBackBtn").addEventListener("click", _closeFriendsOverlay);
+
+  // Share a Link → open full-screen QR/share overlay
+  el.querySelector("#friendInvitePhone").addEventListener("click", () => {
+    openInviteShareScreen();
+  });
+
+  const input = el.querySelector(".friendSearchInput");
+  const body = el.querySelector(".friendsBody");
+  let searchTimer = null;
+
+  input.addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    const q = input.value.trim();
+    if (!q) {
+      body.innerHTML = `<div class="friendsEmpty">Search for someone to add as a friend.</div>`;
+      return;
+    }
+    if (q.length < 2) return;
+    searchTimer = setTimeout(async () => {
+      body.innerHTML = `<div class="friendsEmpty"><div class="collabSpinner"></div></div>`;
+      try {
+        const results = await searchUsers(q);
+        if (!results.length) {
+          body.innerHTML = `<div class="friendsEmpty">No users found for "${escapeHtml(q)}"</div>`;
+          return;
+        }
+        body.innerHTML = results.map(u => `
+          <div class="friendRow" data-add-uid="${u.id}">
+            ${_friendAvatarHTML(u)}
+            <div class="friendInfo">
+              <div class="friendName">${escapeHtml(u.display_name || "Unknown")}</div>
+              <div class="friendMeta">${_friendMetaText(u)}</div>
+            </div>
+            <button class="friendAcceptBtn" data-send="${u.id}">Add</button>
+          </div>
+        `).join("");
+
+        body.querySelectorAll("[data-send]").forEach(btn => {
+          btn.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            const uid = btn.getAttribute("data-send");
+            btn.textContent = "...";
+            btn.disabled = true;
+            try {
+              const result = await sendFriendRequest(uid);
+              if (result.status === "accepted") {
+                btn.textContent = "Friends";
+                btn.style.background = "rgba(34,197,94,.2)";
+                btn.style.color = "#22c55e";
+              } else {
+                btn.textContent = "Sent!";
+                btn.style.background = "rgba(255,255,255,.08)";
+                btn.style.color = "var(--muted)";
+              }
+            } catch (err) {
+              btn.textContent = "Add";
+              btn.disabled = false;
+              toast(err.message || "Failed");
+            }
+          });
+        });
+      } catch (err) {
+        body.innerHTML = `<div class="friendsEmpty">Search failed. Try again.</div>`;
+      }
+    }, 300);
+  });
+
+  setTimeout(() => input.focus(), 350);
 }
 
 // Open share picker — choose project or song to share
@@ -9638,119 +10246,6 @@ function openCollabSharePicker() {
   });
 
   $("#sharePickerCancel")?.addEventListener("click", closeSheet);
-}
-
-// View shared project detail (read-only or editable based on role)
-function openSharedProjectDetail(sp) {
-  const { projectName, ownerName, role, songs } = sp;
-
-  // Build a simple song list view
-  const songsHtml = songs.length ? songs.map(s => {
-    const fv = s.versions?.find(v => v.isActive) || s.versions?.[0];
-    const hasAudio = !!(fv?.audioPath || fv?.link);
-    return `
-      <div class="pdSongRow" data-shared-play-song="${s.id}" ${hasAudio ? "" : `style="opacity:.5"`}>
-        <div class="pdSongArt">${coverSvg(s, { lite: true })}</div>
-        <div class="pdSongInfo">
-          <div class="pdSongTitle">${escapeHtml(s.title)}</div>
-          <div class="pdSongMeta">${s.versions?.length || 0} version${(s.versions?.length || 0) !== 1 ? "s" : ""}</div>
-        </div>
-      </div>
-    `;
-  }).join("") : `<div class="collabEmpty">No songs in this project yet.</div>`;
-
-  const roleBadge = role === "collaborator"
-    ? `<span class="sharedRoleBadge collab" style="margin-top:8px">Collaborator</span>`
-    : `<span class="sharedRoleBadge viewer" style="margin-top:8px">Viewer</span>`;
-
-  setHeader(projectName);
-
-  activeScreenEl.innerHTML = `
-    <div class="pdHero">
-      <div class="pdHeroBg">${coverSvg(songs[0] || { id: sp.projectId, title: projectName, project: projectName, genre: "" }, { lite: false })}</div>
-      <div class="pdHeroContent">
-        <div class="pdTitle">${escapeHtml(projectName)}</div>
-        <div class="pdSubtitle">Shared by ${escapeHtml(ownerName)}</div>
-        ${roleBadge}
-      </div>
-    </div>
-    <div class="pdSongList">${songsHtml}</div>
-  `;
-
-  // Wire song taps → play
-  activeScreenEl.querySelectorAll("[data-shared-play-song]").forEach(row => {
-    row.addEventListener("click", async () => {
-      const songId = row.getAttribute("data-shared-play-song");
-      const song = songs.find(s => s.id === songId);
-      if (!song) return;
-      const fv = song.versions?.find(v => v.isActive) || song.versions?.[0];
-      if (!fv?.audioPath) return toast("No audio available");
-
-      // Play via audio path (shared audio from cloud)
-      state.player.nowPlaying = { songId: song.id, versionId: fv.id };
-      state.player.queue = [];
-      state.player.repeatQueue = [{ songId: song.id, versionId: fv.id }];
-
-      // We need to cache the song data temporarily so the player can find it
-      if (!getSong(song.id)) {
-        // Add to a temporary shared songs cache for the player
-        if (!state._sharedSongsCache) state._sharedSongsCache = [];
-        if (!state._sharedSongsCache.find(s => s.id === song.id)) {
-          state._sharedSongsCache.push(song);
-        }
-      }
-
-      saveState();
-      unlockAudioOnce();
-      await playNowPlaying({ autoplay: true });
-      syncMiniPlayerUI();
-    });
-  });
-}
-
-// View shared song detail
-function openSharedSongDetail(ss) {
-  const { song, role, ownerName } = ss;
-  const fv = song.versions?.find(v => v.isActive) || song.versions?.[0];
-
-  setHeader(song.title);
-
-  const roleBadge = role === "collaborator"
-    ? `<span class="sharedRoleBadge collab">Collaborator</span>`
-    : `<span class="sharedRoleBadge viewer">Viewer</span>`;
-
-  activeScreenEl.innerHTML = `
-    <div class="pdHero">
-      <div class="pdHeroBg">${coverSvg(song, { lite: false })}</div>
-      <div class="pdHeroContent">
-        <div class="pdTitle">${escapeHtml(song.title)}</div>
-        <div class="pdSubtitle">Shared by ${escapeHtml(ownerName)} · ${escapeHtml(song.project || "")}</div>
-        ${roleBadge}
-      </div>
-    </div>
-    <div class="pdSongList" style="padding:16px">
-      ${song.lyrics ? `<div class="collabSection"><div class="collabSectionTitle">Lyrics</div><pre style="white-space:pre-wrap;color:var(--muted);font-size:14px;line-height:1.7">${escapeHtml(song.lyrics)}</pre></div>` : ""}
-      ${song.notes ? `<div class="collabSection"><div class="collabSectionTitle">Notes</div><div style="color:var(--muted);font-size:14px;line-height:1.6">${escapeHtml(song.notes)}</div></div>` : ""}
-      ${fv ? `<button class="btn" id="sharedPlayBtn" style="width:100%;margin-top:16px;padding:14px;font-size:15px;font-weight:700">Play</button>` : ""}
-    </div>
-  `;
-
-  $("#sharedPlayBtn")?.addEventListener("click", async () => {
-    if (!fv?.audioPath) return toast("No audio available");
-    state.player.nowPlaying = { songId: song.id, versionId: fv.id };
-    state.player.queue = [];
-    state.player.repeatQueue = [{ songId: song.id, versionId: fv.id }];
-    if (!getSong(song.id)) {
-      if (!state._sharedSongsCache) state._sharedSongsCache = [];
-      if (!state._sharedSongsCache.find(s => s.id === song.id)) {
-        state._sharedSongsCache.push(song);
-      }
-    }
-    saveState();
-    unlockAudioOnce();
-    await playNowPlaying({ autoplay: true });
-    syncMiniPlayerUI();
-  });
 }
 
 function renderGlobalSearch() {

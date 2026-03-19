@@ -666,6 +666,86 @@ export async function pullSharedSongs() {
   });
 }
 
+// Fetch projects the current user has shared with others
+export async function pullMySharedProjects() {
+  const userId = await getUserId();
+  if (!userId) return [];
+
+  const { data: memberships, error } = await supabase
+    .from("project_members")
+    .select("project_id, user_id, role")
+    .eq("invited_by", userId);
+
+  if (error || !memberships?.length) return [];
+
+  const projectIds = [...new Set(memberships.map(m => m.project_id))];
+  const recipientIds = [...new Set(memberships.map(m => m.user_id))];
+
+  const [{ data: projects }, { data: profiles }] = await Promise.all([
+    supabase.from("projects").select("id, name").in("id", projectIds),
+    supabase.from("profiles").select("id, display_name").in("id", recipientIds),
+  ]);
+
+  const projMap = {};
+  for (const p of (projects || [])) projMap[p.id] = p.name;
+  const profileMap = {};
+  for (const p of (profiles || [])) profileMap[p.id] = p.display_name;
+
+  return memberships.map(m => ({
+    projectId: m.project_id,
+    projectName: projMap[m.project_id] || "Unknown",
+    recipientName: profileMap[m.user_id] || "Someone",
+    recipientId: m.user_id,
+    role: m.role,
+  }));
+}
+
+// Fetch individual songs the current user has shared with others
+export async function pullMySharedSongs() {
+  const userId = await getUserId();
+  if (!userId) return [];
+
+  const { data: shares, error } = await supabase
+    .from("song_shares")
+    .select("song_id, user_id, role")
+    .eq("invited_by", userId);
+
+  if (error || !shares?.length) return [];
+
+  const songIds = [...new Set(shares.map(s => s.song_id))];
+  const recipientIds = [...new Set(shares.map(s => s.user_id))];
+
+  const [{ data: dbSongs }, { data: profiles }] = await Promise.all([
+    supabase.from("songs").select("id, title, project_id").in("id", songIds),
+    supabase.from("profiles").select("id, display_name").in("id", recipientIds),
+  ]);
+
+  const songMap = {};
+  for (const s of (dbSongs || [])) songMap[s.id] = s;
+  const profileMap = {};
+  for (const p of (profiles || [])) profileMap[p.id] = p.display_name;
+
+  // Get project names
+  const projectIds = [...new Set((dbSongs || []).map(s => s.project_id).filter(Boolean))];
+  const projMap = {};
+  if (projectIds.length) {
+    const { data: projects } = await supabase.from("projects").select("id, name").in("id", projectIds);
+    for (const p of (projects || [])) projMap[p.id] = p.name;
+  }
+
+  return shares.map(sh => {
+    const song = songMap[sh.song_id];
+    return {
+      songId: sh.song_id,
+      songTitle: song?.title || "Unknown",
+      projectName: song ? (projMap[song.project_id] || "") : "",
+      recipientName: profileMap[sh.user_id] || "Someone",
+      recipientId: sh.user_id,
+      role: sh.role,
+    };
+  });
+}
+
 // List pending invites sent by the current user
 export async function listMyInvites() {
   const userId = await getUserId();
@@ -771,4 +851,123 @@ export async function shareWithUser({ targetUserId, projectId, songId, role }) {
     }, { onConflict: "song_id,user_id" });
     if (error) throw error;
   }
+
+  // Auto-friend: send a friend request if not already friends
+  try { await sendFriendRequest(targetUserId); } catch {}
+}
+
+// ── Friendships ──────────────────────────────────────────────────────
+
+// Send a friend request (or no-op if already friends/pending)
+export async function sendFriendRequest(targetUserId) {
+  const userId = await getUserId();
+  if (!userId) throw new Error("Not authenticated");
+  if (targetUserId === userId) throw new Error("Can't friend yourself");
+
+  // Check if friendship already exists in either direction
+  const { data: existing } = await supabase
+    .from("friendships")
+    .select("id, status")
+    .or(`and(requester_id.eq.${userId},recipient_id.eq.${targetUserId}),and(requester_id.eq.${targetUserId},recipient_id.eq.${userId})`)
+    .maybeSingle();
+
+  if (existing) return existing; // already pending or accepted
+
+  const { data, error } = await supabase
+    .from("friendships")
+    .insert({ requester_id: userId, recipient_id: targetUserId, status: "pending" })
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+// Accept a friend request
+export async function acceptFriendRequest(friendshipId) {
+  const { data, error } = await supabase
+    .from("friendships")
+    .update({ status: "accepted", accepted_at: new Date().toISOString() })
+    .eq("id", friendshipId)
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+// Decline a friend request or remove a friend
+export async function removeFriendship(friendshipId) {
+  const { error } = await supabase
+    .from("friendships")
+    .delete()
+    .eq("id", friendshipId);
+  if (error) throw error;
+}
+
+// Get all accepted friends (with profile data)
+export async function getMyFriends() {
+  const userId = await getUserId();
+  if (!userId) return [];
+
+  const { data, error } = await supabase
+    .from("friendships")
+    .select("id, requester_id, recipient_id, created_at, accepted_at")
+    .eq("status", "accepted")
+    .or(`requester_id.eq.${userId},recipient_id.eq.${userId}`)
+    .order("accepted_at", { ascending: false });
+
+  if (error) { console.warn("[Supabase] getMyFriends:", error); return []; }
+  if (!data?.length) return [];
+
+  // Resolve friend profile IDs
+  const friendIds = data.map(f => f.requester_id === userId ? f.recipient_id : f.requester_id);
+  const { data: profiles } = await supabase
+    .from("profiles")
+    .select("id, display_name, avatar_url, location, instrument, genre")
+    .in("id", friendIds);
+
+  const profileMap = Object.fromEntries((profiles || []).map(p => [p.id, p]));
+  return data.map(f => {
+    const friendId = f.requester_id === userId ? f.recipient_id : f.requester_id;
+    return { ...f, friendId, profile: profileMap[friendId] || null };
+  });
+}
+
+// Get pending incoming friend requests (with requester profile)
+export async function getPendingFriendRequests() {
+  const userId = await getUserId();
+  if (!userId) return [];
+
+  const { data, error } = await supabase
+    .from("friendships")
+    .select("id, requester_id, created_at")
+    .eq("status", "pending")
+    .eq("recipient_id", userId)
+    .order("created_at", { ascending: false });
+
+  if (error) { console.warn("[Supabase] getPendingFriendRequests:", error); return []; }
+  if (!data?.length) return [];
+
+  const requesterIds = data.map(f => f.requester_id);
+  const { data: profiles } = await supabase
+    .from("profiles")
+    .select("id, display_name, avatar_url, location, instrument, genre")
+    .in("id", requesterIds);
+
+  const profileMap = Object.fromEntries((profiles || []).map(p => [p.id, p]));
+  return data.map(f => ({ ...f, profile: profileMap[f.requester_id] || null }));
+}
+
+// Get count of pending incoming requests (for badge)
+export async function getPendingFriendCount() {
+  const userId = await getUserId();
+  if (!userId) return 0;
+
+  const { count, error } = await supabase
+    .from("friendships")
+    .select("id", { count: "exact", head: true })
+    .eq("status", "pending")
+    .eq("recipient_id", userId);
+
+  if (error) return 0;
+  return count || 0;
 }
