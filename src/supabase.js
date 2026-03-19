@@ -93,17 +93,22 @@ export function supabaseSyncStateSoon(state) {
 
 export async function supabasePushState(state) {
   const userId = await getUserId();
-  if (!userId) return false;
+  if (!userId) { console.warn("[Supabase] Push: no userId"); return false; }
 
   const songs = state.songs || [];
+  console.log(`[Supabase] Push: ${songs.length} songs, userId=${userId}`);
 
   try {
-    // 1. Projects — find or create
-    const projectNames = [...new Set(songs.map(s => s.project).filter(Boolean))];
+    // 1. Projects — find or create (include standalone projects from state.projects)
+    const projectNames = [...new Set([
+      ...(state.projects || []).filter(Boolean),
+      ...songs.map(s => s.project).filter(Boolean),
+    ])];
     const projectMap = {};
     for (const name of projectNames) {
       projectMap[name] = await ensureProject(name, userId);
     }
+    console.log("[Supabase] Push: projects resolved", projectMap);
 
     // 2. Upsert songs
     const songRows = songs.map(s => ({
@@ -122,15 +127,17 @@ export async function supabasePushState(state) {
       notes: s.notes || null,
       featured_version_id: s.featuredVersionId || null,
       cover_path: s.coverPath || null,
-      user_cover_path: s.userCoverPath || null,
+      user_cover_path: (s.userCoverPath && s.userCoverPath.includes('/')) ? s.userCoverPath : null,
       cover_source: s.coverSource || "ai",
       created_at: s.createdAt,
       updated_at: s.updatedAt || new Date().toISOString(),
     }));
 
     if (songRows.length) {
+      console.log("[Supabase] Push: upserting songs", songRows.map(s => ({ id: s.id, title: s.title, project_id: s.project_id })));
       const { error } = await supabase.from("songs").upsert(songRows, { onConflict: "id" });
-      if (error) { console.warn("[Supabase] songs upsert:", error); return false; }
+      if (error) { console.warn("[Supabase] songs upsert FAILED:", error.message, error.details, error.hint, error.code); return false; }
+      console.log("[Supabase] Push: songs upsert OK");
     }
 
     // 3. Upsert versions
@@ -165,13 +172,17 @@ export async function supabasePushState(state) {
 
     // 4. Cleanup: remove songs/versions deleted locally
     const localSongIds = songs.map(s => s.id);
-    const userProjectIds = Object.values(projectMap);
 
-    if (userProjectIds.length) {
+    // Fetch ALL user projects (not just those in projectMap) to catch orphaned songs
+    const { data: allUserProjects } = await supabase
+      .from("projects").select("id").eq("owner_id", userId);
+    const allUserProjectIds = (allUserProjects || []).map(p => p.id);
+
+    if (allUserProjectIds.length) {
       const { data: dbSongs } = await supabase
         .from("songs")
         .select("id")
-        .in("project_id", userProjectIds);
+        .in("project_id", allUserProjectIds);
       const toDelete = (dbSongs || []).map(s => s.id).filter(id => !localSongIds.includes(id));
       if (toDelete.length) {
         await supabase.from("versions").delete().in("song_id", toDelete);
@@ -211,7 +222,8 @@ export async function supabasePullState() {
   for (const p of (projects || [])) projectMap[p.id] = p.name;
 
   const projectIds = Object.keys(projectMap);
-  if (!projectIds.length) return { songs: [], releases: [] };
+  const projectNames = Object.values(projectMap).filter(Boolean);
+  if (!projectIds.length) return { songs: [], releases: [], projects: projectNames };
 
   const { data: dbSongs } = await supabase
     .from("songs")
@@ -260,12 +272,30 @@ export async function supabasePullState() {
     })),
   }));
 
-  return { songs, releases: [] };
+  return { songs, releases: [], projects: projectNames };
 }
 
 export async function supabasePullStateSilent() {
   try { return await supabasePullState(); }
   catch (e) { console.warn("[Supabase] Silent pull failed:", e); return null; }
+}
+
+// ── Cloud song count (lightweight check for import flow) ──
+
+export async function supabaseCountUserSongs() {
+  const userId = await getUserId();
+  console.log("[CountSongs] userId =", userId);
+  if (!userId) return 0;
+  const { data: projects, error: projErr } = await supabase
+    .from("projects").select("id").eq("owner_id", userId);
+  console.log("[CountSongs] projects =", projects?.length, "err =", projErr?.message);
+  if (!projects?.length) return 0;
+  const { count, error } = await supabase
+    .from("songs").select("id", { count: "exact", head: true })
+    .in("project_id", projects.map(p => p.id));
+  console.log("[CountSongs] count =", count, "err =", error?.message);
+  if (error) return 0;
+  return count || 0;
 }
 
 // ── Audio storage ─────────────────────────────────────
