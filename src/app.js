@@ -28,7 +28,7 @@ import {
   supabase, signUp, signIn, signOut, getSession, onAuthChange, verifyOtp, resendConfirmation,
   supabaseSyncStateSoon, supabasePushState, supabasePullState, supabasePullStateSilent,
   supabaseUploadAudio, supabaseFetchAudioBlob, supabaseDeleteAudio, supabaseDiscoverAudioPaths,
-  supabaseUploadCover, supabaseFetchCoverBlob,
+  supabaseUploadCover, supabaseFetchCoverBlob, supabaseCountUserSongs,
 } from "./supabase.js";
 
 const LS_KEY = "riffbank_v1";
@@ -1075,9 +1075,12 @@ async function restoreCoverUrlsFromCache() {
       song.coverImageUrl = url || null;
     }
     // Restore user-uploaded cover URLs
-    if (song.userCoverPath) {
-      let userUrl = await getCoverBlobUrl(song.userCoverPath);
-      if (!userUrl) {
+    if (song.coverSource === "user" || song.userCoverPath) {
+      const localKey = `user_${song.id}_cover.jpg`;
+      // Try cloud path first, then local IndexedDB key
+      let userUrl = song.userCoverPath ? await getCoverBlobUrl(song.userCoverPath) : null;
+      if (!userUrl) userUrl = await getCoverBlobUrl(localKey);
+      if (!userUrl && song.userCoverPath) {
         // Try fetching from Supabase storage
         const blob = await supabaseFetchCoverBlob(song.userCoverPath).catch(() => null);
         if (blob) {
@@ -1086,7 +1089,10 @@ async function restoreCoverUrlsFromCache() {
           coverUrlCache.set(song.userCoverPath, userUrl);
         }
       }
-      song.userCoverImageUrl = userUrl || null;
+      if (userUrl) {
+        song.userCoverImageUrl = userUrl;
+        if (song.coverSource !== "user") song.coverSource = "user";
+      }
     }
   }
 }
@@ -1803,6 +1809,9 @@ function normalizeState() {
     if (song.userCoverPath === undefined) song.userCoverPath = null;
     if (!song.coverSource) song.coverSource = song.userCoverPath ? "user" : "ai";
   });
+  // Projects (persisted independently of songs)
+  state.projects = Array.isArray(state.projects) ? state.projects : [];
+
   // Player state (queue)
   state.player = state.player || {};
   state.player.queue = Array.isArray(state.player.queue) ? state.player.queue : [];
@@ -1815,6 +1824,14 @@ function normalizeState() {
 }
 
 normalizeState();
+
+function ensureProjectInState(name) {
+  const trimmed = (name || "").trim();
+  if (!trimmed) return;
+  if (!state.projects.includes(trimmed)) {
+    state.projects.push(trimmed);
+  }
+}
 
 function saveState() {
   localStorage.setItem(LS_KEY, JSON.stringify(state));
@@ -2087,71 +2104,75 @@ async function seedDefaultLibraryIfNeeded({ force = false } = {}) {
 const COMPRESS_THRESHOLD = 40 * 1024 * 1024; // only compress files > 40MB
 
 async function compressAudioForUpload(blob) {
+  // Skip compression for files under 50MB (Supabase free tier limit)
   if (blob.size <= COMPRESS_THRESHOLD) return blob;
 
+  // Encode to M4A/AAC (stereo, high quality) via MediaRecorder
+  // Safari/iOS: audio/mp4 (AAC), Chrome: audio/webm (Opus) — both excellent quality
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
     const arrayBuf = await blob.arrayBuffer();
     const audioBuffer = await ctx.decodeAudioData(arrayBuf);
-    ctx.close();
 
-    // Render as mono at 44.1kHz
-    const sampleRate = Math.min(audioBuffer.sampleRate, 44100);
-    const length = Math.ceil(audioBuffer.duration * sampleRate);
-    const offline = new OfflineAudioContext(1, length, sampleRate);
+    // Render at original sample rate and channel count (preserve stereo)
+    const sampleRate = audioBuffer.sampleRate;
+    const channels = audioBuffer.numberOfChannels;
+    const length = audioBuffer.length;
+    const offline = new OfflineAudioContext(channels, length, sampleRate);
     const source = offline.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(offline.destination);
     source.start(0);
     const rendered = await offline.startRendering();
+    ctx.close();
 
-    // Encode as 16-bit PCM WAV
-    const pcm = rendered.getChannelData(0);
-    const wavBlob = encodeWav(pcm, sampleRate);
-    console.log(`[Compress] ${(blob.size / 1e6).toFixed(1)}MB → ${(wavBlob.size / 1e6).toFixed(1)}MB`);
-    return wavBlob;
+    // Pick best available container: M4A (Safari) > WebM/Opus (Chrome)
+    const mimeType = MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4"
+      : MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus"
+      : null;
+
+    if (!mimeType) {
+      console.warn("[Compress] No supported audio encoder, uploading original");
+      return blob;
+    }
+
+    // Play the rendered buffer through MediaRecorder to encode
+    const dest = new AudioContext({ sampleRate });
+    const bufferSource = dest.createBufferSource();
+    bufferSource.buffer = rendered;
+    const destNode = dest.createMediaStreamDestination();
+    bufferSource.connect(destNode);
+
+    const recorder = new MediaRecorder(destNode.stream, {
+      mimeType,
+      audioBitsPerSecond: 256000, // 256kbps — high quality
+    });
+
+    const chunks = [];
+    recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+
+    const encodedBlob = await new Promise((resolve) => {
+      recorder.onstop = () => {
+        const encoded = new Blob(chunks, { type: mimeType });
+        resolve(encoded);
+      };
+      recorder.start();
+      bufferSource.start(0);
+      // Stop recording after the audio duration + small buffer
+      setTimeout(() => {
+        recorder.stop();
+        bufferSource.stop();
+        dest.close();
+      }, (rendered.duration * 1000) + 200);
+    });
+
+    const ext = mimeType.includes("mp4") ? "m4a" : "webm";
+    console.log(`[Compress] ${(blob.size / 1e6).toFixed(1)}MB → ${(encodedBlob.size / 1e6).toFixed(1)}MB (${ext}, ${channels}ch)`);
+    return encodedBlob;
   } catch (e) {
     console.warn("[Compress] Failed, uploading original:", e);
     return blob;
   }
-}
-
-function encodeWav(samples, sampleRate) {
-  const numSamples = samples.length;
-  const bytesPerSample = 2; // 16-bit
-  const numChannels = 1;
-  const dataSize = numSamples * bytesPerSample;
-  const buffer = new ArrayBuffer(44 + dataSize);
-  const view = new DataView(buffer);
-
-  // WAV header
-  writeStr(view, 0, "RIFF");
-  view.setUint32(4, 36 + dataSize, true);
-  writeStr(view, 8, "WAVE");
-  writeStr(view, 12, "fmt ");
-  view.setUint32(16, 16, true);            // chunk size
-  view.setUint16(20, 1, true);             // PCM format
-  view.setUint16(22, numChannels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * numChannels * bytesPerSample, true);
-  view.setUint16(32, numChannels * bytesPerSample, true);
-  view.setUint16(34, bytesPerSample * 8, true);
-  writeStr(view, 36, "data");
-  view.setUint32(40, dataSize, true);
-
-  // PCM data: float32 → int16
-  let offset = 44;
-  for (let i = 0; i < numSamples; i++) {
-    const s = Math.max(-1, Math.min(1, samples[i]));
-    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
-    offset += 2;
-  }
-
-  return new Blob([buffer], { type: "audio/wav" });
-}
-
-function writeStr(view, offset, str) {
-  for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
 }
 
 // Local audio store (IndexedDB) — iPhone-friendly
@@ -2213,20 +2234,40 @@ async function audioGetAll() {
 }
 
 // Delete a song from Supabase (DB rows + storage files) — fire-and-forget
-function deleteSongEverywhere(song) {
+async function deleteSongEverywhere(song) {
   if (!song) return;
-  // Delete versions, then song row from DB
-  supabase.from("versions").delete().eq("song_id", song.id)
-    .then(() => supabase.from("songs").delete().eq("id", song.id))
-    .catch(e => console.warn("[Supabase] delete song rows:", e));
-  // Delete audio files from storage
+  // Delete versions, then song row from DB — await to ensure completion
+  try {
+    await supabase.from("versions").delete().eq("song_id", song.id);
+    await supabase.from("songs").delete().eq("id", song.id);
+  } catch (e) {
+    console.warn("[Supabase] delete song rows:", e);
+  }
+  // Delete audio files from storage — both by audioPath AND by listing the song folder
+  const { data: { user } } = await supabase.auth.getUser();
+  const userId = user?.id;
   for (const v of (song.versions || [])) {
     if (v.audioPath) supabaseDeleteAudio(v.audioPath).catch(() => {});
+    // Also clean up the entire version folder in storage (catches orphaned files)
+    if (userId) {
+      const folderPath = `${userId}/${song.id}/${v.id}`;
+      try {
+        const { data: files } = await supabase.storage.from("audio").list(folderPath);
+        if (files?.length) {
+          const paths = files.map(f => `${folderPath}/${f.name}`);
+          await supabase.storage.from("audio").remove(paths);
+        }
+      } catch {}
+    }
   }
   // Delete cover from storage
   if (song.coverPath) {
     supabase.storage.from("covers").remove([song.coverPath]).catch(() => {});
   }
+  // Clean up art_rate_limits entry
+  try {
+    await supabase.from("art_rate_limits").delete().eq("song_id", song.id);
+  } catch (e) { console.warn("[Supabase] delete art_rate_limits:", e); }
 }
 
 // Recover lost audio refs: scan IndexedDB blobs, match to versions by filename,
@@ -2529,6 +2570,74 @@ async function cacheAllCloudAudio() {
     ? `Cached ${done}/${cloudVersions.length} (${failed} failed)`
     : `All ${done} tracks cached locally`;
   toast(msg);
+}
+
+// Upload all local-only audio blobs to Supabase cloud storage.
+// Finds versions that have local audio (fileId/localAudioId or cached supa blob)
+// but no audioPath (not yet backed up to cloud).
+async function backupAllAudioToCloud() {
+  const toUpload = [];
+  for (const song of (state.songs || [])) {
+    for (const v of (song.versions || [])) {
+      if (v.audioPath) continue; // Already backed up
+      if (!v.fileId && !v.localAudioId) continue; // No local audio to upload
+      toUpload.push({ song, v });
+    }
+  }
+
+  if (!toUpload.length) {
+    toast("All audio is already backed up to the cloud");
+    return { uploaded: 0, failed: 0 };
+  }
+
+  let uploaded = 0, failed = 0;
+  toast(`Backing up audio: 0/${toUpload.length}…`);
+
+  for (const { song, v } of toUpload) {
+    // Find the local blob
+    let blob = null;
+    const tryIds = [v.fileId, v.localAudioId].filter(Boolean);
+    for (const id of tryIds) {
+      try {
+        const rec = await audioGet(id);
+        if (rec?.blob) { blob = rec.blob; break; }
+      } catch {}
+    }
+
+    if (!blob) { failed++; continue; }
+
+    try {
+      const compressed = await compressAudioForUpload(blob);
+      const fileName = v.fileName || v.label || "audio";
+      const result = await supabaseUploadAudio({
+        blob: new File([compressed], fileName, { type: compressed.type || v.fileType || "audio/*" }),
+        songId: song.id,
+        versionId: v.id,
+        fileName,
+      });
+      if (result.success) {
+        v.audioPath = result.audioPath;
+        uploaded++;
+      } else {
+        failed++;
+      }
+    } catch {
+      failed++;
+    }
+    toast(`Backing up audio: ${uploaded + failed}/${toUpload.length}…`);
+  }
+
+  if (uploaded) {
+    saveState();
+    await supabasePushState(state).catch(console.warn);
+    render();
+  }
+
+  const msg = failed
+    ? `Backed up ${uploaded}/${toUpload.length} (${failed} failed)`
+    : `All ${uploaded} tracks backed up to cloud`;
+  toast(msg);
+  return { uploaded, failed };
 }
 
 // Sync debug: check each version's audio availability
@@ -3122,9 +3231,9 @@ function openSalSheet() {
 }
 
 // Sal first-time onboarding — auto-opens once for new users
-function openSalOnboarding() {
-  if (localStorage.getItem("salOnboardingDone")) return;
-  if (state.songs?.length) { localStorage.setItem("salOnboardingDone", "1"); return; }
+function openSalOnboarding({ force = false } = {}) {
+  if (!force && localStorage.getItem("salOnboardingDone")) return;
+  if (!force && state.songs?.length) { localStorage.setItem("salOnboardingDone", "1"); return; }
 
   // Remove any existing Sal sheet
   document.getElementById("salSheetBackdrop")?.remove();
@@ -3918,9 +4027,10 @@ function renderSheet() {
   }
 
   if (sheetMode === "song") {
-    const existingProjects = [...new Set(
-      state.songs.map(s => (s.project || "").trim()).filter(Boolean)
-    )].sort();
+    const existingProjects = [...new Set([
+      ...(state.projects || []).map(p => p.trim()).filter(Boolean),
+      ...state.songs.map(s => (s.project || "").trim()).filter(Boolean),
+    ])].sort();
     const defaultProj = state.settings.defaultProject || "";
 
     // Track the picked file for optional first-version upload
@@ -4014,6 +4124,7 @@ function renderSheet() {
         updatedAt: nowStamp(),
       };
 
+      ensureProjectInState(song.project);
       state.songs.unshift(song);
 
       // If user picked a file, create v1 with audio attached
@@ -4143,13 +4254,11 @@ function renderSheet() {
       render();
     });
 
-    $("#songMenuDelete")?.addEventListener("click", () => {
+    $("#songMenuDelete")?.addEventListener("click", async () => {
       if (!song) return closeSheet();
       if (!confirm(`Delete "${song.title}"?`)) return;
-      deleteSongEverywhere(song);
       state.songs = state.songs.filter(s => s.id !== song.id);
       saveState();
-      toast("Deleted 🗑️");
       closeSheet();
       currentTab = "songs";
       songsView = "list";
@@ -4157,6 +4266,9 @@ function renderSheet() {
       setHeader("Songs");
       syncTabs();
       render();
+      // Delete from cloud after UI updates
+      await deleteSongEverywhere(song);
+      toast("Deleted from cloud");
     });
 
     $("#songMenuCancel")?.addEventListener("click", () => {
@@ -4257,18 +4369,19 @@ function renderSheet() {
       toast(song.coverSource === "user" ? "Using your photo" : "Using AI art");
     });
 
-    $("#sdmDelete")?.addEventListener("click", () => {
+    $("#sdmDelete")?.addEventListener("click", async () => {
       if (!confirm(`Delete "${song.title}"?`)) return;
-      deleteSongEverywhere(song);
       state.songs = state.songs.filter(s => s.id !== song.id);
       saveState();
-      toast("Deleted");
       closeSheet();
       selectedSongId = null;
       selectedVersionId = null;
       songsView = "list";
       setHeader("Songs");
       render();
+      // Delete from cloud after UI updates
+      await deleteSongEverywhere(song);
+      toast("Deleted from cloud");
     });
 
     $("#sdmCancel")?.addEventListener("click", () => closeSheet());
@@ -4277,10 +4390,11 @@ function renderSheet() {
   }
 
       if (sheetMode === "songFilters") {
-    // Build project list from settings + songs
+    // Build project list from settings + songs + standalone projects
     const projects = Array.from(
       new Set([
         ...(state.settings?.defaultProject ? [state.settings.defaultProject.trim()] : []),
+        ...(state.projects || []).map(p => p.trim()).filter(Boolean),
         ...state.songs.map(s => (s.project || "").trim()).filter(Boolean)
       ])
     ).sort((a,b) => a.localeCompare(b));
@@ -4560,6 +4674,62 @@ function openCreateOverlay() {
   });
 
   renderCreateOverlay();
+  setupCreateOverlaySwipe();
+}
+
+function setupCreateOverlaySwipe() {
+  if (!createOverlayEl) return;
+  let startY = 0, currentY = 0, dragging = false, locked = false;
+  const DISMISS_THRESHOLD = 120;
+
+  createOverlayEl.addEventListener("touchstart", (e) => {
+    if (e.touches.length !== 1) return;
+    startY = e.touches[0].clientY;
+    currentY = startY;
+    dragging = false;
+    locked = false;
+  }, { passive: true });
+
+  createOverlayEl.addEventListener("touchmove", (e) => {
+    if (locked || e.touches.length !== 1) return;
+    currentY = e.touches[0].clientY;
+    const dy = currentY - startY;
+
+    if (!dragging) {
+      // Need enough movement to decide direction
+      if (Math.abs(dy) < 10) return;
+      // If swiping up, don't intercept — let content scroll
+      if (dy < 0) { locked = true; return; }
+      // If scrollable body isn't at top, let it scroll normally
+      const body = createOverlayEl.querySelector(".coBody");
+      if (body && body.scrollTop > 0) { locked = true; return; }
+      // Swiping down from scroll-top — start drag
+      dragging = true;
+      createOverlayEl.style.transition = "none";
+    }
+
+    if (dragging) {
+      const downDy = Math.max(0, currentY - startY);
+      createOverlayEl.style.transform = `translateY(${downDy}px)`;
+      createOverlayEl.style.opacity = `${1 - downDy / 400}`;
+    }
+  }, { passive: true });
+
+  createOverlayEl.addEventListener("touchend", () => {
+    if (!dragging) return;
+    dragging = false;
+    const dy = currentY - startY;
+    if (dy > DISMISS_THRESHOLD) {
+      createOverlayEl.style.transition = "opacity .2s ease, transform .25s ease";
+      createOverlayEl.style.transform = "translateY(100%)";
+      createOverlayEl.style.opacity = "0";
+      setTimeout(() => { if (createOverlayEl) { createOverlayEl.remove(); createOverlayEl = null; } }, 260);
+    } else {
+      createOverlayEl.style.transition = "opacity .2s ease, transform .2s ease";
+      createOverlayEl.style.transform = "translateY(0)";
+      createOverlayEl.style.opacity = "1";
+    }
+  }, { passive: true });
 }
 
 function closeCreateOverlay() {
@@ -4617,9 +4787,10 @@ function renderCreateOverlay() {
   const prevTitle = createOverlayEl.querySelector("#coTitle");
   if (prevTitle) createTitleValue = prevTitle.value;
 
-  const existingProjects = [...new Set(
-    state.songs.map(s => (s.project || "").trim()).filter(Boolean)
-  )].sort();
+  const existingProjects = [...new Set([
+    ...(state.projects || []).map(p => p.trim()).filter(Boolean),
+    ...state.songs.map(s => (s.project || "").trim()).filter(Boolean),
+  ])].sort();
 
   const tabItems = [
     { key: "song", label: "Song" },
@@ -4871,6 +5042,7 @@ function renderCreateOverlay() {
         updatedAt: nowStamp(),
       };
 
+      ensureProjectInState(song.project);
       state.songs.unshift(song);
 
       // If user picked a file, create v1 with audio attached
@@ -5133,9 +5305,10 @@ function openShareTargetSheet(blob, fileName, fileType, fileSize) {
 function openShareNewSongSheet(blob, fileName, fileType, fileSize) {
   sheetMode = "shareNewSong";
 
-  const existingProjects = [...new Set(
-    state.songs.map(s => (s.project || "").trim()).filter(Boolean)
-  )].sort();
+  const existingProjects = [...new Set([
+    ...(state.projects || []).map(p => p.trim()).filter(Boolean),
+    ...state.songs.map(s => (s.project || "").trim()).filter(Boolean),
+  ])].sort();
   const defaultProj = state.settings.defaultProject || "";
 
   sheetContent.innerHTML = `
@@ -5204,6 +5377,7 @@ function openShareNewSongSheet(blob, fileName, fileType, fileSize) {
       updatedAt: nowStamp(),
     };
 
+    ensureProjectInState(song.project);
     state.songs.unshift(song);
 
     // Create version and attach audio
@@ -5317,24 +5491,29 @@ async function attachSharedAudio(song, v, blob, fileName, fileType, fileSize) {
   song.updatedAt = nowStamp();
   saveState();
 
-  // Upload to Supabase Storage in background (compress large files first)
+  // Upload to Supabase Storage (compress large files first)
   toast("Syncing to cloud…");
-  compressAudioForUpload(blob).then(compressed => supabaseUploadAudio({
-    blob: new File([compressed], fileName, { type: compressed.type || fileType }),
-    songId: song.id,
-    versionId: v.id,
-    fileName,
-  })).then(async result => {
+  try {
+    const compressed = await compressAudioForUpload(blob);
+    const result = await supabaseUploadAudio({
+      blob: new File([compressed], fileName, { type: compressed.type || fileType }),
+      songId: song.id,
+      versionId: v.id,
+      fileName,
+    });
     if (result.success) {
       v.audioPath = result.audioPath;
       localStorage.setItem(LS_KEY, JSON.stringify(state));
       // Push immediately — don't rely on 5s debounce (iOS kills bg timers)
-      await supabasePushState(state).catch(console.warn);
-      toast("Synced to cloud");
+      const pushOk = await supabasePushState(state).catch(e => { console.warn("[Push]", e); return false; });
+      toast(pushOk ? "Synced to cloud" : "Audio uploaded, but song record failed to sync");
     } else {
       toast("Local saved, cloud sync failed");
     }
-  }).catch(() => toast("Local saved, cloud sync failed"));
+  } catch (e) {
+    console.warn("[attachSharedAudio] cloud upload failed:", e);
+    toast("Local saved, cloud sync failed");
+  }
 }
 
 // ── Auth screen (card layout + Sal + OTP verification) ────────────
@@ -5421,9 +5600,9 @@ function showAuthScreen() {
 
       // Password visibility toggle
       eyeBtn.addEventListener("click", () => {
-        const showing = !passInput.classList.contains("authPassMasked");
+        const showing = passInput.classList.contains("authPassMasked");
         passInput.classList.toggle("authPassMasked", !showing);
-        eyeBtn.classList.toggle("showing", !showing);
+        eyeBtn.classList.toggle("showing", showing);
       });
 
       toggleBtns.forEach((btn) => {
@@ -5602,6 +5781,373 @@ function showAuthScreen() {
   });
 }
 
+// ── Sal Import Flow ──────────────────────────────────────────────
+// Post-auth flow: checks cloud for existing songs, offers import,
+// then optionally runs the onboarding walkthrough.
+
+let _importFlowRan = false;
+
+function showSalImportOffer(count) {
+  return new Promise((resolve) => {
+    const el = document.createElement("div");
+    el.className = "salImportOffer";
+    el.innerHTML = `
+      <div class="salImportOfferCard">
+        <div class="salImportOfferSal salBounce">${salSvg(96)}</div>
+        <div class="salImportOfferMsg">
+          Hey, welcome back! Looks like you've got <strong>${count} song${count !== 1 ? "s" : ""}</strong> floating in the cloud. Want me to grab ${count !== 1 ? "them" : "it"} for you?
+        </div>
+        <button class="salImportBtn" id="salImportGo">Let's go!</button>
+        <button class="salImportSkipBtn" id="salImportSkip">Skip for now</button>
+      </div>
+    `;
+
+    el.querySelector("#salImportGo").addEventListener("click", () => {
+      el.classList.add("salImportFadeOut");
+      setTimeout(() => { el.remove(); resolve("import"); }, 300);
+    });
+    el.querySelector("#salImportSkip").addEventListener("click", () => {
+      el.classList.add("salImportFadeOut");
+      setTimeout(() => { el.remove(); resolve("skip"); }, 300);
+    });
+
+    document.body.appendChild(el);
+  });
+}
+
+function showSalImportScreen() {
+  return new Promise(async (resolve) => {
+    const el = document.createElement("div");
+    el.className = "salImportScreen";
+
+    // Pull full cloud state
+    el.innerHTML = `
+      <div class="salImportCard">
+        <div class="salImportSalWrap"><div class="salIdle salBounce">${salSvg(80)}</div></div>
+        <div class="salImportProgress">Preparing import...</div>
+        <div class="salImportList"></div>
+        <div class="salImportOverallBar"><div class="salImportOverallFill"></div></div>
+      </div>
+    `;
+    document.body.appendChild(el);
+
+    // Cycle Sal animations
+    const salEl = el.querySelector(".salIdle");
+    const salAnims = ["salBounce", "salSpin", "salSlide", "salPeek"];
+    let salAnimIdx = 0;
+    const salAnimTimer = setInterval(() => {
+      salEl.classList.remove(...salAnims);
+      salAnimIdx = (salAnimIdx + 1) % salAnims.length;
+      salEl.classList.add(salAnims[salAnimIdx]);
+    }, 4000);
+
+    const listEl = el.querySelector(".salImportList");
+    const progressEl = el.querySelector(".salImportProgress");
+    const overallFill = el.querySelector(".salImportOverallFill");
+
+    // Fetch cloud data
+    const cloudState = await supabasePullStateSilent();
+    if (!cloudState?.songs?.length) {
+      clearInterval(salAnimTimer);
+      el.classList.add("salImportFadeOut");
+      setTimeout(() => { el.remove(); resolve({ succeeded: [], failed: [] }); }, 300);
+      return;
+    }
+
+    // Merge cloud songs into local state
+    state.songs = cloudState.songs;
+    state.releases = cloudState.releases || state.releases;
+    state.projects = cloudState.projects || state.projects;
+    normalizeState();
+    saveState();
+
+    // Build a list of ALL songs, and track which versions need audio downloaded
+    const allSongs = state.songs;
+    const toDownload = []; // { song, version, row } — versions needing audio blobs
+    let done = 0;
+    const total = allSongs.length;
+
+    // Phase 1: Show all songs, instantly check off metadata-only ones
+    for (const song of allSongs) {
+      done++;
+      progressEl.textContent = `Importing ${done} of ${total}...`;
+      overallFill.style.width = `${(done / total) * 100}%`;
+
+      const row = document.createElement("div");
+      row.className = "salImportItem";
+
+      // Check if this song has any versions with cloud audio to download
+      let needsAudio = false;
+      for (const v of (song.versions || [])) {
+        if (!v.audioPath) continue;
+        try {
+          const existing = await audioGet(`supa:${v.audioPath}`);
+          if (existing?.blob) { _cachedAudioPaths.add(v.audioPath); continue; }
+        } catch {}
+        needsAudio = true;
+        toDownload.push({ song, version: v, row });
+      }
+
+      const versionCount = (song.versions || []).length;
+      const subtitle = needsAudio
+        ? `${versionCount} version${versionCount !== 1 ? "s" : ""} — downloading audio...`
+        : `${versionCount} version${versionCount !== 1 ? "s" : ""}`;
+
+      row.innerHTML = `
+        <div class="salImportArt">${coverSvg(song, { lite: true })}</div>
+        <div class="salImportMeta">
+          <div class="salImportTitle">${song.title || "Untitled"}</div>
+          <div class="salImportSub">${subtitle}</div>
+        </div>
+        <div class="salImportStatus ${needsAudio ? "salImportSpinner" : "salImportCheck"}"></div>
+      `;
+      listEl.appendChild(row);
+
+      // Small stagger so cards animate in visibly
+      await new Promise(r => setTimeout(r, 60));
+      listEl.scrollTop = listEl.scrollHeight;
+    }
+
+    // Phase 2: Download audio blobs for versions that need them
+    const succeeded = [];
+    const failed = [];
+
+    if (toDownload.length) {
+      let audioDone = 0;
+      progressEl.textContent = `Downloading audio: 0 of ${toDownload.length}...`;
+
+      for (const item of toDownload) {
+        const { song, version: v, row } = item;
+        audioDone++;
+        progressEl.textContent = `Downloading audio: ${audioDone} of ${toDownload.length}...`;
+
+        try {
+          const blob = await supabaseFetchAudioBlob(v.audioPath);
+          if (blob) {
+            await putAudioBlob({
+              id: `supa:${v.audioPath}`,
+              blob,
+              name: v.fileName || v.label || "audio",
+              type: v.fileType || blob.type || "audio/*",
+              size: blob.size,
+            });
+            _cachedAudioPaths.add(v.audioPath);
+            succeeded.push(item);
+          } else {
+            failed.push(item);
+          }
+        } catch {
+          failed.push(item);
+        }
+
+        // Update the row status — check if all versions for this song are done
+        const songItems = toDownload.filter(d => d.song === song);
+        const songDone = songItems.every(d => succeeded.includes(d) || failed.includes(d));
+        if (songDone) {
+          const anyFailed = songItems.some(d => failed.includes(d));
+          row.querySelector(".salImportStatus").className = `salImportStatus ${anyFailed ? "salImportFail" : "salImportCheck"}`;
+          const vCount = (song.versions || []).length;
+          row.querySelector(".salImportSub").textContent = anyFailed
+            ? `${vCount} version${vCount !== 1 ? "s" : ""} — some audio failed`
+            : `${vCount} version${vCount !== 1 ? "s" : ""}`;
+        }
+      }
+    }
+
+    clearInterval(salAnimTimer);
+
+    if (!failed.length) {
+      // All succeeded
+      salEl.classList.remove(...salAnims);
+      salEl.classList.add("salBounce");
+      progressEl.innerHTML = `<strong>All done — happy riffing!</strong>`;
+      overallFill.style.width = "100%";
+      setTimeout(() => {
+        el.classList.add("salImportFadeOut");
+        setTimeout(() => { el.remove(); resolve({ succeeded, failed }); }, 300);
+      }, 1800);
+    } else {
+      // Some failed — show continue button, user will handle failures in retry screen
+      progressEl.innerHTML = `Imported ${succeeded.length} of ${toDownload.length}. Some didn't make it.`;
+      const contBtn = document.createElement("button");
+      contBtn.className = "salImportBtn";
+      contBtn.style.marginTop = "16px";
+      contBtn.textContent = "Continue";
+      el.querySelector(".salImportCard").appendChild(contBtn);
+      contBtn.addEventListener("click", () => {
+        el.classList.add("salImportFadeOut");
+        setTimeout(() => { el.remove(); resolve({ succeeded, failed }); }, 300);
+      });
+    }
+  });
+}
+
+function showSalImportRetry(failedItems) {
+  return new Promise((resolve) => {
+    const el = document.createElement("div");
+    el.className = "salImportOffer";
+    el.innerHTML = `
+      <div class="salImportOfferCard">
+        <div class="salImportOfferSal">${salSvg(72)}</div>
+        <div class="salImportOfferMsg">
+          Almost there! ${failedItems.length} song${failedItems.length !== 1 ? "s" : ""} didn't make it.
+        </div>
+        <div class="salRetryList" id="salRetryList"></div>
+        <button class="salImportBtn" id="salRetryContinue">Continue to RiffBank</button>
+      </div>
+    `;
+
+    const listEl = el.querySelector("#salRetryList");
+
+    for (const item of failedItems) {
+      const { song, version: v } = item;
+      const row = document.createElement("div");
+      row.className = "salRetryItem";
+      row.innerHTML = `
+        <div class="salImportMeta">
+          <div class="salImportTitle">${song.title || "Untitled"}</div>
+          <div class="salImportSub">${v.label || "Version"}</div>
+        </div>
+        <div class="salRetryActions">
+          <button class="salRetryBtn" data-action="retry">Retry</button>
+          <button class="salRetryBtn salRetryBtnDanger" data-action="delete">Delete</button>
+        </div>
+      `;
+
+      row.querySelector('[data-action="retry"]').addEventListener("click", async (e) => {
+        const btn = e.currentTarget;
+        btn.textContent = "...";
+        btn.disabled = true;
+        try {
+          const blob = await supabaseFetchAudioBlob(v.audioPath);
+          if (blob) {
+            await putAudioBlob({
+              id: `supa:${v.audioPath}`,
+              blob,
+              name: v.fileName || v.label || "audio",
+              type: v.fileType || blob.type || "audio/*",
+              size: blob.size,
+            });
+            _cachedAudioPaths.add(v.audioPath);
+            row.classList.add("salRetryDone");
+            row.querySelector(".salRetryActions").innerHTML = `<span style="color:#22c55e;font-size:13px;font-weight:700;">Done!</span>`;
+          } else {
+            btn.textContent = "Retry";
+            btn.disabled = false;
+          }
+        } catch {
+          btn.textContent = "Retry";
+          btn.disabled = false;
+        }
+      });
+
+      row.querySelector('[data-action="delete"]').addEventListener("click", () => {
+        // Remove audioPath from version so it's treated as metadata-only
+        v.audioPath = null;
+        saveState();
+        row.classList.add("salRetryDone");
+        row.querySelector(".salRetryActions").innerHTML = `<span style="color:var(--muted);font-size:13px;font-weight:700;">Removed</span>`;
+      });
+
+      listEl.appendChild(row);
+    }
+
+    el.querySelector("#salRetryContinue").addEventListener("click", () => {
+      el.classList.add("salImportFadeOut");
+      setTimeout(() => { el.remove(); resolve(); }, 300);
+    });
+
+    document.body.appendChild(el);
+  });
+}
+
+function showSalRefresherPrompt() {
+  return new Promise((resolve) => {
+    const backdrop = document.createElement("div");
+    backdrop.className = "actionSheetBackdrop";
+
+    const sheet = document.createElement("div");
+    sheet.className = "actionSheet";
+    sheet.style.cssText = "padding: 0; overflow: hidden; border-radius: 22px;";
+    sheet.innerHTML = `
+      <div style="display:flex;flex-direction:column;align-items:center;padding:32px 24px 20px;gap:14px;">
+        ${salSvg(72)}
+        <div style="font-size:18px;font-weight:800;color:#fff;letter-spacing:-0.3px;text-align:center;">Want a refresher on how things work?</div>
+        <div style="font-size:14px;color:rgba(255,255,255,.5);text-align:center;line-height:1.6;max-width:280px;">
+          I can walk you through everything RiffBank has to offer.
+        </div>
+      </div>
+      <div style="height:1px;background:rgba(255,255,255,.08);margin:0 16px;"></div>
+      <div style="padding:8px 0 6px;display:flex;flex-direction:column;">
+        <button class="actionSheetBtn" id="salRefresherYes" style="font-weight:700;color:#a78bfa;">Sure!</button>
+        <button class="actionSheetBtn" id="salRefresherNo" style="font-weight:700;">I'm good</button>
+      </div>
+    `;
+
+    function close() {
+      backdrop.remove();
+      sheet.remove();
+      localStorage.setItem("salOnboardingDone", "1");
+      resolve();
+    }
+
+    backdrop.addEventListener("click", close);
+    sheet.querySelector("#salRefresherNo").addEventListener("click", close);
+    sheet.querySelector("#salRefresherYes").addEventListener("click", () => {
+      backdrop.remove();
+      sheet.remove();
+      openSalOnboarding({ force: true });
+      // Resolve after a short delay so onboarding sheet is visible
+      setTimeout(resolve, 100);
+    });
+
+    document.body.appendChild(backdrop);
+    document.body.appendChild(sheet);
+  });
+}
+
+async function runSalImportFlow() {
+  // Only run once per session
+  if (_importFlowRan) return;
+  _importFlowRan = true;
+
+  // Only run on first login (fresh install / after wipe). Skip on subsequent launches.
+  if (localStorage.getItem("salImportFlowDone")) return;
+
+  // Check if this is a fresh login (no local songs yet) and cloud has data
+  const cloudCount = await supabaseCountUserSongs();
+  console.log("[ImportFlow] cloudCount =", cloudCount);
+
+  if (cloudCount === 0) {
+    // New user — run existing onboarding
+    localStorage.setItem("salImportFlowDone", "1");
+    openSalOnboarding({ force: true });
+    return;
+  }
+
+  // Returning user with cloud songs
+  const userChoice = await showSalImportOffer(cloudCount);
+
+  if (userChoice === "import") {
+    const result = await showSalImportScreen();
+    if (result.failed.length) {
+      await showSalImportRetry(result.failed);
+    }
+  } else {
+    // User skipped — set nudge flag
+    localStorage.setItem("salImportSkipped", JSON.stringify({
+      count: cloudCount,
+      skippedAt: Date.now(),
+    }));
+  }
+
+  // Refresher prompt for returning users
+  await showSalRefresherPrompt();
+
+  // Mark import flow as complete so it doesn't re-run on next launch
+  localStorage.setItem("salImportFlowDone", "1");
+}
+
 async function init() {
   if (!DISABLE_SPLASH) {
     await runSplashSequence();
@@ -5619,10 +6165,15 @@ async function init() {
     const { data, error } = await supabase.auth.getUser();
     if (error || !data?.user) { await supabase.auth.signOut(); authed = false; }
   }
-  document.body.classList.remove("splashing");
   if (!authed) {
     await showAuthScreen();
   }
+
+  // Post-auth: check for cloud songs and offer import
+  await runSalImportFlow();
+
+  // Now safe to show the app shell (auth + import overlays are appended to body, not .app)
+  document.body.classList.remove("splashing");
 
   // Seed example release if none exist yet
   if (!state.releases.length) {
@@ -5665,10 +6216,12 @@ async function init() {
     }
   })();
 
-  // Incremental sync from Supabase
-  incrementalSyncFromSupabase().then(() => {
-    preFetchCloudAudio().catch(console.warn);
-  }).catch(console.warn);
+  // Incremental sync from Supabase (skip if import flow already pulled data)
+  if (!_importFlowRan) {
+    incrementalSyncFromSupabase().then(() => {
+      preFetchCloudAudio().catch(console.warn);
+    }).catch(console.warn);
+  }
 
   // Check for Web Share Target file
   checkSharedAudioFile();
@@ -5685,6 +6238,7 @@ async function incrementalSyncFromSupabase() {
     // Local is empty — adopt cloud state wholesale
     state.songs = cloudState.songs;
     state.releases = cloudState.releases || state.releases;
+    state.projects = cloudState.projects || state.projects;
     normalizeState();
     await restoreCoverUrlsFromCache();
     saveState();
@@ -5732,7 +6286,14 @@ async function incrementalSyncFromSupabase() {
     }
   }
 
-  if (added || updated) {
+  // Merge cloud project names into local state
+  if (cloudState.projects?.length) {
+    for (const p of cloudState.projects) {
+      if (p && !state.projects.includes(p)) state.projects.push(p);
+    }
+  }
+
+  if (added || updated || cloudState.projects?.length) {
     normalizeState();
     await restoreCoverUrlsFromCache();
     saveState();
@@ -5764,6 +6325,7 @@ function renderProjects() {
   const projects = Array.from(
     new Set([
       ...(state.settings?.defaultProject ? [state.settings.defaultProject.trim()] : []),
+      ...(state.projects || []).map(p => p.trim()).filter(Boolean),
       ...state.songs.map(s => (s.project || "").trim()).filter(Boolean)
     ])
   ).sort((a, b) => a.localeCompare(b));
@@ -6788,6 +7350,49 @@ function renderHome() {
       if (target === "next") return renderNextActions();
     });
   });
+
+  // === Sal nudge for users who skipped import ===
+  const skipData = JSON.parse(localStorage.getItem("salImportSkipped") || "null");
+  if (skipData && !document.querySelector(".salNudge")) {
+    const daysSince = (Date.now() - skipData.skippedAt) / 86400000;
+    const dismissed = localStorage.getItem("salNudgeDismissed");
+    const secondDismissed = localStorage.getItem("salNudgeSecondDismissed");
+    const showNudge = !dismissed || (!secondDismissed && daysSince >= 7);
+
+    if (showNudge) {
+      const nudge = document.createElement("div");
+      nudge.className = "salNudge salNudgeIn";
+      nudge.innerHTML = `
+        <div class="salNudgeBubble">
+          <button class="salNudgeClose" aria-label="Dismiss">&times;</button>
+          <div style="display:flex;align-items:center;gap:10px;">
+            ${salSvg(32)}
+            <span>Still got ${skipData.count} song${skipData.count !== 1 ? "s" : ""} in the cloud whenever you're ready.</span>
+          </div>
+        </div>
+      `;
+
+      nudge.querySelector(".salNudgeBubble").addEventListener("click", (e) => {
+        if (e.target.closest(".salNudgeClose")) return;
+        nudge.classList.add("salNudgeOut");
+        localStorage.removeItem("salImportSkipped");
+        setTimeout(() => { nudge.remove(); runSalImportFlow(); }, 300);
+      });
+
+      nudge.querySelector(".salNudgeClose").addEventListener("click", () => {
+        nudge.classList.add("salNudgeOut");
+        if (!dismissed) {
+          localStorage.setItem("salNudgeDismissed", String(Date.now()));
+        } else {
+          localStorage.setItem("salNudgeSecondDismissed", String(Date.now()));
+        }
+        setTimeout(() => nudge.remove(), 300);
+      });
+
+      // Delay entrance slightly so home screen paints first
+      setTimeout(() => document.body.appendChild(nudge), 1500);
+    }
+  }
 
   // === Portal energy system: particles + magnetic touch ===
   const homeGrid = activeScreenEl.querySelector(".homeGrid");
@@ -8605,12 +9210,14 @@ function coverSvg(song, { lite = false } = {}) {
   }
 
   // Resolve user cover from cache/cloud if path exists but URL doesn't
-  if (song.coverSource === "user" && song.userCoverPath && !song.userCoverImageUrl && !song._userCoverResolving) {
+  if (song.coverSource === "user" && !song.userCoverImageUrl && !song._userCoverResolving) {
     song._userCoverResolving = true;
     (async () => {
-      let url = await getCoverBlobUrl(song.userCoverPath);
-      if (!url) {
-        const blob = await supabaseFetchCoverBlob(song.userCoverPath);
+      const localKey = `user_${song.id}_cover.jpg`;
+      let url = song.userCoverPath ? await getCoverBlobUrl(song.userCoverPath) : null;
+      if (!url) url = await getCoverBlobUrl(localKey);
+      if (!url && song.userCoverPath) {
+        const blob = await supabaseFetchCoverBlob(song.userCoverPath).catch(() => null);
         if (blob) {
           await putCoverBlob(song.userCoverPath, blob);
           url = URL.createObjectURL(blob);
@@ -10163,6 +10770,19 @@ function renderNowPlaying() {
           meta.addEventListener("transitionend",      () => cleanUp(meta),      { once: true });
         }));
 
+        // Also update lyrics bar + body for track change
+        const lBarArt = fp.querySelector(".fpLyricsBarArt");
+        const lBarTitle = fp.querySelector(".fpLyricsBarTitle");
+        const lBarSub = fp.querySelector(".fpLyricsBarSub");
+        const lBody = fp.querySelector(".fpLyricsText");
+        if (lBarArt) lBarArt.innerHTML = art;
+        if (lBarTitle) lBarTitle.textContent = title;
+        if (lBarSub) lBarSub.textContent = subtitle;
+        if (lBody) lBody.innerHTML = song.lyrics ? escapeHtml(song.lyrics) : '<span class="fpLyricsEmpty">No lyrics yet</span>';
+        // Enable/disable lyrics tab based on new song
+        const lTab = fp.querySelector(".fpTabLyrics");
+        if (lTab) lTab.disabled = !song.lyrics;
+
         return; // skip full innerHTML rebuild
       }
     }
@@ -10214,11 +10834,28 @@ function renderNowPlaying() {
         <button class="fpCtrl ${state.player?.repeat ? 'is-active' : ''}" type="button" aria-label="Repeat" id="npRepeat">${_repeatSvg}${state.player?.repeat === "one" ? `<span class="r1b">1</span>` : ""}</button>
       </div>
 
+      <div class="fpLyricsBar">
+        <div class="fpLyricsBarArt">${art}</div>
+        <div class="fpLyricsBarMeta">
+          <div class="fpLyricsBarTitle">${escapeHtml(title)}</div>
+          <div class="fpLyricsBarSub">${escapeHtml(subtitle)}</div>
+        </div>
+        <button class="fpLyricsBarPlay" id="npLyricsToggle" type="button" aria-label="Play / Pause">${globalAudio?.paused ? _playSvg : _pauseSvg}</button>
+      </div>
+
+      <div class="fpLyricsScrub">
+        <div class="fpLyricsScrubFill" id="npLyricsScrubFill"></div>
+      </div>
+
       <nav class="fpBottomTabs" aria-label="Now playing tabs">
-        <button class="fpTab is-active" type="button">UP NEXT</button>
-        <button class="fpTab" type="button" disabled>LYRICS</button>
-        <button class="fpTab" type="button" disabled>RELATED</button>
+        <button class="fpTab fpTabUpNext is-active" type="button" id="npTabUpNext">UP NEXT</button>
+        <button class="fpTab fpTabLyrics" type="button" id="npTabLyrics" ${song.lyrics ? '' : 'disabled'}>LYRICS</button>
+        <button class="fpTab fpTabRelated" type="button" disabled>RELATED</button>
       </nav>
+
+      <div class="fpLyricsBody" id="npLyricsBody">
+        <div class="fpLyricsText">${song.lyrics ? escapeHtml(song.lyrics) : '<span class="fpLyricsEmpty">No lyrics yet</span>'}</div>
+      </div>
     </section>
   `;
 
@@ -10305,7 +10942,7 @@ function renderNowPlaying() {
   fp?.addEventListener("touchstart", (e) => {
     const t = e.touches?.[0];
     if (!t) return;
-    if (e.target?.closest?.("button, input, a")) return;
+    if (e.target?.closest?.("button, input, a, .fpLyricsBody")) return;
 
     swipeOn = true;
     startY = t.clientY;
@@ -10466,6 +11103,61 @@ $("#npRepeat")?.addEventListener("click", () => {
     setHeader("Player");
     render();
   });
+
+  // ── Lyrics tab switching ──
+  const _fpEl = $("#fullPlayer");
+
+  function switchToTab(tab) {
+    if (!_fpEl) return;
+    // Toggle tab active states
+    _fpEl.querySelectorAll(".fpTab").forEach(t => t.classList.remove("is-active"));
+    if (tab === "lyrics") {
+      _fpEl.querySelector(".fpTabLyrics")?.classList.add("is-active");
+      _fpEl.classList.add("fp--lyrics");
+    } else {
+      _fpEl.querySelector(".fpTabUpNext")?.classList.add("is-active");
+      _fpEl.classList.remove("fp--lyrics");
+    }
+  }
+
+  $("#npTabLyrics")?.addEventListener("click", () => switchToTab("lyrics"));
+  $("#npTabUpNext")?.addEventListener("click", () => switchToTab("upnext"));
+
+  // Tap lyrics bar to go back to full player
+  _fpEl?.querySelector(".fpLyricsBar")?.addEventListener("click", (e) => {
+    if (e.target.closest("button")) return;
+    switchToTab("upnext");
+  });
+
+  // Play/pause from lyrics bar
+  $("#npLyricsToggle")?.addEventListener("click", async () => {
+    if (!globalAudio) return;
+    await unlockAudioOnce();
+    if (globalAudio.paused) {
+      if (!globalAudio.src) {
+        await playNowPlaying({ autoplay: true });
+      } else {
+        await globalAudio.play();
+      }
+    } else {
+      globalAudio.pause();
+    }
+    syncMiniPlayerUI();
+  });
+
+  // Sync lyrics scrub fill + lyrics bar play button
+  function syncLyricsScrub() {
+    if (!globalAudio || !document.getElementById("fullPlayer")) return;
+    const fill = $("#npLyricsScrubFill");
+    if (fill && Number.isFinite(globalAudio.duration) && globalAudio.duration > 0) {
+      fill.style.width = ((globalAudio.currentTime / globalAudio.duration) * 100) + "%";
+    }
+    const lBtn = $("#npLyricsToggle");
+    if (lBtn) lBtn.innerHTML = globalAudio?.paused ? _playSvg : _pauseSvg;
+  }
+  globalAudio?.addEventListener("timeupdate", syncLyricsScrub);
+  globalAudio?.addEventListener("play", syncLyricsScrub);
+  globalAudio?.addEventListener("pause", syncLyricsScrub);
 }
 
 // ---------------------
@@ -10507,7 +11199,11 @@ function renderSettings() {
           <button id="cloudSyncPull" class="btn" style="flex:1">Pull from cloud</button>
         </div>
         <div class="row" style="gap:10px; margin-top:10px">
+          <button id="cloudBackupAll" class="btn" style="flex:1; background: rgba(78,205,196,.08); border-color: rgba(78,205,196,.2); color: #4ecdc4;">Backup all audio to cloud</button>
           <button id="cloudCacheAll" class="btn" style="flex:1">Cache all audio locally</button>
+        </div>
+        <div class="small" style="margin-top:4px; opacity:.7">Backup uploads local-only audio to the cloud. Cache downloads cloud audio to this device.</div>
+        <div class="row" style="gap:10px; margin-top:10px">
           <button id="cloudRecoverAudio" class="btn" style="flex:1; background: rgba(255,184,77,.08); border-color: rgba(255,184,77,.2); color: #ffb84d;">Recover Audio</button>
         </div>
         <div class="row" style="margin-top:6px">
@@ -10584,88 +11280,49 @@ function renderSettings() {
     toast("Pulling from cloud…");
     const cloudState = await supabasePullState();
     if (cloudState?.songs) {
-      if (!confirm(`Found ${cloudState.songs.length} songs in cloud. Replace local data?`)) return;
+      if (!confirm(`Found ${cloudState.songs.length} songs in cloud. This will wipe all local data and replace it with cloud data. Continue?`)) return;
 
-      // Build lookup of local versions' audio refs (fileId, audioPath, localAudioId)
-      // so we can preserve them — cloud state has fileId:null by design
-      const localAudioMap = new Map();
-      const localCoverMap = new Map();
-      for (const s of (state.songs || [])) {
-        for (const v of (s.versions || [])) {
-          if (v.fileId || v.audioPath || v.localAudioId) {
-            localAudioMap.set(v.id, {
-              fileId: v.fileId, audioPath: v.audioPath, localAudioId: v.localAudioId,
-              fileName: v.fileName, fileType: v.fileType, fileSize: v.fileSize,
-            });
-          }
-        }
-        // Preserve local cover data (blob URLs don't survive cloud round-trip)
-        if (s.userCoverPath || s.userCoverImageUrl || s.coverImageUrl) {
-          localCoverMap.set(s.id, {
-            userCoverPath: s.userCoverPath,
-            userCoverImageUrl: s.userCoverImageUrl,
-            coverSource: s.coverSource,
-            coverPath: s.coverPath,
-            coverImageUrl: s.coverImageUrl,
-          });
-        }
-      }
-      // Diagnostic: show what we have before merge
-      const localCount = localAudioMap.size;
-      const cloudVersionIds = [];
-      const localVersionIds = [...localAudioMap.keys()];
-      for (const cs of cloudState.songs) {
-        for (const cv of (cs.versions || [])) cloudVersionIds.push(cv.id);
-      }
-      const idOverlap = cloudVersionIds.filter(id => localAudioMap.has(id)).length;
-
-      // Restore local audio refs into cloud versions
-      let restored = 0;
-      for (const cs of cloudState.songs) {
-        for (const cv of (cs.versions || [])) {
-          const local = localAudioMap.get(cv.id);
-          if (!local) continue;
-          if (!cv.fileId && local.fileId) {
-            cv.fileId = local.fileId;
-            cv.fileName = cv.fileName || local.fileName;
-            cv.fileType = cv.fileType || local.fileType;
-            cv.fileSize = cv.fileSize || local.fileSize;
-            restored++;
-          }
-          if (!cv.audioPath && local.audioPath) { cv.audioPath = local.audioPath; restored++; }
-          if (!cv.localAudioId && local.localAudioId) { cv.localAudioId = local.localAudioId; restored++; }
-        }
-        // Restore local cover blob URLs (cloud doesn't store blob URLs)
-        const localCover = localCoverMap.get(cs.id);
-        if (localCover) {
-          if (!cs.userCoverPath && localCover.userCoverPath) cs.userCoverPath = localCover.userCoverPath;
-          if (!cs.userCoverImageUrl && localCover.userCoverImageUrl) cs.userCoverImageUrl = localCover.userCoverImageUrl;
-          if (!cs.coverImageUrl && localCover.coverImageUrl) cs.coverImageUrl = localCover.coverImageUrl;
-          // Preserve coverSource — cloud defaults to "ai" even if user set it to "user"
-          if (localCover.coverSource === "user" && localCover.userCoverPath) cs.coverSource = "user";
-        }
-      }
+      // Wipe local audio/cover blobs from IndexedDB
+      toast("Clearing local data…");
+      audioUrlCache.clear();
+      try {
+        const db = await openAudioDB();
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(AUDIO_STORE, "readwrite");
+          tx.objectStore(AUDIO_STORE).clear();
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
+      } catch (e) { console.warn("[Pull] IDB clear failed:", e); }
 
       state = cloudState;
       normalizeState();
 
       // Discover audio files in Supabase Storage for versions missing audio_path
       const missingCount = state.songs.reduce((n, s) => n + (s.versions || []).filter(v => !v.audioPath).length, 0);
-      toast(`Discovering audio for ${missingCount} versions…`);
-      const discovered = await supabaseDiscoverAudioPaths(state.songs);
-      toast(`Found ${discovered.length}/${missingCount} audio files in storage`);
+      if (missingCount) {
+        toast(`Discovering audio for ${missingCount} versions…`);
+        const discovered = await supabaseDiscoverAudioPaths(state.songs);
+        toast(`Found ${discovered.length}/${missingCount} audio files in storage`);
+      }
 
       localStorage.setItem(LS_KEY, JSON.stringify(state));
-      await restoreCoverUrlsFromCache();
-      toast("Caching audio…");
       render();
+      toast("Caching cloud audio…");
 
       // Push back so discovered audioPath values make it to the DB
       await supabasePushState(state).catch(console.warn);
+      // Download cloud audio + covers to local cache
       await cacheAllCloudAudio();
+      await restoreCoverUrlsFromCache();
     } else {
       toast("No data found in cloud");
     }
+  });
+
+  // Cloud: Backup all local audio to cloud
+  $("#cloudBackupAll")?.addEventListener("click", async () => {
+    await backupAllAudioToCloud();
   });
 
   // Cloud: Cache all audio locally
@@ -10730,31 +11387,38 @@ function renderSettings() {
   });
 
   $("#wipe").addEventListener("click", async () => {
-    if (!confirm("Wipe all local RiffBank data on this browser?")) return;
+    if (!confirm("Wipe all local RiffBank data and sign out? This is like deleting and reinstalling the app.")) return;
 
-    localStorage.removeItem(LS_KEY);
-    localStorage.removeItem("salOnboardingDone");
-    state = loadState();
-    normalizeState();
-    // Save locally only — do NOT sync empty state to Drive
-    localStorage.setItem(LS_KEY, JSON.stringify(state));
+    // 1. Clear all localStorage (app state, onboarding flags, nudge flags, etc.)
+    localStorage.clear();
 
-    currentTab = "home";
-    drawerView = null;
-    overlayView = null;
-    setHeader("RiffBank");
+    // 2. Delete IndexedDB (cached audio blobs, cover blobs) — must await completion
+    async function deleteIDB(name) {
+      return new Promise((resolve) => {
+        const req = indexedDB.deleteDatabase(name);
+        req.onsuccess = () => resolve();
+        req.onerror = () => resolve();
+        req.onblocked = () => resolve();
+      });
+    }
+    try {
+      if (indexedDB.databases) {
+        const dbs = await indexedDB.databases();
+        for (const db of dbs) {
+          if (db.name) await deleteIDB(db.name);
+        }
+      } else {
+        await deleteIDB(AUDIO_DB);
+      }
+    } catch {
+      try { await deleteIDB(AUDIO_DB); } catch {}
+    }
 
-    if (screens.home) screens.home.scrollTop = 0;
-    try { window.scrollTo(0, 0); } catch {}
-    try { document.documentElement.scrollTop = 0; } catch {}
-    try { document.body.scrollTop = 0; } catch {}
+    // 3. Sign out of Supabase
+    try { await signOut(); } catch {}
 
-    render();
-
-    // Replay splash like a fresh start, then show Sal onboarding
-    await replaySplash();
-    document.body.classList.remove("splashing");
-    openSalOnboarding();
+    // 4. Hard reload — cleanest way to get back to a fresh state
+    window.location.reload();
   });
 }
 
