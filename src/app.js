@@ -12,6 +12,47 @@ window.onerror = (m, src, line, col) => alert(`JS ERROR:\n${m}\n${line}:${col}`)
  const DISABLE_SPLASH = true;
  const DISABLE_WELCOME = true;
 
+// Debug: show cache version badge on every screen (toggle on/off)
+const SHOW_BUILD_BADGE = true;
+
+// ── Activity log (alerts bell) ──
+// Each entry: { id, songTitle, status: "saving"|"compressing"|"uploading"|"syncing"|"done"|"failed", ts, message }
+const activityLog = [];
+function logActivity(id, songTitle, status, message) {
+  const existing = activityLog.find(a => a.id === id);
+  if (existing) {
+    existing.status = status;
+    existing.message = message;
+    existing.ts = Date.now();
+  } else {
+    activityLog.unshift({ id, songTitle, status, message, ts: Date.now() });
+  }
+  // Keep last 50
+  if (activityLog.length > 50) activityLog.length = 50;
+  updateBellBadge();
+  // Live-update alerts view if open
+  if (drawerView === "alerts") renderAlerts();
+}
+function updateBellBadge() {
+  const active = activityLog.filter(a => a.status !== "done" && a.status !== "failed").length;
+  const btn = document.querySelector("#htbNotif");
+  if (!btn) return;
+  let badge = btn.querySelector(".bellBadge");
+  if (active > 0) {
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.className = "bellBadge";
+      badge.style.cssText = "position:absolute;top:0;right:0;min-width:16px;height:16px;background:#f43f5e;border-radius:8px;font-size:10px;font-weight:700;color:#fff;display:flex;align-items:center;justify-content:center;padding:0 4px;line-height:1;";
+      btn.style.position = "relative";
+      btn.appendChild(badge);
+    }
+    badge.textContent = active;
+    badge.style.display = "flex";
+  } else if (badge) {
+    badge.style.display = "none";
+  }
+}
+
 // Debug toggle: highlight sync status on song cards
 // Toggle via console: toggleSyncDebug()
 window.RIFFBANK_DEBUG_SYNC = false;
@@ -783,6 +824,22 @@ class Nav {
       aceClone.style.inset = "auto";
       aceWrap.appendChild(aceClone);
       aceOverlay.appendChild(aceWrap);
+
+      // Reposition FAB from fixed to absolute so it renders inside the ace overlay
+      const aceFab = aceOverlay.querySelector('.sdFab');
+      if (aceFab) {
+        const liveFab = document.querySelector('.sdFab');
+        if (liveFab) {
+          const fr = liveFab.getBoundingClientRect();
+          aceFab.style.position = 'absolute';
+          aceFab.style.top = `${fr.top}px`;
+          aceFab.style.left = `${fr.left}px`;
+          aceFab.style.bottom = 'auto';
+          aceFab.style.right = 'auto';
+          aceOverlay.appendChild(aceFab);
+        }
+      }
+
       document.body.appendChild(aceOverlay);
       aceClone.scrollTop = aceScrollTop;
     }
@@ -933,14 +990,6 @@ function setActiveScreen(name) {
 }
 
 // Thin wrappers — all logic lives in the Nav class above.
-function captureNavState() {
-  nav.captureState({
-    currentTab, drawerView, projectDetailScreen, releaseDetailId,
-    selectedSongId, selectedVersionId, songsView, overlayView,
-    songsBackTarget, lyricsEditSongId, collabMode, headerTitle: headerTitle?.textContent ?? "RiffBank"
-  });
-}
-function triggerForwardSlide() { nav.forward(activeScreenEl); }
 
 // New centralized forward navigation: captures frozen snapshots before AND
 // after mutations, then animates between them. No live DOM leaks.
@@ -3532,11 +3581,17 @@ document.addEventListener("touchstart", (e) => {
   const t = e.changedTouches?.[0];
   if (!t) return;
 
+// Collab sidebar close gesture (sidebar open, touch anywhere)
+if (_collabSidebarOpen && currentTab === "collab" && !projectDetailScreen && !selectedSongId && !overlayView) {
+  _sidebarTouchStart(t);
+  return;
+}
+
 // Left-edge gesture
 if (!drawerOpen && t.clientX <= 24) {
   // Player has nothing to go back to; bare home/collab root has nothing to go back to
   if (currentTab === "player") return;
-  if (currentTab === "collab" && !projectDetailScreen && !selectedSongId) return;
+  if (currentTab === "collab" && !projectDetailScreen && !selectedSongId && !overlayView) { _sidebarTouchStart(t); return; }
   if (currentTab === "home" && !drawerView && !overlayView) return;
 
   touchTracking = true;
@@ -3612,6 +3667,29 @@ if (!drawerOpen && t.clientX <= 24) {
     if (aceCapture) {
       const aceClone = nav._cloneDeep(aceCapture.clone);
       swipeAceEl = positionAppClone(aceClone, 499);
+      // Bake fixed-position FAB into absolute coords (same as queen)
+      const aceFab = swipeAceEl.querySelector('.sdFab');
+      if (aceFab) {
+        // Try live FAB for position; if current screen has no FAB, compute from CSS
+        const liveFab = document.querySelector('.sdFab');
+        if (liveFab) {
+          const fr = liveFab.getBoundingClientRect();
+          aceFab.style.position = 'absolute';
+          aceFab.style.top = `${fr.top}px`;
+          aceFab.style.left = `${fr.left}px`;
+          aceFab.style.bottom = 'auto';
+          aceFab.style.right = 'auto';
+        } else {
+          // No live FAB on current screen — compute position from viewport
+          const dockH = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--dock-h')) || 80;
+          aceFab.style.position = 'absolute';
+          aceFab.style.top = `${window.innerHeight - dockH - 24 - 52}px`;
+          aceFab.style.left = `${window.innerWidth - 20 - 52}px`;
+          aceFab.style.bottom = 'auto';
+          aceFab.style.right = 'auto';
+        }
+        swipeAceEl.appendChild(aceFab);
+      }
       swipeAceEl.style.transform = `translateX(-${nav.ACE_PARALLAX}px)`;
       document.body.appendChild(swipeAceEl);
       restoreCloneScroll(swipeAceEl, aceCapture.scrollTop);
@@ -3637,6 +3715,9 @@ if (!drawerOpen && t.clientX <= 24) {
 }, { passive: true });
 
 document.addEventListener("touchmove", (e) => {
+  // Collab sidebar swipe (independent of nav touchTracking)
+  if (_sidebarSwipe.tracking) { const st = e.changedTouches?.[0]; if (st) _sidebarTouchMove(st); }
+
   if (!touchTracking) return;
   const t = e.changedTouches?.[0];
   if (!t) return;
@@ -3679,6 +3760,9 @@ function cleanupSwipe() {
 }
 
 document.addEventListener("touchend", (e) => {
+  // Collab sidebar swipe (independent of nav touchTracking)
+  if (_sidebarSwipe.tracking) { _sidebarTouchEnd(e.changedTouches?.[0]); }
+
   if (!touchTracking) return;
   const t = e.changedTouches?.[0];
 
@@ -4174,8 +4258,29 @@ function renderSheet() {
       // If user picked a file, create v1 with audio attached
       if (_sheetAudioFile) {
         const v = createVersion(song);
-        await attachSharedAudio(song, v, _sheetAudioFile, _sheetAudioFile.name || "audio", _sheetAudioFile.type || "audio/*", _sheetAudioFile.size || 0);
+        const audioId = uid();
+        v.fileId = audioId;
+        v.fileName = _sheetAudioFile.name || "audio";
+        v.fileType = _sheetAudioFile.type || "audio/*";
+        v.fileSize = _sheetAudioFile.size || 0;
+        song.updatedAt = nowStamp();
+        saveState();
         toast("Created with audio 🎸");
+
+        // IndexedDB + cloud upload both run in background (non-blocking)
+        audioPut({
+          id: audioId,
+          name: _sheetAudioFile.name || "audio",
+          type: _sheetAudioFile.type || "audio/*",
+          size: _sheetAudioFile.size || 0,
+          blob: _sheetAudioFile,
+          createdAt: nowStamp(),
+        }).then(() => {
+          attachSharedAudioCloud(song, v, _sheetAudioFile, _sheetAudioFile.name || "audio", _sheetAudioFile.type || "audio/*");
+        }).catch(e => {
+          console.warn("[audioPut bg] failed:", e);
+          toast("Local save failed");
+        });
       } else {
         saveState();
         toast("Created 🎸");
@@ -5190,20 +5295,46 @@ function renderCreateOverlay() {
       // If user picked a file, create v1 with audio attached
       if (createAudioFile) {
         const v = createVersion(song);
-        await attachSharedAudio(song, v, createAudioFile, createAudioFile.name || "audio", createAudioFile.type || "audio/*", createAudioFile.size || 0);
+        const audioId = uid();
+        v.fileId = audioId;
+        v.fileName = createAudioFile.name || "audio";
+        v.fileType = createAudioFile.type || "audio/*";
+        v.fileSize = createAudioFile.size || 0;
+        song.updatedAt = nowStamp();
+        saveState();
         toast("Created with audio 🎸");
+
+        // IndexedDB + cloud upload in background (don't block navigation)
+        logActivity(v.id, song.title, "saving", "Saving locally…");
+        audioPut({
+          id: audioId,
+          name: createAudioFile.name || "audio",
+          type: createAudioFile.type || "audio/*",
+          size: createAudioFile.size || 0,
+          blob: createAudioFile,
+          createdAt: nowStamp(),
+        }).then(() => {
+          attachSharedAudioCloud(song, v, createAudioFile, createAudioFile.name || "audio", createAudioFile.type || "audio/*");
+        }).catch(e => {
+          console.warn("[audioPut bg] failed:", e);
+          logActivity(v.id, song.title, "failed", "Local save failed");
+          toast("Local save failed");
+        });
       } else {
         saveState();
         toast("Created");
       }
 
-      closeCreateOverlay();
-      currentTab = "songs";
-      songsView = "list";
-      selectedSongId = song.id;
-      setHeader("Song");
-      syncTabs();
-      render();
+      // Remove overlay instantly (no CSS transition) so navigateForward captures Home underneath
+      if (createOverlayEl) { createOverlayEl.remove(); createOverlayEl = null; }
+
+      navigateForward(() => {
+        currentTab = "songs";
+        songsView = "list";
+        selectedSongId = song.id;
+        setHeader("Song");
+        syncTabs();
+      });
       autoGenerateArt(song);
     });
 
@@ -5311,12 +5442,28 @@ function render() {
   if (drawerView === "importExport") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderImportExport(); }
   if (drawerView === "about") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderAbout(); }
   if (drawerView === "globalSearch") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderGlobalSearch(); }
+  if (drawerView === "alerts") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderAlerts(); }
 
-  // Overlay screens (lyrics, next actions, etc.)
+  // Overlay screens (lyrics, friends, etc.)
   if (overlayView === "lyrics") {
     setActiveScreen("home");
     if (!_isBack) activeScreenEl.scrollTop = 0;
     return renderLyricsScratch();
+  }
+  if (overlayView === "friendRequests") {
+    setActiveScreen("collab");
+    if (!_isBack) activeScreenEl.scrollTop = 0;
+    return renderFriendRequests();
+  }
+  if (overlayView === "friendsList") {
+    setActiveScreen("collab");
+    if (!_isBack) activeScreenEl.scrollTop = 0;
+    return renderFriendsList();
+  }
+  if (overlayView === "addFriend") {
+    setActiveScreen("collab");
+    if (!_isBack) activeScreenEl.scrollTop = 0;
+    return renderAddFriend();
   }
 
   // Normal screens
@@ -5552,12 +5699,23 @@ function openShareNewSongSheet(blob, fileName, fileType, fileSize) {
     ensureProjectInState(song.project);
     state.songs.unshift(song);
 
-    // Create version and attach audio
+    // Create version and attach audio — navigate immediately, storage in background
     const v = createVersion(song);
-    await attachSharedAudio(song, v, blob, fileName, fileType, fileSize);
+    const audioId = uid();
+    v.fileId = audioId;
+    v.fileName = fileName;
+    v.fileType = fileType;
+    v.fileSize = fileSize;
+    song.updatedAt = nowStamp();
+    saveState();
 
     closeSheet();
     toast("Created with audio 🎸");
+
+    // IndexedDB + cloud both in background (iOS IndexedDB blob writes are slow)
+    audioPut({ id: audioId, name: fileName, type: fileType, size: fileSize, blob, createdAt: nowStamp() })
+      .then(() => attachSharedAudioCloud(song, v, blob, fileName, fileType))
+      .catch(e => { console.warn("[audioPut bg] failed:", e); toast("Local save failed"); });
 
     currentTab = "songs";
     songsView = "list";
@@ -5626,10 +5784,21 @@ function openShareExistingSongSheet(blob, fileName, fileType, fileSize) {
       if (!song) return toast("Song not found 😅");
 
       const v = createVersion(song);
-      await attachSharedAudio(song, v, blob, fileName, fileType, fileSize);
+      const audioId = uid();
+      v.fileId = audioId;
+      v.fileName = fileName;
+      v.fileType = fileType;
+      v.fileSize = fileSize;
+      song.updatedAt = nowStamp();
+      saveState();
 
       closeSheet();
       toast(`Added v${song.versions.length} to ${song.title} 🎸`);
+
+      // IndexedDB + cloud both in background (iOS IndexedDB blob writes are slow)
+      audioPut({ id: audioId, name: fileName, type: fileType, size: fileSize, blob, createdAt: nowStamp() })
+        .then(() => attachSharedAudioCloud(song, v, blob, fileName, fileType))
+        .catch(e => { console.warn("[audioPut bg] failed:", e); toast("Local save failed"); });
 
       currentTab = "songs";
       songsView = "list";
@@ -5684,6 +5853,40 @@ async function attachSharedAudio(song, v, blob, fileName, fileType, fileSize) {
     }
   } catch (e) {
     console.warn("[attachSharedAudio] cloud upload failed:", e);
+    toast("Local saved, cloud sync failed");
+  }
+}
+
+// Cloud-only portion of attachSharedAudio (fire-and-forget for non-blocking uploads)
+async function attachSharedAudioCloud(song, v, blob, fileName, fileType) {
+  const logId = v.id || uid();
+  const title = song.title || fileName;
+  logActivity(logId, title, "saving", "Saving locally…");
+  toast("Syncing to cloud…");
+  try {
+    logActivity(logId, title, "compressing", "Compressing audio…");
+    const compressed = await compressAudioForUpload(blob);
+    logActivity(logId, title, "uploading", "Uploading to cloud…");
+    const result = await supabaseUploadAudio({
+      blob: new File([compressed], fileName, { type: compressed.type || fileType }),
+      songId: song.id,
+      versionId: v.id,
+      fileName,
+    });
+    if (result.success) {
+      v.audioPath = result.audioPath;
+      localStorage.setItem(LS_KEY, JSON.stringify(state));
+      logActivity(logId, title, "syncing", "Syncing song record…");
+      const pushOk = await supabasePushState(state).catch(e => { console.warn("[Push]", e); return false; });
+      logActivity(logId, title, "done", pushOk ? "Synced to cloud" : "Audio uploaded, record sync failed");
+      toast(pushOk ? "Synced to cloud" : "Audio uploaded, but song record failed to sync");
+    } else {
+      logActivity(logId, title, "failed", "Cloud upload failed");
+      toast("Local saved, cloud sync failed");
+    }
+  } catch (e) {
+    console.warn("[attachSharedAudioCloud] cloud upload failed:", e);
+    logActivity(logId, title, "failed", "Cloud upload error");
     toast("Local saved, cloud sync failed");
   }
 }
@@ -6434,7 +6637,8 @@ function renderAvatarHtml(src, size, fallbackInitial) {
     if (preset) return `<div style="width:${size}px;height:${size}px;border-radius:50%;overflow:hidden">${renderAvatarPreset(preset)}</div>`;
   }
   if (src?.startsWith("http")) {
-    return `<img style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;display:block" src="${src}" />`;
+    const fb = fallbackInitial || "?";
+    return `<img style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;display:block" src="${src}" onerror="this.outerHTML='<div style=\\'width:${size}px;height:${size}px;border-radius:50%;background:linear-gradient(135deg,#a78bfa,#f472b6);display:flex;align-items:center;justify-content:center;font-weight:900;font-size:${Math.round(size * 0.4)}px;color:#fff\\'>${fb}</div>'" />`;
   }
   return `<div style="width:${size}px;height:${size}px;border-radius:50%;background:linear-gradient(135deg,#a78bfa,#f472b6);display:flex;align-items:center;justify-content:center;font-family:'Montserrat',sans-serif;font-weight:900;font-size:${Math.round(size * 0.4)}px;color:#fff">${fallbackInitial || "?"}</div>`;
 }
@@ -6941,12 +7145,18 @@ function showProfileSetup() {
               try {
                 const ext = profile.avatarBlob.name?.split(".").pop() || "jpg";
                 const path = `${uid}/avatar.${ext}`;
-                await supabase.storage.from("covers").upload(path, profile.avatarBlob, { upsert: true, contentType: profile.avatarBlob.type || "image/jpeg" });
-                const { data: urlData } = supabase.storage.from("covers").getPublicUrl(path);
-                const publicUrl = urlData?.publicUrl;
-                if (publicUrl) {
-                  await supabase.from("profiles").update({ avatar_url: publicUrl }).eq("id", uid);
-                  state.settings.profileAvatarUrl = publicUrl;
+                const { error: uploadErr } = await supabase.storage.from("covers").upload(path, profile.avatarBlob, { upsert: true, contentType: profile.avatarBlob.type || "image/jpeg" });
+                if (uploadErr) { console.warn("[ProfileSetup] Avatar upload failed:", uploadErr); }
+                else {
+                  // Use signed URL (1 year) — public URL returns 400 if bucket isn't public
+                  const { data: signedData, error: signErr } = await supabase.storage.from("covers").createSignedUrl(path, 60 * 60 * 24 * 365);
+                  const avatarUrl = signedData?.signedUrl;
+                  if (avatarUrl) {
+                    await supabase.from("profiles").update({ avatar_url: avatarUrl }).eq("id", uid);
+                    state.settings.profileAvatarUrl = avatarUrl;
+                  } else {
+                    console.warn("[ProfileSetup] Signed URL failed:", signErr);
+                  }
                 }
               } catch (e) { console.warn("[ProfileSetup] Avatar upload failed:", e); }
             } else if (profile.avatarPreset) {
@@ -7042,6 +7252,24 @@ async function init() {
 
   // Now safe to show the app shell (auth + import overlays are appended to body, not .app)
   document.body.classList.remove("splashing");
+
+  // Build badge — always-visible cache version indicator for debugging
+  if (SHOW_BUILD_BADGE) {
+    const reg = await navigator.serviceWorker?.getRegistration?.();
+    const swUrl = (reg?.active?.scriptURL || "");
+    // Read CACHE_VERSION from sw.js via a fetch so it stays in sync
+    let buildId = "?";
+    try {
+      const swText = await fetch("/sw.js?" + Date.now()).then(r => r.text());
+      const m = swText.match(/CACHE_VERSION\s*=\s*"([^"]+)"/);
+      if (m) buildId = m[1];
+    } catch {}
+    const badge = document.createElement("div");
+    badge.id = "buildBadge";
+    badge.textContent = `v${buildId}`;
+    badge.style.cssText = "position:fixed;top:4px;left:50%;transform:translateX(-50%);z-index:999999;background:rgba(0,0,0,.75);color:#0f0;font:bold 10px/1 monospace;padding:3px 6px;border-radius:4px;pointer-events:none;white-space:nowrap;";
+    document.body.appendChild(badge);
+  }
 
   // Seed example release if none exist yet
   if (!state.releases.length) {
@@ -8248,7 +8476,13 @@ function renderHome() {
   `;
 
   // Topbar button actions
-  activeScreenEl.querySelector("#htbNotif")?.addEventListener("click", () => toast("Notifications coming soon"));
+  activeScreenEl.querySelector("#htbNotif")?.addEventListener("click", () => {
+    navigateForward(() => {
+      drawerView = "alerts";
+      setHeader("Alerts");
+      syncTabs();
+    });
+  });
   activeScreenEl.querySelector("#htbSearch")?.addEventListener("click", () => {
     drawerView = "globalSearch";
     setActiveScreen("drawer");
@@ -9238,39 +9472,143 @@ function _collabSidebarHTML() {
   `;
 }
 
+// ── Collab sidebar swipe (document-level, same sensitivity as nav back) ──
+let _sidebarSwipe = { tracking: false, decided: false, startX: 0, startY: 0, lastX: 0, lastTime: 0 };
+const _SIDEBAR_W = 72;
+
+function _getCollabEls() {
+  const shell = document.querySelector(".collabShell");
+  if (!shell) return null;
+  return { shell, mainEl: shell.querySelector(".collabMain"), sidebarEl: shell.querySelector(".collabSidebar") };
+}
+
+function _finishSidebarSwipe(commit) {
+  const els = _getCollabEls();
+  if (!els) return;
+  const { shell, mainEl, sidebarEl } = els;
+  const dur = 200;
+  const ease = "cubic-bezier(.4,0,.2,1)";
+  mainEl.style.transition = `transform ${dur}ms ${ease}`;
+  sidebarEl.style.transition = `opacity ${dur}ms ${ease}`;
+
+  if (commit) {
+    mainEl.style.transform = `translateX(${_SIDEBAR_W}px)`;
+    sidebarEl.style.opacity = "1";
+    sidebarEl.style.pointerEvents = "auto";
+    _collabSidebarOpen = true;
+    shell.classList.add("sidebarOpen");
+  } else {
+    mainEl.style.transform = "translateX(0)";
+    sidebarEl.style.opacity = "0";
+    sidebarEl.style.pointerEvents = "none";
+    _collabSidebarOpen = false;
+    shell.classList.remove("sidebarOpen");
+  }
+
+  setTimeout(() => {
+    mainEl.style.transition = "";
+    sidebarEl.style.transition = "";
+    if (!_collabSidebarOpen) {
+      mainEl.style.transform = "";
+      sidebarEl.style.opacity = "";
+      sidebarEl.style.pointerEvents = "";
+    }
+  }, dur);
+}
+
+// Hooked into existing document touchstart/move/end below
+function _sidebarTouchStart(t) {
+  // Only on collab root (no drill-in, no overlay)
+  if (currentTab !== "collab" || projectDetailScreen || selectedSongId || overlayView) return false;
+  const els = _getCollabEls();
+  if (!els) return false;
+
+  const { mainEl, sidebarEl } = els;
+  // Open: left edge (same <= 24 as nav back). Close: anywhere while open.
+  if (t.clientX <= 24 && !_collabSidebarOpen) {
+    _sidebarSwipe = { tracking: true, decided: false, startX: t.clientX, startY: t.clientY, lastX: t.clientX, lastTime: Date.now() };
+    mainEl.style.transition = "none";
+    sidebarEl.style.transition = "none";
+    return true;
+  }
+  if (_collabSidebarOpen) {
+    _sidebarSwipe = { tracking: true, decided: true, startX: t.clientX, startY: t.clientY, lastX: t.clientX, lastTime: Date.now() };
+    mainEl.style.transition = "none";
+    sidebarEl.style.transition = "none";
+    return true;
+  }
+  return false;
+}
+
+function _sidebarTouchMove(t) {
+  if (!_sidebarSwipe.tracking) return;
+  const sw = _sidebarSwipe;
+  const dx = t.clientX - sw.startX;
+  const dy = Math.abs(t.clientY - sw.startY);
+
+  if (!sw.decided) {
+    if (Math.abs(dx) < 6 && dy < 6) return;
+    if (dy > Math.abs(dx)) { sw.tracking = false; return; }
+    sw.decided = true;
+  }
+
+  sw.lastX = t.clientX; sw.lastTime = Date.now();
+
+  let offset;
+  if (_collabSidebarOpen) {
+    offset = Math.max(0, Math.min(_SIDEBAR_W, _SIDEBAR_W + dx));
+  } else {
+    offset = Math.max(0, Math.min(_SIDEBAR_W, dx));
+  }
+
+  const els = _getCollabEls();
+  if (!els) return;
+  const ratio = offset / _SIDEBAR_W;
+  els.mainEl.style.transform = `translateX(${offset}px)`;
+  els.sidebarEl.style.opacity = String(ratio);
+}
+
+function _sidebarTouchEnd(t) {
+  if (!_sidebarSwipe.tracking) return;
+  const sw = _sidebarSwipe;
+  sw.tracking = false;
+
+  if (!sw.decided) {
+    if (_collabSidebarOpen) _finishSidebarSwipe(false);
+    return;
+  }
+
+  const dx = t ? t.clientX - sw.startX : 0;
+  const velocity = t ? (t.clientX - sw.lastX) / Math.max(1, Date.now() - sw.lastTime) : 0;
+
+  let offset;
+  if (_collabSidebarOpen) {
+    offset = Math.max(0, Math.min(_SIDEBAR_W, _SIDEBAR_W + dx));
+  } else {
+    offset = Math.max(0, Math.min(_SIDEBAR_W, dx));
+  }
+
+  const ratio = offset / _SIDEBAR_W;
+
+  if (_collabSidebarOpen) {
+    const close = ratio < 0.5 || velocity < -0.3;
+    _finishSidebarSwipe(!close);
+  } else {
+    const open = ratio > 0.5 || velocity > 0.3;
+    _finishSidebarSwipe(open);
+  }
+}
+
 function _wireCollabSidebar() {
   const shell = activeScreenEl.querySelector(".collabShell");
   if (!shell) return;
 
-  // Swipe from left edge to reveal sidebar
-  let startX = 0, startY = 0, swiping = false;
-  const mainEl = shell.querySelector(".collabMain");
-
-  mainEl.addEventListener("touchstart", (e) => {
-    const t = e.touches[0];
-    if (t.clientX < 30 && !_collabSidebarOpen) {
-      startX = t.clientX; startY = t.clientY; swiping = true;
-    }
-  }, { passive: true });
-
-  mainEl.addEventListener("touchmove", (e) => {
-    if (!swiping) return;
-    const dx = e.touches[0].clientX - startX;
-    const dy = Math.abs(e.touches[0].clientY - startY);
-    if (dy > 30) { swiping = false; return; }
-    if (dx > 40) {
-      swiping = false;
-      _collabSidebarOpen = true;
-      shell.classList.add("sidebarOpen");
-    }
-  }, { passive: true });
-
   // Tap on shifted main content → close sidebar
+  const mainEl = shell.querySelector(".collabMain");
   mainEl.addEventListener("click", (e) => {
     if (_collabSidebarOpen) {
       e.preventDefault(); e.stopPropagation();
-      _collabSidebarOpen = false;
-      shell.classList.remove("sidebarOpen");
+      _finishSidebarSwipe(false);
     }
   }, true);
 
@@ -9278,11 +9616,12 @@ function _wireCollabSidebar() {
   shell.querySelectorAll("[data-sidebar]").forEach(btn => {
     btn.addEventListener("click", () => {
       const action = btn.getAttribute("data-sidebar");
-      _collabSidebarOpen = false;
-      shell.classList.remove("sidebarOpen");
+      // Navigate first — forward slide captures the ace with sidebar still visible
       if (action === "requests") openFriendsRequests();
       else if (action === "friends") openFriendsList();
       else if (action === "add") openAddFriend();
+      // Reset sidebar state AFTER capture so back-nav renders it closed
+      _collabSidebarOpen = false;
     });
   });
 }
@@ -9435,14 +9774,14 @@ function renderCollabContent() {
           </div>
         </div>
 
-        <button class="sdFab" id="collabShareFab" aria-label="Share">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="24" height="24">
-            <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
-            <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
-          </svg>
-        </button>
       </div>
     </div>
+    <button class="sdFab" id="collabShareFab" aria-label="Share">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="24" height="24">
+        <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+        <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+      </svg>
+    </button>
   `;
 
   // Wire sidebar swipe + buttons
@@ -9557,30 +9896,35 @@ function _friendMetaText(profile) {
 }
 
 // ── Friend Requests View ──
-async function openFriendsRequests() {
-  _friendsOverlayEl?.remove();
-  const el = document.createElement("div");
-  el.className = "friendsOverlay";
-  el.innerHTML = `
-    <div class="friendsHeader">
-      <button class="friendsBackBtn" aria-label="Back">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="24" height="24"><polyline points="15 18 9 12 15 6"/></svg>
-      </button>
-      <div class="friendsTitle">Friend Requests</div>
-    </div>
-    <div class="friendsBody">
+function _collapseSidebarInAce() {
+  // Patch the swipe-back ace snapshot so Collab appears with sidebar closed
+  const entry = nav.appStack[nav.appStack.length - 1];
+  if (!entry?.clone) return;
+  const shell = entry.clone.querySelector(".collabShell");
+  if (!shell) return;
+  shell.classList.remove("sidebarOpen");
+  const main = shell.querySelector(".collabMain");
+  const side = shell.querySelector(".collabSidebar");
+  if (main) { main.style.transform = ""; main.style.transition = ""; }
+  if (side) { side.style.opacity = "0"; side.style.transition = ""; side.style.pointerEvents = "none"; }
+}
+
+function openFriendsRequests() {
+  navigateForward(() => { overlayView = "friendRequests"; });
+  _collapseSidebarInAce();
+}
+
+function renderFriendRequests() {
+  setHeader("Friend Requests");
+  activeScreenEl.innerHTML = `
+    <div class="friendsBody" style="padding:16px 16px 40px; display:flex; flex-direction:column; gap:10px;">
       <div class="friendsEmpty"><div class="collabSpinner"></div><div style="margin-top:12px">Loading...</div></div>
     </div>
   `;
-  document.body.appendChild(el);
-  _friendsOverlayEl = el;
-  requestAnimationFrame(() => el.classList.add("open"));
 
-  el.querySelector(".friendsBackBtn").addEventListener("click", _closeFriendsOverlay);
-
-  try {
-    const requests = await getPendingFriendRequests();
-    const body = el.querySelector(".friendsBody");
+  getPendingFriendRequests().then(requests => {
+    const body = activeScreenEl.querySelector(".friendsBody");
+    if (!body) return;
     if (!requests.length) {
       body.innerHTML = `<div class="friendsEmpty">No pending friend requests.</div>`;
       return;
@@ -9630,38 +9974,31 @@ async function openFriendsRequests() {
         } catch (err) { toast(err.message || "Failed"); }
       });
     });
-  } catch (err) {
-    el.querySelector(".friendsBody").innerHTML = `<div class="friendsEmpty">Failed to load requests.</div>`;
-  }
+  }).catch(() => {
+    const body = activeScreenEl.querySelector(".friendsBody");
+    if (body) body.innerHTML = `<div class="friendsEmpty">Failed to load requests.</div>`;
+  });
 }
 
 // ── Friends List View ──
-async function openFriendsList() {
-  _friendsOverlayEl?.remove();
-  const el = document.createElement("div");
-  el.className = "friendsOverlay";
-  el.innerHTML = `
-    <div class="friendsHeader">
-      <button class="friendsBackBtn" aria-label="Back">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="24" height="24"><polyline points="15 18 9 12 15 6"/></svg>
-      </button>
-      <div class="friendsTitle">Friends</div>
-    </div>
-    <div class="friendsBody">
+function openFriendsList() {
+  navigateForward(() => { overlayView = "friendsList"; });
+  _collapseSidebarInAce();
+}
+
+function renderFriendsList() {
+  setHeader("Friends");
+  activeScreenEl.innerHTML = `
+    <div class="friendsBody" style="padding:16px 16px 40px; display:flex; flex-direction:column; gap:10px;">
       <div class="friendsEmpty"><div class="collabSpinner"></div><div style="margin-top:12px">Loading...</div></div>
     </div>
   `;
-  document.body.appendChild(el);
-  _friendsOverlayEl = el;
-  requestAnimationFrame(() => el.classList.add("open"));
 
-  el.querySelector(".friendsBackBtn").addEventListener("click", _closeFriendsOverlay);
-
-  try {
-    const friends = await getMyFriends();
-    const body = el.querySelector(".friendsBody");
+  getMyFriends().then(friends => {
+    const body = activeScreenEl.querySelector(".friendsBody");
+    if (!body) return;
     if (!friends.length) {
-      body.innerHTML = `<div class="friendsEmpty">No friends yet. Swipe left on the Collab tab and tap <strong>Add</strong> to find people.</div>`;
+      body.innerHTML = `<div class="friendsEmpty">No friends yet. Swipe right on the Collab tab and tap <strong>Add</strong> to find people.</div>`;
       return;
     }
     body.innerHTML = friends.map(f => `
@@ -9689,9 +10026,10 @@ async function openFriendsList() {
         } catch (err) { toast(err.message || "Failed"); }
       });
     });
-  } catch (err) {
-    el.querySelector(".friendsBody").innerHTML = `<div class="friendsEmpty">Failed to load friends.</div>`;
-  }
+  }).catch(() => {
+    const body = activeScreenEl.querySelector(".friendsBody");
+    if (body) body.innerHTML = `<div class="friendsEmpty">Failed to load friends.</div>`;
+  });
 }
 
 // ── Invite Share Screen (Venmo-style QR + share) ──
@@ -9792,41 +10130,32 @@ async function openInviteShareScreen() {
 }
 
 // ── Add Friend View ──
-async function openAddFriend() {
-  _friendsOverlayEl?.remove();
-  const el = document.createElement("div");
-  el.className = "friendsOverlay";
-  el.innerHTML = `
-    <div class="friendsHeader">
-      <button class="friendsBackBtn" aria-label="Back">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="24" height="24"><polyline points="15 18 9 12 15 6"/></svg>
-      </button>
-      <div class="friendsTitle">Add Friend</div>
-    </div>
-    <div class="friendSearchWrap">
+function openAddFriend() {
+  navigateForward(() => { overlayView = "addFriend"; });
+  _collapseSidebarInAce();
+}
+
+function renderAddFriend() {
+  setHeader("Add Friend");
+  activeScreenEl.innerHTML = `
+    <div class="friendSearchWrap" style="padding:16px;">
       <button class="friendInviteBtn" id="friendInvitePhone">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
         Share a Link
       </button>
       <input class="friendSearchInput" type="text" placeholder="Search by name..." autocomplete="off" />
     </div>
-    <div class="friendsBody">
+    <div class="friendsBody" style="padding:0 16px 40px; display:flex; flex-direction:column; gap:10px;">
       <div class="friendsEmpty">Search for someone to add as a friend.</div>
     </div>
   `;
-  document.body.appendChild(el);
-  _friendsOverlayEl = el;
-  requestAnimationFrame(() => el.classList.add("open"));
 
-  el.querySelector(".friendsBackBtn").addEventListener("click", _closeFriendsOverlay);
-
-  // Share a Link → open full-screen QR/share overlay
-  el.querySelector("#friendInvitePhone").addEventListener("click", () => {
+  activeScreenEl.querySelector("#friendInvitePhone")?.addEventListener("click", () => {
     openInviteShareScreen();
   });
 
-  const input = el.querySelector(".friendSearchInput");
-  const body = el.querySelector(".friendsBody");
+  const input = activeScreenEl.querySelector(".friendSearchInput");
+  const body = activeScreenEl.querySelector(".friendsBody");
   let searchTimer = null;
 
   input.addEventListener("input", () => {
@@ -9893,6 +10222,8 @@ async function openAddFriend() {
 // ── Profile Tab ──────────────────────────────────
 
 let _profileData = null; // cached from Supabase
+let _profileDataVersion = 0; // bumped on save — used to skip redundant DOM rewrites
+let _profileRenderedVersion = -1; // version last written to DOM
 
 async function loadProfileData() {
   try {
@@ -9915,6 +10246,11 @@ async function loadProfileData() {
 }
 
 function renderProfile() {
+  // Skip everything if profile is already displayed with current data
+  if (_profileData && _profileRenderedVersion === _profileDataVersion && activeScreenEl.querySelector(".profHero")) {
+    return;
+  }
+
   setHeader("Profile");
 
   const appEl = document.querySelector(".app");
@@ -9922,7 +10258,13 @@ function renderProfile() {
   const h1 = appEl?.querySelector(".titleblock h1");
   if (h1) h1.style.opacity = "0";
 
-  // Show loading, then fetch
+  // Use cached data if available — render immediately, no spinner
+  if (_profileData) {
+    renderProfileContent(_profileData);
+    return;
+  }
+
+  // First load: show spinner, fetch from Supabase
   activeScreenEl.innerHTML = `
     <div class="profileWrap">
       <div class="collabSpinner" style="margin:80px auto 0"></div>
@@ -9930,11 +10272,13 @@ function renderProfile() {
   `;
 
   loadProfileData().then(profile => {
+    _profileDataVersion++;
     renderProfileContent(profile || {});
   });
 }
 
 function renderProfileContent(profile) {
+  _profileRenderedVersion = _profileDataVersion;
   const displayName = profile.display_name || state.settings?.displayName || "RiffBanker";
   const avatarSrc = state.settings?.profileAvatarUrl || profile.avatar_url || null;
   const initial = (displayName || "?").charAt(0).toUpperCase();
@@ -10169,16 +10513,32 @@ function openProfileEdit(profile) {
     };
 
     try {
-      if (profile.uid) {
+      if (!profile.uid) {
+      } else {
         // Upload new avatar or save preset
         if (newAvatarFile) {
           const ext = newAvatarFile.name?.split(".").pop() || "jpg";
           const path = `${profile.uid}/avatar.${ext}`;
-          await supabase.storage.from("covers").upload(path, newAvatarFile, { upsert: true, contentType: newAvatarFile.type || "image/jpeg" });
-          const { data: urlData } = supabase.storage.from("covers").getPublicUrl(path);
-          if (urlData?.publicUrl) {
-            data.avatar_url = urlData.publicUrl;
-            state.settings.profileAvatarUrl = urlData.publicUrl;
+          const { error: uploadErr } = await supabase.storage.from("covers").upload(path, newAvatarFile, { upsert: true, contentType: newAvatarFile.type || "image/jpeg" });
+          if (uploadErr) {
+            toast("Avatar upload failed — try again");
+            saveBtn.textContent = "Save";
+            saveBtn.disabled = false;
+            return;
+          }
+          // Use signed URL (1 year) — public URL returns 400 if bucket isn't public
+          const { data: signedData, error: signErr } = await supabase.storage.from("covers").createSignedUrl(path, 60 * 60 * 24 * 365);
+          if (signErr || !signedData?.signedUrl) {
+            // Fallback to public URL
+            const { data: urlData } = supabase.storage.from("covers").getPublicUrl(path);
+            if (urlData?.publicUrl) {
+              const freshUrl = urlData.publicUrl.split("?")[0] + "?t=" + Date.now();
+              data.avatar_url = freshUrl;
+              state.settings.profileAvatarUrl = freshUrl;
+            }
+          } else {
+            data.avatar_url = signedData.signedUrl;
+            state.settings.profileAvatarUrl = signedData.signedUrl;
           }
         } else if (newAvatarPreset) {
           data.avatar_url = `preset:${newAvatarPreset.id}`;
@@ -10190,7 +10550,9 @@ function openProfileEdit(profile) {
       state.settings.displayName = data.display_name;
       saveState();
       syncProfileNavIcon();
-      _profileData = null;
+      // Update cache in-place so renderProfile() uses it immediately (no spinner/re-fetch)
+      _profileData = { ..._profileData, ...data, email: _profileData?.email || "", uid: profile.uid };
+      _profileDataVersion++; // bump so renderProfile() knows to re-render DOM
 
       el.classList.remove("open");
       setTimeout(() => { el.remove(); renderProfile(); }, 300);
@@ -10252,6 +10614,43 @@ function openCollabSharePicker() {
   });
 
   $("#sharePickerCancel")?.addEventListener("click", closeSheet);
+}
+
+function renderAlerts() {
+  setHeader("Alerts");
+
+  const statusIcon = (s) => {
+    if (s === "done") return `<span style="color:#22c55e">&#10003;</span>`;
+    if (s === "failed") return `<span style="color:#f43f5e">&#10007;</span>`;
+    return `<span class="alertSpinner"></span>`;
+  };
+
+  const timeAgo = (ts) => {
+    const s = Math.floor((Date.now() - ts) / 1000);
+    if (s < 60) return "just now";
+    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+    return `${Math.floor(s / 86400)}d ago`;
+  };
+
+  const items = activityLog.length
+    ? activityLog.map(a => `
+      <div class="alertRow">
+        <div class="alertIcon">${statusIcon(a.status)}</div>
+        <div class="alertBody">
+          <div class="alertTitle">${escapeHtml(a.songTitle)}</div>
+          <div class="alertMsg">${escapeHtml(a.message)}</div>
+        </div>
+        <div class="alertTime">${timeAgo(a.ts)}</div>
+      </div>
+    `).join("")
+    : `<div style="padding:40px 20px;text-align:center;color:#666">No activity yet</div>`;
+
+  activeScreenEl.innerHTML = `
+    <div style="padding:16px">
+      ${items}
+    </div>
+  `;
 }
 
 function renderGlobalSearch() {

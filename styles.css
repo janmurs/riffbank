@@ -54,6 +54,14 @@
 .vt-jumpHome::view-transition-old(root){ animation-name: vt-queen-right; }
 .vt-jumpHome::view-transition-new(root){ animation-name: none; }
 
+/* Bottom nav + mini player stay stationary during all transitions */
+::view-transition-old(bottom-nav),
+::view-transition-new(bottom-nav),
+::view-transition-old(mini-player),
+::view-transition-new(mini-player){
+  animation: none;
+}
+
 @keyframes vt-ace-left      { to   { transform: translateX(-30px); } }
 @keyframes vt-queen-from-right { from { transform: translateX(100%); } }
 @keyframes vt-queen-right   { to   { transform: translateX(100%); } }
@@ -370,6 +378,9 @@ textarea{ min-height:100px; resize:vertical; }
   align-items: flex-start;
   justify-content: space-around;
   z-index: 550; /* above transition overlays (z:500) so nav is always visible */
+
+  /* Exclude from View Transition root group — stays stationary during nav slides */
+  view-transition-name: bottom-nav;
 }
 
 .navBtn{
@@ -824,6 +835,9 @@ textarea{ min-height:100px; resize:vertical; }
   opacity: 0;
   pointer-events: none;
   transition: transform .18s ease, opacity .18s ease;
+
+  /* Exclude from View Transition root group — stays stationary during nav slides */
+  view-transition-name: mini-player;
 }
 
 .miniPlayer.hidden{ display:none; }
@@ -1476,6 +1490,16 @@ textarea{ min-height:100px; resize:vertical; }
 /* =========================
    Global Search overlay
    ========================= */
+/* ── Alerts ── */
+.alertRow{display:flex;align-items:flex-start;gap:10px;padding:12px 0;border-bottom:1px solid rgba(255,255,255,.06)}
+.alertIcon{flex-shrink:0;width:24px;text-align:center;font-size:16px;padding-top:1px}
+.alertBody{flex:1;min-width:0}
+.alertTitle{font-size:14px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.alertMsg{font-size:12px;color:#999;margin-top:2px}
+.alertTime{flex-shrink:0;font-size:11px;color:#555;padding-top:2px}
+@keyframes alertSpin{to{transform:rotate(360deg)}}
+.alertSpinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.15);border-top-color:#60a5fa;border-radius:50%;animation:alertSpin .8s linear infinite}
+
 .gsWrap{
   display: flex;
   flex-direction: column;
@@ -6113,7 +6137,6 @@ body {
   z-index: 1;
   opacity: 0;
   pointer-events: none;
-  transition: opacity .25s ease;
 }
 .collabShell.sidebarOpen .collabSidebar {
   opacity: 1;
@@ -6122,7 +6145,6 @@ body {
 .collabMain {
   position: relative;
   width: 100%; height: 100%;
-  transition: transform .3s cubic-bezier(.4,0,.2,1);
   overflow-y: auto;
   z-index: 2;
   background: var(--bg);
