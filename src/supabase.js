@@ -170,37 +170,8 @@ export async function supabasePushState(state) {
       if (error) { console.warn("[Supabase] versions upsert:", error); return false; }
     }
 
-    // 4. Cleanup: remove songs/versions deleted locally
-    const localSongIds = songs.map(s => s.id);
-
-    // Fetch ALL user projects (not just those in projectMap) to catch orphaned songs
-    const { data: allUserProjects } = await supabase
-      .from("projects").select("id").eq("owner_id", userId);
-    const allUserProjectIds = (allUserProjects || []).map(p => p.id);
-
-    if (allUserProjectIds.length) {
-      const { data: dbSongs } = await supabase
-        .from("songs")
-        .select("id")
-        .in("project_id", allUserProjectIds);
-      const toDelete = (dbSongs || []).map(s => s.id).filter(id => !localSongIds.includes(id));
-      if (toDelete.length) {
-        await supabase.from("versions").delete().in("song_id", toDelete);
-        await supabase.from("songs").delete().in("id", toDelete);
-      }
-    }
-
-    const localVersionIds = versionRows.map(v => v.id);
-    if (localSongIds.length) {
-      const { data: dbVersions } = await supabase
-        .from("versions")
-        .select("id")
-        .in("song_id", localSongIds);
-      const toDeleteV = (dbVersions || []).map(v => v.id).filter(id => !localVersionIds.includes(id));
-      if (toDeleteV.length) {
-        await supabase.from("versions").delete().in("id", toDeleteV);
-      }
-    }
+    // NOTE: No cleanup/delete logic here. Server is source of truth.
+    // Deletions happen explicitly via deleteSongEverywhere().
 
     return true;
   } catch (e) {
@@ -300,12 +271,12 @@ export async function supabaseCountUserSongs() {
 
 // ── Audio storage ─────────────────────────────────────
 
-export async function supabaseUploadAudio({ blob, songId, versionId, fileName }) {
+export async function supabaseUploadAudio({ blob, songId, versionId }) {
   const userId = await getUserId();
   if (!userId) return { success: false, error: "Not authenticated" };
 
-  const safeName = (fileName || "audio").replace(/[^a-zA-Z0-9._-]/g, "_");
-  const path = `${userId}/${songId}/${versionId}/${safeName}`;
+  // Always use "audio" as filename — prevents duplicate blobs from varying filenames
+  const path = `${userId}/${songId}/${versionId}/audio`;
 
   const { error } = await supabase.storage
     .from("audio")
@@ -970,4 +941,76 @@ export async function getPendingFriendCount() {
 
   if (error) return 0;
   return count || 0;
+}
+
+// Get shared songs between current user and a specific friend
+// Returns { sharedWithMe: [...], myShared: [...] }
+export async function getSharedSongsBetween(friendUserId) {
+  const userId = await getUserId();
+  if (!userId || !friendUserId) return { sharedWithMe: [], myShared: [] };
+
+  // Songs friend shared with me, and songs I shared with friend
+  const [{ data: theirShares }, { data: myShares }] = await Promise.all([
+    supabase.from("song_shares").select("song_id, role").eq("user_id", userId).eq("invited_by", friendUserId),
+    supabase.from("song_shares").select("song_id, role").eq("user_id", friendUserId).eq("invited_by", userId),
+  ]);
+
+  const allSongIds = [
+    ...new Set([
+      ...((theirShares || []).map(s => s.song_id)),
+      ...((myShares || []).map(s => s.song_id)),
+    ])
+  ];
+
+  if (!allSongIds.length) return { sharedWithMe: [], myShared: [] };
+
+  const { data: dbSongs } = await supabase
+    .from("songs")
+    .select("*, versions(*), project_id")
+    .in("id", allSongIds);
+
+  if (!dbSongs?.length) return { sharedWithMe: [], myShared: [] };
+
+  const projectIds = [...new Set(dbSongs.map(s => s.project_id).filter(Boolean))];
+  const projMap = {};
+  if (projectIds.length) {
+    const { data: projects } = await supabase.from("projects").select("id, name").in("id", projectIds);
+    for (const p of (projects || [])) projMap[p.id] = p.name;
+  }
+
+  const songMap = {};
+  for (const s of dbSongs) songMap[s.id] = s;
+
+  function mapSong(s) {
+    return {
+      id: s.id,
+      title: s.title || "",
+      project: projMap[s.project_id] || "",
+      genre: s.genre || "",
+      coverPath: s.cover_path || null,
+      coverImageUrl: null,
+      coverSource: s.cover_source || "ai",
+      createdAt: s.created_at,
+      versions: (s.versions || []).map(v => ({
+        id: v.id,
+        label: v.label || "",
+        notes: v.notes || "",
+        link: v.link || "",
+        audioPath: v.audio_path || null,
+        isActive: !!v.is_active,
+        favorite: !!v.favorite,
+        createdAt: v.created_at,
+      })),
+    };
+  }
+
+  const sharedWithMe = (theirShares || [])
+    .map(sh => songMap[sh.song_id] ? mapSong(songMap[sh.song_id]) : null)
+    .filter(Boolean);
+
+  const myShared = (myShares || [])
+    .map(sh => songMap[sh.song_id] ? mapSong(songMap[sh.song_id]) : null)
+    .filter(Boolean);
+
+  return { sharedWithMe, myShared };
 }

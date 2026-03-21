@@ -134,7 +134,13 @@ function serveStatic(pathname, res) {
   try {
     const data = fs.readFileSync(filePath);
     const ext = path.extname(filePath);
-    res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream" });
+    const isSW = rel === "/sw.js";
+    res.writeHead(200, {
+      "Content-Type": MIME[ext] || "application/octet-stream",
+      // SW must never be HTTP-cached so the browser always checks for updates.
+      // All other dev assets: short cache so changes appear on reload.
+      "Cache-Control": isSW ? "no-cache, no-store, must-revalidate" : "no-cache",
+    });
     res.end(data);
   } catch {
     // SPA fallback — serve index.html for unknown paths

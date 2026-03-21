@@ -2793,10 +2793,12 @@ body.splashing .app{
 }
 
 .songTitleRow{
+  flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
+  overflow: hidden;
 }
 
 .songTitle{
@@ -2804,6 +2806,7 @@ body.splashing .app{
   font-size: 15px;
   letter-spacing: -0.1px;
   line-height: 1.2;
+  min-height: 18px;            /* prevent zero-height collapse in WebKit sticky contexts */
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3302,6 +3305,9 @@ body.splashing .app{
 /* --- FULLSCREEN LAYOUT + NO "BLANK BOTTOM" --- */
 
 /* Spotify-ish background layer that always fills the whole screen */
+/* body::before gradient disabled — position:fixed pseudo on body
+   breaks iOS safe-area rendering (no full-bleed, sticky, elastic) */
+/*
 body::before{
   content:"";
   position: fixed;
@@ -3314,6 +3320,7 @@ body::before{
     linear-gradient(180deg, rgba(255,255,255,.06), transparent 30%),
     var(--bg);
 }
+*/
 
 /* Keep inner content containers transparent so the screen background shows through. */
 .page, .panel, .content {
@@ -4707,6 +4714,10 @@ body {
    Project Detail – Spotify Artist Style
    ========================= */
 
+/* Hide global particles canvas during project/song detail to avoid iOS layout interference */
+.app.pdActive #globalParticles{
+  display: none;
+}
 /* ── Transparent topbar for project detail ── */
 .app.pdActive .topbar{
   position: absolute;
@@ -4733,6 +4744,7 @@ body {
 .app.pdActive .screen{
   padding-top: 0;
   padding-bottom: 0 !important;
+  overscroll-behavior-y: none;
 }
 /* When hero scrolled away, show solid topbar */
 .app.pdScrolled .topbar{
@@ -4908,11 +4920,6 @@ body {
   overflow-y: scroll;
   -webkit-overflow-scrolling: touch;
   min-height: 0;
-}
-/* Ensure inner content always overflows pdTabBody so iOS elastic bounce works */
-.pdTabBody > *{
-  min-height: calc(100% + 1px);
-  box-sizing: border-box;
 }
 
 /* ── Song list rows ── */
@@ -5338,6 +5345,22 @@ body {
 .psUsernameStatus.taken { color: #f87171; }
 .psUsernameStatus.existing { color: #fbbf24; }
 
+/* Duplicate name validation status (create forms) */
+.coDupeStatus {
+  font-size: 12px;
+  font-weight: 600;
+  min-height: 0;
+  padding-left: 2px;
+  margin-top: 4px;
+  transition: color .2s;
+  color: transparent;
+}
+.coDupeStatus.taken { color: #f87171; min-height: 18px; }
+.coCreateBtn:disabled, .sheetBtn.primary:disabled {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
 /* Submit button — matches authSubmitBtn */
 .profileSetupBtn {
   width: 100%;
@@ -5376,6 +5399,55 @@ body {
   transition: color .2s;
 }
 .profileSetupSkip:active { color: rgba(255,255,255,.55); }
+
+/* ── Sync Splash ─────────────────────────────────── */
+
+.syncSplash {
+  position: fixed; inset: 0;
+  z-index: 99998;
+  background: var(--bg);
+  display: flex; align-items: center; justify-content: center;
+  animation: syncSplashIn .4s ease both;
+}
+.syncSplashInner {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 18px;
+  text-align: center;
+}
+.syncSplashSal {
+  margin-bottom: 4px;
+}
+.syncSplashTitle {
+  font-family: 'Montserrat', sans-serif;
+  font-size: 34px;
+  font-weight: 900;
+  letter-spacing: -1.5px;
+  color: #fff;
+}
+.syncSplashSub {
+  display: flex; align-items: center; justify-content: center; gap: 2px;
+}
+.syncSplashText {
+  font-family: 'Montserrat', sans-serif;
+  font-size: 14px;
+  font-weight: 500;
+  color: rgba(255,255,255,.45);
+  letter-spacing: 0.3px;
+}
+.syncSplash .splashEllipsis {
+  display: inline-flex;
+}
+.syncSplashOut {
+  animation: syncSplashFade .4s ease both;
+}
+@keyframes syncSplashIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes syncSplashFade {
+  from { opacity: 1; }
+  to { opacity: 0; pointer-events: none; }
+}
 
 /* ── Sal Import Flow ──────────────────────────────── */
 
@@ -5588,51 +5660,6 @@ body {
   0%, 100% { transform: scale(1) rotate(0deg); }
   30% { transform: scale(0.85) rotate(-8deg); }
   60% { transform: scale(1.05) rotate(4deg); }
-}
-
-/* ── Sal nudge (home screen) ──────────────────────── */
-.salNudge {
-  position: fixed;
-  bottom: calc(80px + env(safe-area-inset-bottom, 0px));
-  right: 12px; left: 12px;
-  z-index: 50;
-  pointer-events: auto;
-}
-.salNudgeBubble {
-  position: relative;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 16px;
-  padding: 14px 16px;
-  font-family: 'Montserrat', sans-serif;
-  font-size: 13px; font-weight: 500;
-  color: rgba(255,255,255,.7);
-  line-height: 1.5;
-  cursor: pointer;
-  box-shadow: 0 8px 32px rgba(0,0,0,.4);
-}
-.salNudgeClose {
-  position: absolute; top: 6px; right: 10px;
-  background: none; border: none;
-  color: var(--muted); font-size: 20px;
-  cursor: pointer; line-height: 1;
-  padding: 4px;
-}
-.salNudgeClose:active { color: var(--text); }
-
-.salNudgeIn {
-  animation: salNudgeSlideIn .4s ease both;
-}
-@keyframes salNudgeSlideIn {
-  from { opacity: 0; transform: translateY(20px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-.salNudgeOut {
-  animation: salNudgeSlideOut .3s ease both;
-}
-@keyframes salNudgeSlideOut {
-  from { opacity: 1; transform: translateY(0); }
-  to { opacity: 0; transform: translateY(20px); }
 }
 
 /* ── Profile Tab ──────────────────────────────────── */
@@ -5922,10 +5949,13 @@ body {
 
 /* ── Collab Tab ──────────────────────────────────── */
 .collabWrap {
-  padding: 16px 16px 120px;
+  padding: 6px 0 120px;
   display: flex; flex-direction: column; gap: 28px;
 }
-.collabSection { display: flex; flex-direction: column; gap: 12px; }
+.collabWrap .playerHead {
+  padding: 0;
+}
+.collabSection { display: flex; flex-direction: column; gap: 12px; padding: 0 2px; }
 .collabSectionTitle {
   font-family: 'Montserrat', sans-serif;
   font-weight: 800; font-size: 18px;
@@ -6129,11 +6159,33 @@ body {
   line-height: 1;
 }
 
+/* ── Bottom-nav notification badge ────────────── */
+.navBadge {
+  position: absolute;
+  top: -2px; right: -6px;
+  min-width: 16px; height: 16px;
+  background: #ef4444;
+  border-radius: 999px;
+  font-size: 9px; font-weight: 800;
+  color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0 4px;
+  line-height: 1;
+  pointer-events: none;
+}
+.navIcon { position: relative; }
+
+/* ── Header back-button badge (collab notifications) ── */
+.headerBackBadge {
+  top: 4px; right: 0;
+}
+
 /* ── Friends Full-Screen Views ──────────────────── */
 .friendsOverlay {
   position: fixed;
-  inset: 0;
-  z-index: 9998;
+  top: 0; left: 0; right: 0;
+  bottom: var(--dock-h, var(--bottom-nav-height));
+  z-index: 500;
   background: var(--bg);
   display: flex; flex-direction: column;
   transform: translateX(100%);
@@ -6269,6 +6321,57 @@ body {
   padding: 4px 8px;
 }
 .friendRemoveBtn:active { color: #ef4444; }
+
+.friendRowClickable { cursor: pointer; }
+.friendRowClickable:active { background: rgba(255,255,255,.04); }
+
+/* ── Friend Profile View ──────────────────────────── */
+.friendProfileOverlay { background: var(--bg); }
+.fpScreen {
+  height: 100%; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  display: flex; flex-direction: column;
+}
+.fpHero { position: relative; min-height: 320px; }
+.fpHeroBg {
+  position: absolute; inset: 0; overflow: hidden;
+}
+.fpHeroBg img.fpHeroImg {
+  width: 100%; height: 100%; object-fit: cover;
+  filter: blur(0px) brightness(.7);
+}
+.fpHeroFallback {
+  width: 100%; height: 100%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 96px; font-weight: 800; color: rgba(255,255,255,.15);
+  background: linear-gradient(135deg, #7c3aed 0%, #a855f7 50%, #ec4899 100%);
+}
+.fpBackBtn {
+  position: absolute; top: env(safe-area-inset-top, 12px); left: 8px;
+  z-index: 2; background: none; border: none; color: #fff;
+  padding: 12px; cursor: pointer;
+  filter: drop-shadow(0 1px 3px rgba(0,0,0,.5));
+}
+.fpSticky { flex: 1 1 auto; min-height: 0; }
+.fpLoading {
+  display: flex; justify-content: center; padding: 48px 0;
+}
+.fpSongRow { cursor: pointer; }
+.fpSongRow:active { background: rgba(255,255,255,.04); }
+.fpSongThumb { width: 44px; height: 44px; border-radius: 6px; overflow: hidden; flex-shrink: 0; }
+.fpSongThumb svg { width: 100%; height: 100%; }
+.fpHeroPreset { padding: 0; background: none; }
+.fpHeroPreset svg { width: 100%; height: 100%; }
+.fpAddFriendBtn {
+  display: inline-block;
+  background: rgba(168,85,247,.25); color: #c084fc;
+  border: 1px solid rgba(168,85,247,.4);
+  border-radius: 20px; padding: 4px 14px;
+  font-family: 'Montserrat', sans-serif; font-weight: 700; font-size: 12px;
+  cursor: pointer; vertical-align: middle;
+  transition: background .15s, color .15s;
+}
+.fpAddFriendBtn:active { background: rgba(168,85,247,.4); }
+.fpAddFriendBtn:disabled { opacity: .6; cursor: default; }
 
 /* ── Invite Share Screen (Venmo-style) ──────────── */
 .inviteShareScreen {

@@ -6631,12 +6631,18 @@ function openAvatarCrop(file) {
 async function showProfileSetupIfNeeded() {
   if (localStorage.getItem("profileSetupDone")) return;
 
-  // Always show setup if localStorage flag was cleared (e.g. testing reset)
-  // Even if profile exists in DB, let the user re-fill it
   try {
     const { data: userData } = await supabase.auth.getUser();
     const uid = userData?.user?.id;
     if (!uid) return;
+
+    // Check if profile already exists in DB — skip setup if so
+    const { data: existing } = await supabase
+      .from("profiles").select("id, display_name").eq("id", uid).maybeSingle();
+    if (existing?.display_name) {
+      localStorage.setItem("profileSetupDone", "1");
+      return;
+    }
   } catch {
     // profiles table may not exist yet — skip gracefully
     return;
@@ -11912,6 +11918,7 @@ function renderSongDetail(id) {
 
   // Reset scroll AFTER innerHTML so the hero is visible on load
   activeScreenEl.scrollTop = 0;
+
 
   /* ── Tab switching ── */
   const tabBody = $("#pdTabBody");
