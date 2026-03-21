@@ -632,6 +632,7 @@ export async function pullSharedSongs() {
         })),
       },
       role: share.role,
+      ownerId: share.invited_by || (proj ? proj.owner_id : null),
       ownerName: proj ? (profileMap[proj.owner_id] || "Someone") : "Someone",
     };
   });
@@ -893,7 +894,7 @@ export async function getMyFriends() {
   const friendIds = data.map(f => f.requester_id === userId ? f.recipient_id : f.requester_id);
   const { data: profiles } = await supabase
     .from("profiles")
-    .select("id, display_name, avatar_url, location, instrument, genre")
+    .select("id, first_name, last_name, display_name, avatar_url, location, instrument, genre")
     .in("id", friendIds);
 
   const profileMap = Object.fromEntries((profiles || []).map(p => [p.id, p]));
@@ -1013,4 +1014,103 @@ export async function getSharedSongsBetween(friendUserId) {
     .filter(Boolean);
 
   return { sharedWithMe, myShared };
+}
+
+// ── Direct Messages ──────────────────────────────
+
+// Send a message to a user
+export async function sendMessage(recipientId, body) {
+  const userId = await getUserId();
+  if (!userId || !recipientId || !body?.trim()) return null;
+  const { data, error } = await supabase
+    .from("messages")
+    .insert({ sender_id: userId, recipient_id: recipientId, body: body.trim() })
+    .select()
+    .single();
+  if (error) { console.warn("[Supabase] sendMessage:", error); return null; }
+  return data;
+}
+
+// Get messages between current user and another user (most recent first, paginated)
+export async function getMessages(otherUserId, { limit = 50, before = null } = {}) {
+  const userId = await getUserId();
+  if (!userId || !otherUserId) return [];
+  let query = supabase
+    .from("messages")
+    .select("id, sender_id, recipient_id, body, created_at, read_at")
+    .or(`and(sender_id.eq.${userId},recipient_id.eq.${otherUserId}),and(sender_id.eq.${otherUserId},recipient_id.eq.${userId})`)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (before) query = query.lt("created_at", before);
+  const { data, error } = await query;
+  if (error) { console.warn("[Supabase] getMessages:", error); return []; }
+  return (data || []).reverse(); // oldest first for display
+}
+
+// Get conversation list — latest message per unique user
+export async function getConversations() {
+  const userId = await getUserId();
+  if (!userId) return [];
+
+  // Get all messages involving current user, ordered by newest first
+  const { data, error } = await supabase
+    .from("messages")
+    .select("id, sender_id, recipient_id, body, created_at, read_at")
+    .or(`sender_id.eq.${userId},recipient_id.eq.${userId}`)
+    .order("created_at", { ascending: false })
+    .limit(200);
+
+  if (error || !data?.length) return [];
+
+  // Deduplicate: keep only the latest message per conversation partner
+  const seen = new Map();
+  for (const msg of data) {
+    const partnerId = msg.sender_id === userId ? msg.recipient_id : msg.sender_id;
+    if (!seen.has(partnerId)) {
+      seen.set(partnerId, { ...msg, partnerId, isFromMe: msg.sender_id === userId });
+    }
+  }
+
+  // Count unread per partner
+  const convos = [...seen.values()];
+  for (const c of convos) {
+    c.unreadCount = data.filter(m => m.sender_id === c.partnerId && m.recipient_id === userId && !m.read_at).length;
+  }
+
+  // Fetch partner profiles
+  const partnerIds = convos.map(c => c.partnerId);
+  if (!partnerIds.length) return [];
+  const { data: profiles } = await supabase
+    .from("profiles")
+    .select("id, first_name, last_name, display_name, avatar_url")
+    .in("id", partnerIds);
+  const profileMap = Object.fromEntries((profiles || []).map(p => [p.id, p]));
+  for (const c of convos) c.profile = profileMap[c.partnerId] || null;
+
+  return convos;
+}
+
+// Mark messages from a sender as read
+export async function markMessagesRead(senderId) {
+  const userId = await getUserId();
+  if (!userId || !senderId) return;
+  await supabase
+    .from("messages")
+    .update({ read_at: new Date().toISOString() })
+    .eq("sender_id", senderId)
+    .eq("recipient_id", userId)
+    .is("read_at", null);
+}
+
+// Get total unread message count (for badge)
+export async function getUnreadMessageCount() {
+  const userId = await getUserId();
+  if (!userId) return 0;
+  const { count, error } = await supabase
+    .from("messages")
+    .select("id", { count: "exact", head: true })
+    .eq("recipient_id", userId)
+    .is("read_at", null);
+  if (error) return 0;
+  return count || 0;
 }

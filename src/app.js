@@ -76,6 +76,7 @@ import {
   removeProjectMember, upsertProfile, searchUsers, shareWithUser,
   sendFriendRequest, acceptFriendRequest, removeFriendship,
   getMyFriends, getPendingFriendRequests, getPendingFriendCount,
+  sendMessage, getMessages, getConversations, markMessagesRead, getUnreadMessageCount,
 } from "./supabase.js";
 
 const LS_KEY = "riffbank_v1";
@@ -996,7 +997,7 @@ function setActiveScreen(name) {
 function navigateForward(mutateFn) {
   const captured = {
     currentTab, drawerView, projectDetailScreen, releaseDetailId,
-    selectedSongId, selectedVersionId, songsView, overlayView,
+    selectedSongId, selectedVersionId, songsView, overlayView, friendProfileId,
     songsBackTarget, lyricsEditSongId, collabMode, headerTitle: headerTitle?.textContent ?? "RiffBank"
   };
   nav.captureState(captured);
@@ -2926,6 +2927,7 @@ let drawerView = null;
 let songsBackTarget = null; // e.g. "projects" | "collabs"
 let drawerOpen = false;
 let overlayView = null;
+let friendProfileId = null; // user ID for public profile view
 let collabMode = false; // true when drilling into shared content from Collab tab
 
 // ---------------------
@@ -2964,11 +2966,14 @@ function setHeader(t) {
 }
 
 // Show/hide the back button based on whether we're on a nested screen
-const ROOT_TABS = new Set(["home", "player", "collab"]);
+const ROOT_TABS = new Set(["home", "player"]);
 function syncBackButton() {
   if (!headerBackEl) return;
   // Profile is always root — never show back button
   if (currentTab === "profile") { headerBackEl.style.display = "none"; return; }
+  // Collab root uses its own inline back/menu button (slides with content)
+  const onCollabRoot = currentTab === "collab" && !overlayView && !selectedSongId && !projectDetailScreen && !drawerView;
+  if (onCollabRoot) { headerBackEl.style.display = "none"; return; }
   const onRoot =
     ROOT_TABS.has(currentTab) &&
     !drawerView &&
@@ -3268,6 +3273,96 @@ function syncProfileNavIcon() {
   // else keep the default SVG from HTML
 }
 
+// Unread message badge — updates Collab nav icon + Messages sidebar button
+let _unreadMsgCount = 0;
+let _prevUnreadMsgCount = 0;
+
+// Request notification permission (called once on first message interaction)
+let _notifPermissionAsked = false;
+async function requestNotificationPermission() {
+  if (_notifPermissionAsked) return;
+  _notifPermissionAsked = true;
+  if (!("Notification" in window)) return;
+  if (Notification.permission === "default") {
+    await Notification.requestPermission();
+  }
+}
+
+// Show a local push notification for new messages
+function _showMessageNotification(newCount) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  if (document.visibilityState === "visible" && overlayView === "chat") return; // user is in chat
+  const count = newCount - _prevUnreadMsgCount;
+  if (count <= 0) return;
+
+  const reg = navigator.serviceWorker?.controller ? navigator.serviceWorker.ready : null;
+  if (reg) {
+    reg.then(r => {
+      r.showNotification("RiffBank", {
+        body: count === 1 ? "You have a new message" : `You have ${count} new messages`,
+        icon: "/icon-1024.png",
+        badge: "/icon-1024.png",
+        tag: "riffbank-new-message",
+        renotify: true,
+        data: { url: "/" },
+      });
+    }).catch(() => {});
+  }
+}
+
+// Update PWA app badge (home screen icon badge)
+function _updateAppBadge(count) {
+  if ("setAppBadge" in navigator) {
+    if (count > 0) navigator.setAppBadge(count).catch(() => {});
+    else navigator.clearAppBadge().catch(() => {});
+  }
+}
+
+function syncMessageBadges() {
+  Promise.all([
+    getUnreadMessageCount().catch(() => 0),
+    getPendingFriendCount().catch(() => 0),
+  ]).then(([msgCount, friendCount]) => {
+    // Show notification if new messages arrived since last check
+    if (msgCount > _unreadMsgCount) {
+      _showMessageNotification(msgCount);
+    }
+    _prevUnreadMsgCount = _unreadMsgCount;
+    _unreadMsgCount = msgCount;
+    _pendingFriendCount = friendCount;
+    _applyAllBadges(msgCount, friendCount);
+  });
+}
+
+function _applyAllBadges(msgCount, friendCount) {
+  const total = (msgCount || 0) + (friendCount || 0);
+  // Collab tab nav badge
+  const navBadge = document.getElementById("collabNavBadge");
+  if (navBadge) { navBadge.textContent = total || ""; navBadge.style.display = total ? "flex" : "none"; }
+  // Inline back button badge (slides with content)
+  const inlineBadge = document.querySelector(".collabInlineBadge");
+  if (inlineBadge) { inlineBadge.textContent = total || ""; inlineBadge.style.display = total ? "flex" : "none"; }
+  // Header back button badge (hidden on Collab root, used on sub-screens)
+  const backBadge = document.getElementById("headerBackBadge");
+  if (backBadge) { backBadge.style.display = "none"; }
+  // Messages sidebar badge
+  const msgBadge = document.querySelector(".msgBadge");
+  if (msgBadge) { msgBadge.textContent = msgCount || ""; msgBadge.style.display = msgCount ? "flex" : "none"; }
+  // Friends sidebar badge
+  const fb = document.querySelector(".friendsBadge");
+  if (fb) { fb.textContent = friendCount || ""; fb.style.display = friendCount ? "flex" : "none"; }
+  // PWA home screen app badge
+  _updateAppBadge(total);
+}
+
+// Poll message badges every 10s
+setInterval(syncMessageBadges, 10000);
+
+// Also check when app comes back to foreground
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") syncMessageBadges();
+});
+
 function openSalSheet() {
   // Remove any existing Sal sheet
   document.getElementById("salSheetBackdrop")?.remove();
@@ -3509,6 +3604,7 @@ function goBack({ animate = false } = {}) {
       selectedVersionId = restoreState.selectedVersionId;
       songsView = restoreState.songsView;
       overlayView = restoreState.overlayView;
+      friendProfileId = restoreState.friendProfileId ?? null;
       songsBackTarget = restoreState.songsBackTarget;
       lyricsEditSongId = restoreState.lyricsEditSongId ?? null;
       collabMode = restoreState.collabMode ?? false;
@@ -5465,6 +5561,21 @@ function render() {
     if (!_isBack) activeScreenEl.scrollTop = 0;
     return renderAddFriend();
   }
+  if (overlayView === "friendProfile") {
+    setActiveScreen("collab");
+    if (!_isBack) activeScreenEl.scrollTop = 0;
+    return renderFriendProfile(friendProfileId);
+  }
+  if (overlayView === "messages") {
+    setActiveScreen("collab");
+    if (!_isBack) activeScreenEl.scrollTop = 0;
+    return renderMessages();
+  }
+  if (overlayView === "chat") {
+    setActiveScreen("collab");
+    if (!_isBack) activeScreenEl.scrollTop = 0;
+    return renderChat(friendProfileId);
+  }
 
   // Normal screens
   if (currentTab === "home") {
@@ -7321,6 +7432,9 @@ async function init() {
 
   // Pre-fetch shared data in background so Collab tab loads fast
   refreshSharedData().catch(console.warn);
+
+  // Sync unread message badges
+  syncMessageBadges();
 
   // Check for Web Share Target file
   checkSharedAudioFile();
@@ -9420,15 +9534,15 @@ let _pendingFriendCount = 0;
 
 function renderCollab() {
   setHeader("Collab");
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("collapseTitle");
+  const h1 = appEl?.querySelector(".titleblock h1");
+  if (h1) h1.style.opacity = "0";
   _collabSidebarOpen = false;
 
-  // Fetch pending friend count in background for badge
-  getPendingFriendCount().then(c => {
-    _pendingFriendCount = c;
-    const badge = activeScreenEl.querySelector(".friendsBadge");
-    if (badge) badge.textContent = c || "";
-    if (badge) badge.style.display = c ? "flex" : "none";
-  }).catch(() => {});
+  // Apply cached badge counts immediately (no lag), then refresh in background
+  _applyAllBadges(_unreadMsgCount, _pendingFriendCount);
+  syncMessageBadges();
 
   // Show loading state first, then fetch
   if (!sharedData.loaded) {
@@ -9437,6 +9551,8 @@ function renderCollab() {
         <div class="collabSidebar">${_collabSidebarHTML()}</div>
         <div class="collabMain">
           <div class="collabWrap">
+            ${_collabInlineBackHTML()}
+            <div class="songsPageTitle">Collab</div>
             <div class="collabEmpty" style="text-align:center; padding-top:60px;">
               <div class="collabSpinner"></div>
               <div style="margin-top:16px">Loading shared content...</div>
@@ -9446,6 +9562,7 @@ function renderCollab() {
       </div>
     `;
     _wireCollabSidebar();
+    _wireCollabInlineBack();
     refreshSharedData().then(() => renderCollabContent());
     return;
   }
@@ -9453,17 +9570,44 @@ function renderCollab() {
   renderCollabContent();
 }
 
+function _updateCollabBadges(friendCount, msgCount) {
+  _applyAllBadges(friendCount, msgCount);
+}
+
+function _collabInlineBackHTML() {
+  const total = (_unreadMsgCount || 0) + (_pendingFriendCount || 0);
+  const badgeDisplay = total ? "flex" : "none";
+  return `
+    <button class="collabInlineBack" id="collabInlineBack" aria-label="Menu">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="24" height="24"><polyline points="15 18 9 12 15 6"/></svg>
+      <span class="collabInlineBadge" style="display:${badgeDisplay}">${total || ""}</span>
+    </button>
+  `;
+}
+
+function _wireCollabInlineBack() {
+  $("#collabInlineBack")?.addEventListener("click", () => {
+    _finishSidebarSwipe(!_collabSidebarOpen);
+  });
+}
+
 function _collabSidebarHTML() {
-  const badgeDisplay = _pendingFriendCount ? "flex" : "none";
+  const friendBadgeDisplay = _pendingFriendCount ? "flex" : "none";
+  const msgBadgeDisplay = _unreadMsgCount ? "flex" : "none";
   return `
     <button class="collabSidebarBtn" data-sidebar="requests">
-      <span class="friendsBadge" style="display:${badgeDisplay}">${_pendingFriendCount || ""}</span>
+      <span class="friendsBadge" style="display:${friendBadgeDisplay}">${_pendingFriendCount || ""}</span>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>
       Requests
     </button>
     <button class="collabSidebarBtn" data-sidebar="friends">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
       Friends
+    </button>
+    <button class="collabSidebarBtn" data-sidebar="messages">
+      <span class="msgBadge" style="display:${msgBadgeDisplay}">${_unreadMsgCount || ""}</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+      Messages
     </button>
     <button class="collabSidebarBtn" data-sidebar="add">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -9619,6 +9763,7 @@ function _wireCollabSidebar() {
       // Navigate first — forward slide captures the ace with sidebar still visible
       if (action === "requests") openFriendsRequests();
       else if (action === "friends") openFriendsList();
+      else if (action === "messages") openMessages();
       else if (action === "add") openAddFriend();
       // Reset sidebar state AFTER capture so back-nav renders it closed
       _collabSidebarOpen = false;
@@ -9730,6 +9875,8 @@ function renderCollabContent() {
       <div class="collabSidebar">${_collabSidebarHTML()}</div>
       <div class="collabMain">
         <div class="collabWrap">
+          ${_collabInlineBackHTML()}
+          <div class="songsPageTitle">Collab</div>
           ${hasShared ? `
             <!-- Shared With Me -->
             <div class="collabSection">
@@ -9786,6 +9933,7 @@ function renderCollabContent() {
 
   // Wire sidebar swipe + buttons
   _wireCollabSidebar();
+  _wireCollabInlineBack();
 
   // Wire FAB → share picker
   $("#collabShareFab")?.addEventListener("click", () => {
@@ -10001,16 +10149,21 @@ function renderFriendsList() {
       body.innerHTML = `<div class="friendsEmpty">No friends yet. Swipe right on the Collab tab and tap <strong>Add</strong> to find people.</div>`;
       return;
     }
-    body.innerHTML = friends.map(f => `
-      <div class="friendRow" data-friend-id="${f.id}">
-        ${_friendAvatarHTML(f.profile)}
-        <div class="friendInfo">
-          <div class="friendName">${escapeHtml(f.profile?.display_name || "Unknown")}</div>
-          <div class="friendMeta">${_friendMetaText(f.profile)}</div>
+    body.innerHTML = friends.map(f => {
+      const name = f.profile?.display_name || "Unknown";
+      const fullName = [f.profile?.first_name, f.profile?.last_name].filter(Boolean).join(" ");
+      return `
+        <div class="friendRow" data-friend-id="${f.id}">
+          ${_friendAvatarHTML(f.profile)}
+          <div class="friendInfo">
+            <div class="friendName">${escapeHtml(name)}</div>
+            ${fullName ? `<div class="friendMeta">${escapeHtml(fullName)}</div>` : ""}
+          </div>
+          <button class="friendMsgBtn" data-msg="${f.friendId}" aria-label="Message">Message</button>
+          <button class="friendRemoveBtn" data-remove="${f.id}" aria-label="Remove friend">&times;</button>
         </div>
-        <button class="friendRemoveBtn" data-remove="${f.id}" aria-label="Remove friend">&times;</button>
-      </div>
-    `).join("");
+      `;
+    }).join("");
 
     body.querySelectorAll("[data-remove]").forEach(btn => {
       btn.addEventListener("click", async (e) => {
@@ -10026,9 +10179,523 @@ function renderFriendsList() {
         } catch (err) { toast(err.message || "Failed"); }
       });
     });
+
+    // Message button → open chat
+    body.querySelectorAll(".friendMsgBtn").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const uid = btn.getAttribute("data-msg");
+        if (uid) openChat(uid);
+      });
+    });
+
+    // Tap friend row → open public profile
+    body.querySelectorAll(".friendRow[data-friend-id]").forEach(row => {
+      row.addEventListener("click", () => {
+        const fId = row.getAttribute("data-friend-id");
+        const friend = friends.find(f => String(f.id) === fId);
+        if (!friend) return;
+        navigateForward(() => {
+          friendProfileId = friend.friendId;
+          overlayView = "friendProfile";
+        });
+      });
+    });
   }).catch(() => {
     const body = activeScreenEl.querySelector(".friendsBody");
     if (body) body.innerHTML = `<div class="friendsEmpty">Failed to load friends.</div>`;
+  });
+}
+
+// ── Public Profile View (friend/user profile) ──
+function renderFriendProfile(userId) {
+  if (!userId) return;
+  setHeader("Profile");
+  // Hide topbar title — the hero has its own large title (same as song detail)
+  const _tbH1 = document.querySelector(".topbar h1");
+  if (_tbH1) _tbH1.textContent = "";
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("pdActive");
+  appEl?.classList.remove("pdScrolled");
+
+  activeScreenEl.innerHTML = `
+    <div class="profileWrap">
+      <div class="collabSpinner" style="margin:80px auto 0"></div>
+    </div>
+  `;
+
+  // Fetch profile + shared data in parallel
+  Promise.all([
+    supabase.from("profiles").select("id, first_name, last_name, display_name, avatar_url, location, instrument, genre, bio").eq("id", userId).maybeSingle(),
+    _getSharedWithUser(userId),
+  ]).then(([{ data: profile }, shared]) => {
+    if (!profile) {
+      activeScreenEl.innerHTML = `<div class="profileWrap"><div class="friendsEmpty">Profile not found.</div></div>`;
+      return;
+    }
+    _renderFriendProfileContent(profile, shared);
+  }).catch(() => {
+    activeScreenEl.innerHTML = `<div class="profileWrap"><div class="friendsEmpty">Failed to load profile.</div></div>`;
+  });
+}
+
+// Gather songs shared between current user and this friend
+async function _getSharedWithUser(friendId) {
+  const { projects, songs, myProjects, mySongs } = sharedData;
+
+  // Songs they shared WITH me (from sharedData.songs and sharedData.projects)
+  const fromThem = [];
+  for (const sp of projects) {
+    if (sp.ownerId === friendId) {
+      for (const s of sp.songs) fromThem.push(s);
+    }
+  }
+  for (const ss of songs) {
+    if (ss.ownerId === friendId) fromThem.push(ss.song);
+  }
+
+  // Songs I shared WITH them (from sharedData.myProjects and sharedData.mySongs)
+  const fromMe = [];
+  for (const mp of myProjects) {
+    if (mp.recipientId === friendId) {
+      // Find matching songs from my own library
+      const matching = state.songs.filter(s => (s.project || "").trim() === mp.projectName);
+      fromMe.push(...matching);
+    }
+  }
+  for (const ms of mySongs) {
+    if (ms.recipientId === friendId) {
+      const s = state.songs.find(x => x.id === ms.songId);
+      if (s) fromMe.push(s);
+    }
+  }
+
+  return { fromThem, fromMe };
+}
+
+function _renderFriendProfileContent(profile, shared) {
+  // Match song detail screen setup: sticky topbar height, no padding, scrollable
+  const topbarEl = document.querySelector(".topbar");
+  const topbarH = topbarEl ? topbarEl.offsetHeight : 0;
+  activeScreenEl.style.setProperty("--pd-topbar-h", topbarH + "px");
+  activeScreenEl.style.paddingBottom = "0px";
+  activeScreenEl.style.overflowY = "scroll";
+
+  const displayName = profile.display_name || "RiffBanker";
+  const fullName = [profile.first_name, profile.last_name].filter(Boolean).join(" ");
+  const avatarSrc = profile.avatar_url || null;
+  const initial = (displayName || "?").charAt(0).toUpperCase();
+
+  const { fromThem, fromMe } = shared;
+  // Deduplicate
+  const seenIds = new Set();
+  const allSongs = [];
+  for (const s of [...fromThem, ...fromMe]) {
+    if (!seenIds.has(s.id)) { seenIds.add(s.id); allSongs.push(s); }
+  }
+  const fromThemCount = fromThem.length;
+  const fromMeCount = fromMe.length;
+  const totalCount = allSongs.length;
+
+  // Hero image — use avatar as full-bleed background
+  const heroImg = avatarSrc?.startsWith("http")
+    ? `<img src="${avatarSrc}" style="width:100%;height:100%;object-fit:cover;display:block" onerror="this.style.display='none'" />`
+    : `<div style="width:100%;height:100%;background:linear-gradient(135deg,#a78bfa,#f472b6)"></div>`;
+
+  // Song rows builder — matches song detail compact row style
+  const songRow = (s, i) => {
+    const art = coverSvg(s, { lite: true });
+    return `
+      <div class="pdSongRow" data-fp-song="${escapeHtml(s.id)}">
+        <span class="pdSongNum">${i + 1}</span>
+        <div class="songThumb" aria-hidden="true">${art}</div>
+        <div class="songMain">
+          <div class="songTop">
+            <div class="songTitleRow">
+              <div class="songTitle">${escapeHtml(s.title || "Untitled")}</div>
+            </div>
+          </div>
+          <div class="songSub">${escapeHtml(s.project || "No project")}</div>
+        </div>
+      </div>
+    `;
+  };
+
+  const sharedWithMeRows = fromThem.length
+    ? fromThem.map(songRow).join("")
+    : `<div class="small" style="padding:24px 0;text-align:center;opacity:.5">Nothing shared with you yet.</div>`;
+  const mySharedRows = fromMe.length
+    ? fromMe.map(songRow).join("")
+    : `<div class="small" style="padding:24px 0;text-align:center;opacity:.5">You haven't shared anything with ${escapeHtml(displayName)}.</div>`;
+  const allRows = allSongs.length
+    ? allSongs.map(songRow).join("")
+    : `<div class="small" style="padding:24px 0;text-align:center;opacity:.5">No songs shared between you.</div>`;
+
+  activeScreenEl.innerHTML = `
+    <div class="pdHero">
+      <div class="pdHeroBg" aria-hidden="true">${heroImg}</div>
+      <div class="pdHeroContent">
+        <div class="pdHeroTitle">${escapeHtml(displayName)}</div>
+        <div class="pdHeroMeta">${escapeHtml(fullName || "—")} · ${totalCount} shared song${totalCount !== 1 ? "s" : ""}</div>
+      </div>
+    </div>
+
+    <div class="pdActions">
+      <button class="pdPlayBtn" id="fpPlay" ${!allSongs.length ? "disabled" : ""}>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+      </button>
+      <button class="pdShuffleBtn" id="fpShuffle" ${!allSongs.length ? "disabled" : ""}>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+      </button>
+      <button class="pdMoreBtn" id="fpMore" aria-label="Options">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
+      </button>
+    </div>
+
+    <div class="pdSticky">
+      <div class="pdTabs">
+        <button class="pdTab pdTabActive" data-fp-tab="all">All</button>
+        <button class="pdTab" data-fp-tab="my-shared">My Shared</button>
+        <button class="pdTab" data-fp-tab="shared-with-me">Shared With Me</button>
+      </div>
+      <div class="pdTabBody" id="fpTabBody">
+        <div class="pdSongList">${allRows}</div>
+      </div>
+    </div>
+  `;
+
+  activeScreenEl.scrollTop = 0;
+
+  // Tab switching
+  const tabBody = $("#fpTabBody");
+  activeScreenEl.querySelectorAll(".pdTab").forEach(tab => {
+    tab.addEventListener("click", () => {
+      activeScreenEl.querySelectorAll(".pdTab").forEach(t => t.classList.remove("pdTabActive"));
+      tab.classList.add("pdTabActive");
+      const which = tab.getAttribute("data-fp-tab");
+      if (which === "shared-with-me") tabBody.innerHTML = `<div class="pdSongList">${sharedWithMeRows}</div>`;
+      else if (which === "my-shared") tabBody.innerHTML = `<div class="pdSongList">${mySharedRows}</div>`;
+      else tabBody.innerHTML = `<div class="pdSongList">${allRows}</div>`;
+      _wireFpSongRows();
+    });
+  });
+
+  // Play all shared songs
+  $("#fpPlay")?.addEventListener("click", async () => {
+    const items = _fpPlayableItems(allSongs);
+    if (!items.length) return toast("No playable songs");
+    state.player.nowPlaying = items[0];
+    state.player.queue = items.slice(1);
+    state.player.repeatQueue = items;
+    state.player.shuffle = false;
+    state.player.repeat = false;
+    saveState();
+    unlockAudioOnce();
+    await playNowPlaying({ autoplay: true });
+    syncMiniPlayerUI();
+  });
+
+  // Shuffle
+  $("#fpShuffle")?.addEventListener("click", async () => {
+    const items = shuffleArray(_fpPlayableItems(allSongs));
+    if (!items.length) return toast("No playable songs");
+    state.player.nowPlaying = items[0];
+    state.player.queue = items.slice(1);
+    state.player.repeatQueue = items;
+    state.player.shuffle = true;
+    state.player.repeat = false;
+    saveState();
+    unlockAudioOnce();
+    await playNowPlaying({ autoplay: true });
+    syncMiniPlayerUI();
+  });
+
+  // More menu — share profile
+  $("#fpMore")?.addEventListener("click", async () => {
+    const text = `Check out ${displayName} on RiffBank!`;
+    if (navigator.share) {
+      try { await navigator.share({ title: "RiffBank Profile", text }); return; } catch {}
+    }
+    try { await navigator.clipboard.writeText(text); toast("Copied!"); } catch { toast("Couldn't copy"); }
+  });
+
+  _wireFpSongRows();
+
+  // Fade hero + actions to black, solid topbar as user scrolls (same as song detail)
+  const heroEl = activeScreenEl.querySelector(".pdHero");
+  const heroBgEl = heroEl?.querySelector(".pdHeroBg");
+  const heroContentEl = heroEl?.querySelector(".pdHeroContent");
+  const actionsEl = activeScreenEl.querySelector(".pdActions");
+  const stickyEl = activeScreenEl.querySelector(".pdSticky");
+  const appEl = document.querySelector(".app");
+  if (stickyEl && heroEl) {
+    let maxScroll = 0;
+    const FADE_PX = 200;
+    requestAnimationFrame(() => {
+      maxScroll = activeScreenEl.scrollHeight - activeScreenEl.clientHeight;
+    });
+    activeScreenEl.addEventListener("scroll", () => {
+      const scrolled = activeScreenEl.scrollTop;
+      if (maxScroll > 0) {
+        const remaining = maxScroll - scrolled;
+        const opacity = remaining < FADE_PX ? Math.max(0, remaining / FADE_PX) : 1;
+        if (heroBgEl) heroBgEl.style.opacity = opacity;
+        if (heroContentEl) heroContentEl.style.opacity = opacity;
+        if (actionsEl) actionsEl.querySelectorAll("button").forEach(b => b.style.opacity = opacity);
+      }
+      if (appEl) {
+        const heroBottom = heroEl.getBoundingClientRect().bottom;
+        const screenTop = activeScreenEl.getBoundingClientRect().top;
+        if (heroBottom - screenTop < 60) {
+          appEl.classList.add("pdScrolled");
+        } else {
+          appEl.classList.remove("pdScrolled");
+        }
+      }
+    }, { passive: true });
+  }
+}
+
+// Build playable queue items from shared songs
+function _fpPlayableItems(songs) {
+  const items = [];
+  for (const s of songs) {
+    const active = (s.versions || []).find(v => v.isActive) || (s.versions || [])[0];
+    if (active && active.audioPath) {
+      items.push({ songId: s.id, versionId: active.id, title: s.title, project: s.project, label: active.label, audioPath: active.audioPath });
+    }
+  }
+  return items;
+}
+
+// Wire click on song rows to drill into song detail
+function _wireFpSongRows() {
+  document.querySelectorAll("[data-fp-song]").forEach(row => {
+    row.addEventListener("click", () => {
+      const songId = row.getAttribute("data-fp-song");
+      // Check if it's a shared song (in sharedData) or a local song
+      const localSong = state.songs.find(s => s.id === songId);
+      const sharedSong = sharedData.songs.find(ss => ss.song.id === songId)?.song
+        || sharedData.projects.flatMap(sp => sp.songs).find(s => s.id === songId);
+      if (localSong) {
+        navigateForward(() => {
+          selectedSongId = songId;
+          selectedVersionId = null;
+        });
+      } else if (sharedSong) {
+        // Temporarily inject into state for viewing
+        if (!state._sharedSongsCache) state._sharedSongsCache = {};
+        state._sharedSongsCache[songId] = sharedSong;
+        navigateForward(() => {
+          selectedSongId = songId;
+          selectedVersionId = null;
+          collabMode = true;
+        });
+      }
+    });
+  });
+}
+
+// ── Messages ──────────────────────────────────────
+
+function openMessages() {
+  requestNotificationPermission();
+  navigateForward(() => { overlayView = "messages"; });
+  _collapseSidebarInAce();
+}
+
+function openChat(userId) {
+  navigateForward(() => { friendProfileId = userId; overlayView = "chat"; });
+}
+
+let _msgPollTimer = null;
+
+function renderMessages() {
+  setHeader("Messages");
+  activeScreenEl.innerHTML = `
+    <div class="msgBody" style="padding:16px 16px 40px; display:flex; flex-direction:column; gap:0;">
+      <div class="friendsEmpty"><div class="collabSpinner"></div><div style="margin-top:12px">Loading...</div></div>
+    </div>
+  `;
+
+  getConversations().then(convos => {
+    const body = activeScreenEl.querySelector(".msgBody");
+    if (!body) return;
+    if (!convos.length) {
+      body.innerHTML = `<div class="friendsEmpty">No messages yet. Tap a friend's <strong>Message</strong> button to start a conversation.</div>`;
+      return;
+    }
+    _renderConvoList(body, convos);
+  }).catch(() => {
+    const body = activeScreenEl.querySelector(".msgBody");
+    if (body) body.innerHTML = `<div class="friendsEmpty">Failed to load messages.</div>`;
+  });
+}
+
+function _renderConvoList(body, convos) {
+  body.innerHTML = convos.map(c => {
+    const name = c.profile?.display_name || "Unknown";
+    const avatar = _friendAvatarHTML(c.profile);
+    const preview = c.body?.length > 40 ? c.body.slice(0, 40) + "..." : (c.body || "");
+    const prefix = c.isFromMe ? "You: " : "";
+    const unread = c.unreadCount ? `<span class="msgUnread">${c.unreadCount}</span>` : "";
+    const time = _relativeTime(c.created_at);
+    return `
+      <div class="msgConvoRow" data-chat-user="${c.partnerId}">
+        ${avatar}
+        <div class="msgConvoInfo">
+          <div class="msgConvoTop">
+            <div class="msgConvoName${c.unreadCount ? " msgConvoBold" : ""}">${escapeHtml(name)}</div>
+            <div class="msgConvoTime">${time}</div>
+          </div>
+          <div class="msgConvoPreview${c.unreadCount ? " msgConvoBold" : ""}">
+            ${escapeHtml(prefix + preview)}
+            ${unread}
+          </div>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  body.querySelectorAll("[data-chat-user]").forEach(row => {
+    row.addEventListener("click", () => {
+      const userId = row.getAttribute("data-chat-user");
+      openChat(userId);
+    });
+  });
+}
+
+function _relativeTime(isoStr) {
+  if (!isoStr) return "";
+  const diff = Date.now() - new Date(isoStr).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "now";
+  if (mins < 60) return mins + "m";
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + "h";
+  const days = Math.floor(hrs / 24);
+  if (days < 7) return days + "d";
+  return new Date(isoStr).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+// ── Chat View ──
+
+function renderChat(userId) {
+  if (!userId) return;
+  setHeader("Chat");
+
+  activeScreenEl.innerHTML = `
+    <div class="chatWrap">
+      <div class="chatMessages" id="chatMessages">
+        <div class="collabSpinner" style="margin:40px auto"></div>
+      </div>
+      <div class="chatInputBar">
+        <input class="chatInput" id="chatInput" type="text" placeholder="Message..." autocomplete="off" autocorrect="off" />
+        <button class="chatSendBtn" id="chatSend" aria-label="Send">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+        </button>
+      </div>
+    </div>
+  `;
+
+  // Fetch partner profile for header
+  supabase.from("profiles").select("display_name, avatar_url").eq("id", userId).maybeSingle().then(({ data: prof }) => {
+    if (prof?.display_name) setHeader(prof.display_name);
+  });
+
+  const messagesEl = $("#chatMessages");
+  const inputEl = $("#chatInput");
+  let _chatUserId = userId;
+
+  // Load messages
+  async function loadMessages() {
+    const msgs = await getMessages(_chatUserId);
+    if (!messagesEl) return;
+    await markMessagesRead(_chatUserId);
+    syncMessageBadges();
+
+    if (!msgs.length) {
+      messagesEl.innerHTML = `<div class="chatEmpty">No messages yet. Say hello!</div>`;
+    } else {
+      _renderChatMessages(messagesEl, msgs);
+    }
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  loadMessages();
+
+  // Poll for new messages every 5s
+  if (_msgPollTimer) clearInterval(_msgPollTimer);
+  _msgPollTimer = setInterval(async () => {
+    if (overlayView !== "chat" || friendProfileId !== _chatUserId) {
+      clearInterval(_msgPollTimer);
+      _msgPollTimer = null;
+      return;
+    }
+    const msgs = await getMessages(_chatUserId);
+    if (msgs.length && messagesEl) {
+      const wasAtBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 60;
+      _renderChatMessages(messagesEl, msgs);
+      if (wasAtBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
+      markMessagesRead(_chatUserId);
+    }
+  }, 5000);
+
+  // Send message
+  async function doSend() {
+    const text = inputEl?.value?.trim();
+    if (!text) return;
+    inputEl.value = "";
+    const msg = await sendMessage(_chatUserId, text);
+    if (msg) {
+      const msgs = await getMessages(_chatUserId);
+      _renderChatMessages(messagesEl, msgs);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    } else {
+      toast("Failed to send");
+    }
+  }
+
+  $("#chatSend")?.addEventListener("click", doSend);
+  inputEl?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSend(); }
+  });
+
+  // Focus input after render
+  setTimeout(() => inputEl?.focus(), 350);
+}
+
+async function _getCurrentUserId() {
+  const { data } = await supabase.auth.getUser();
+  return data?.user?.id || null;
+}
+
+let _cachedCurrentUserId = null;
+
+function _renderChatMessages(container, msgs) {
+  // Get current user ID synchronously from cache, or kick off async
+  if (!_cachedCurrentUserId) {
+    _getCurrentUserId().then(id => {
+      _cachedCurrentUserId = id;
+      _renderChatMessages(container, msgs);
+    });
+    return;
+  }
+  const uid = _cachedCurrentUserId;
+
+  container.innerHTML = msgs.map(m => {
+    const isMine = m.sender_id === uid;
+    return `<div class="chatBubble ${isMine ? "chatBubbleMine" : "chatBubbleTheirs"}">${escapeHtml(m.body)}</div>`;
+  }).join("");
+}
+
+// Wire "Message" buttons on friend list to open chat
+function _wireFriendMsgButtons() {
+  document.querySelectorAll(".friendMsgBtn[data-msg]").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openChat(btn.getAttribute("data-msg"));
+    });
   });
 }
 

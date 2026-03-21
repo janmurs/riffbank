@@ -8,7 +8,7 @@
 
 // Type ./start.sh to start local server
 
-const CACHE_VERSION = "2026-03-20_73"; // <-- bump this when you deploy
+const CACHE_VERSION = "2026-03-20_93"; // <-- bump this when you deploy
 const STATIC_CACHE = `riffbank-static-${CACHE_VERSION}`;
 const RUNTIME_CACHE = `riffbank-runtime-${CACHE_VERSION}`;
 
@@ -145,4 +145,39 @@ self.addEventListener("fetch", (event) => {
 
   // Default: network-first
   event.respondWith(networkFirst(req));
+});
+
+// ── Push Notifications ──
+
+// Handle push events (from server-side push, if implemented later)
+self.addEventListener("push", (event) => {
+  const data = event.data ? event.data.json() : {};
+  const title = data.title || "RiffBank";
+  const options = {
+    body: data.body || "You have a new notification",
+    icon: "/icon-1024.png",
+    badge: "/icon-1024.png",
+    tag: data.tag || "riffbank-notification",
+    renotify: true,
+    data: { url: data.url || "/" },
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+// Handle notification click — focus or open the app
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const url = event.notification.data?.url || "/";
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(clients => {
+      // Focus existing tab if found
+      for (const client of clients) {
+        if (client.url.includes(self.location.origin) && "focus" in client) {
+          return client.focus();
+        }
+      }
+      // Otherwise open new window
+      return self.clients.openWindow(url);
+    })
+  );
 });
