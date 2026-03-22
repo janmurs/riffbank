@@ -1694,6 +1694,79 @@ textarea{ min-height:100px; resize:vertical; }
   opacity: 0;                 /* JS sets opacity directly via scroll position */
 }
 
+/* ── Owner filter dropdown (inline with page title) ── */
+.songsTitleRow{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:24px 2px 0;
+  gap:12px;
+}
+.songsTitleRow .songsPageTitle{ padding:0; }
+
+.ownerDropWrap{ position:relative; flex-shrink:0; }
+.ownerDropBtn{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:6px;
+  min-width:108px;
+  background:rgba(255,255,255,.1);
+  border:1px solid rgba(255,255,255,.15);
+  border-radius:999px;
+  padding:7px 12px 7px 14px;
+  color:rgba(255,255,255,.85);
+  font-size:16px;
+  font-weight:700;
+  letter-spacing:-.2px;
+  -webkit-tap-highlight-color:transparent;
+}
+.ownerDropBtn svg{ width:14px; height:14px; opacity:.6; flex-shrink:0; }
+.ownerDropBtn:active{ background:rgba(255,255,255,.16); }
+
+.ownerDropMenu{
+  position:absolute;
+  right:0;
+  top:calc(100% + 6px);
+  background:rgba(30,30,34,.96);
+  border:1px solid rgba(255,255,255,.12);
+  border-radius:14px;
+  padding:4px;
+  z-index:100;
+  min-width:120px;
+  backdrop-filter:blur(20px);
+  -webkit-backdrop-filter:blur(20px);
+  box-shadow:0 8px 32px rgba(0,0,0,.5);
+  animation:ownerDropIn .15s ease-out;
+}
+@keyframes ownerDropIn{
+  from{ opacity:0; transform:translateY(-6px) scale(.96); }
+  to{ opacity:1; transform:none; }
+}
+.ownerDropItem{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  width:100%;
+  padding:10px 14px;
+  border:none;
+  background:none;
+  color:rgba(255,255,255,.7);
+  font-size:15px;
+  font-weight:600;
+  letter-spacing:-.1px;
+  border-radius:10px;
+  -webkit-tap-highlight-color:transparent;
+}
+.ownerDropItem:active{ background:rgba(255,255,255,.08); }
+.ownerDropItem.active{ color:#fff; background:rgba(255,255,255,.1); }
+.ownerDropItem.active::after{
+  content:"";
+  margin-left:auto;
+  width:6px; height:6px;
+  border-radius:50%;
+  background:var(--accent, #a78bfa);
+}
 .songsPageTitle{
   font-size:34px;
   font-weight:700;

@@ -1805,7 +1805,7 @@ function loadState() {
   return {
     version: 1,
     settings: {
-      defaultProject: "SkeletonDanceParty",
+      defaultProject: "",
       defaultGenre: "Metalcore",
       defaultSprint: "Unsorted",
       lyricsScratch: ""
@@ -2921,7 +2921,10 @@ const songsListState = {
   query: "",
   statusFilter: "",
   projectFilter: "",
+  ownerFilter: "all", // "all" | "mine" | "shared"
 };
+
+let projectsOwnerFilter = "all"; // "all" | "mine" | "shared"
 
 let drawerView = null;
 let songsBackTarget = null; // e.g. "projects" | "collabs"
@@ -6959,8 +6962,7 @@ async function showProfileSetupIfNeeded() {
       return;
     }
   } catch {
-    // profiles table may not exist yet — skip gracefully
-    return;
+    // profiles table may not exist yet — still show setup
   }
 
   await showProfileSetup();
@@ -7358,8 +7360,14 @@ async function init() {
   // Profile setup — show once after signup if no profile exists
   await showProfileSetupIfNeeded();
 
-  // Post-auth: check for cloud songs and offer import
-  await runSalImportFlow();
+  // If local state is empty, pull from Supabase before showing the app
+  // (on fresh install / cache wipe, localStorage has no songs yet)
+  if (!state.songs.length) {
+    try {
+      await incrementalSyncFromSupabase();
+      _importFlowRan = true; // skip the background re-sync later
+    } catch (e) { console.warn("[Init] sync failed:", e); }
+  }
 
   // Now safe to show the app shell (auth + import overlays are appended to body, not .app)
   document.body.classList.remove("splashing");
@@ -7535,20 +7543,43 @@ function renderProjects() {
   const h1 = appEl?.querySelector(".titleblock h1");
   if (h1) h1.style.opacity = "0";
 
-  const projects = Array.from(
+  // Shared projects
+  const sharedProjectNames = (sharedData.projects || []).map(sp => sp.projectName).filter(Boolean);
+  const _sharedProjSet = new Set(sharedProjectNames);
+
+  const pOwner = projectsOwnerFilter || "all";
+
+  const ownProjects = Array.from(
     new Set([
       ...(state.settings?.defaultProject ? [state.settings.defaultProject.trim()] : []),
       ...(state.projects || []).map(p => p.trim()).filter(Boolean),
       ...state.songs.map(s => (s.project || "").trim()).filter(Boolean)
     ])
-  ).sort((a, b) => a.localeCompare(b));
+  );
+
+  let projects;
+  if (pOwner === "mine") {
+    projects = ownProjects.filter(p => !_sharedProjSet.has(p)).sort((a, b) => a.localeCompare(b));
+  } else if (pOwner === "shared") {
+    projects = [..._sharedProjSet].sort((a, b) => a.localeCompare(b));
+  } else {
+    projects = Array.from(new Set([...ownProjects, ...sharedProjectNames])).sort((a, b) => a.localeCompare(b));
+  }
 
   let projQuery = "";
+
+  // Get shared songs for a project name
+  const _sharedSongsForProj = (projName) => {
+    const sp = (sharedData.projects || []).find(sp => sp.projectName === projName);
+    return sp?.songs || [];
+  };
 
   const buildCards = (q) => projects
     .filter(p => !q || p.toLowerCase().includes(q.toLowerCase()))
     .map((p, i) => {
-      const projSongs = state.songs.filter(s => (s.project || "").trim() === p);
+      const ownProjSongs = state.songs.filter(s => (s.project || "").trim() === p);
+      const sharedProjSongs = _sharedSongsForProj(p);
+      const projSongs = [...ownProjSongs, ...sharedProjSongs.filter(s => !ownProjSongs.find(o => o.id === s.id))];
       const count = projSongs.length;
       const repSong = projSongs.slice().sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))[0]
         || { id: p, title: p, project: p, genre: "" };
@@ -7580,8 +7611,16 @@ function renderProjects() {
       `;
     }).join("");
 
+  const pOwnerLabels = { all: "All", mine: "Mine", shared: "Shared" };
+  const pChevronDown = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`;
+
   activeScreenEl.innerHTML = `
-    <div class="songsPageTitle">Projects</div>
+    <div class="songsTitleRow">
+      <div class="songsPageTitle">Projects</div>
+      <div class="ownerDropWrap">
+        <button class="ownerDropBtn">${pOwnerLabels[pOwner]}${pChevronDown}</button>
+      </div>
+    </div>
     <div class="songsHead">
       <div class="songsBar">
         <input id="projSearch" type="text" placeholder="Search projects..." />
@@ -7713,6 +7752,31 @@ function renderProjects() {
 
   $("#projSearch")?.addEventListener("input", applyProjFilter);
   applyProjFilter();
+
+  // Owner filter dropdown
+  const pDropBtn = activeScreenEl.querySelector(".ownerDropBtn");
+  const pDropWrap = activeScreenEl.querySelector(".ownerDropWrap");
+  pDropBtn?.addEventListener("click", () => {
+    const existing = pDropWrap?.querySelector(".ownerDropMenu");
+    if (existing) { existing.remove(); return; }
+    const menu = document.createElement("div");
+    menu.className = "ownerDropMenu";
+    menu.innerHTML = ["all", "mine", "shared"].map(v =>
+      `<button class="ownerDropItem${pOwner === v ? " active" : ""}" data-owner="${v}">${pOwnerLabels[v]}</button>`
+    ).join("");
+    pDropWrap?.appendChild(menu);
+    menu.querySelectorAll(".ownerDropItem").forEach(item => {
+      item.addEventListener("click", () => {
+        menu.remove();
+        projectsOwnerFilter = item.getAttribute("data-owner") || "all";
+        renderProjects();
+      });
+    });
+    const close = (e) => {
+      if (!menu.contains(e.target) && e.target !== pDropBtn) { menu.remove(); document.removeEventListener("pointerdown", close); }
+    };
+    setTimeout(() => document.addEventListener("pointerdown", close), 0);
+  });
 
   $("#projAddFab")?.addEventListener("click", () => {
     const name = prompt("New project name:");
@@ -9511,6 +9575,37 @@ function openShareRoleSheet(opts) {
   openShareOverlay(opts);
 }
 
+// Track known shared IDs so we can detect new shares
+let _knownSharedSongIds = new Set();
+let _knownSharedProjectIds = new Set();
+
+function _showShareNotification(newItems) {
+  if (!newItems.length) return;
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  if (document.visibilityState === "visible" && currentTab === "collab") return;
+
+  const label = newItems.length === 1
+    ? `"${newItems[0].name}" was shared with you by ${newItems[0].from}`
+    : `${newItems.length} new items shared with you`;
+
+  const reg = navigator.serviceWorker?.controller ? navigator.serviceWorker.ready : null;
+  if (reg) {
+    reg.then(r => {
+      r.showNotification("RiffBank", {
+        body: label,
+        icon: "/icon-1024.png",
+        badge: "/icon-1024.png",
+        tag: "riffbank-new-share",
+        renotify: true,
+        data: { url: "/" },
+      });
+    }).catch(() => {});
+  }
+
+  // Also show in-app toast
+  toast(label);
+}
+
 async function refreshSharedData() {
   try {
     const [projects, songs, invites, myProjects, mySongs] = await Promise.all([
@@ -9520,6 +9615,30 @@ async function refreshSharedData() {
       pullMySharedProjects(),
       pullMySharedSongs(),
     ]);
+
+    // Detect newly shared items
+    const newItems = [];
+    for (const sp of (projects || [])) {
+      if (sp.projectId && !_knownSharedProjectIds.has(sp.projectId)) {
+        newItems.push({ name: sp.projectName || "a project", from: sp.ownerName || "Someone" });
+      }
+    }
+    for (const ss of (songs || [])) {
+      const sid = ss.song?.id;
+      if (sid && !_knownSharedSongIds.has(sid)) {
+        newItems.push({ name: ss.song?.title || "a song", from: ss.ownerName || "Someone" });
+      }
+    }
+
+    // Update known IDs
+    _knownSharedSongIds = new Set((songs || []).map(s => s.song?.id).filter(Boolean));
+    _knownSharedProjectIds = new Set((projects || []).map(p => p.projectId).filter(Boolean));
+
+    // Show notification for new shares (skip on first load)
+    if (sharedData.loaded && newItems.length) {
+      _showShareNotification(newItems);
+    }
+
     sharedData = { projects: projects || [], songs: songs || [], invites: invites || [], myProjects: myProjects || [], mySongs: mySongs || [], loaded: true };
   } catch (e) {
     console.warn("[Collab] Failed to fetch shared data:", e);
@@ -12627,16 +12746,46 @@ function renderSongsList() {
   const h1 = appEl?.querySelector(".titleblock h1");
   if (h1) h1.style.opacity = "0";
 
-  const songs = [...state.songs];
+  // Merge own songs + shared songs
+  const sharedSongs = (sharedData.songs || []).map(ss => ({ ...ss.song, _shared: true, _sharedBy: ss.ownerName || "Someone" }));
+  const sharedProjectSongs = (sharedData.projects || []).flatMap(sp =>
+    (sp.songs || []).map(s => ({ ...s, _shared: true, _sharedBy: sp.ownerName || "Someone" }))
+  );
+  const allSharedSongs = [...sharedSongs, ...sharedProjectSongs].filter(s => !state.songs.find(own => own.id === s.id));
+
+  // Ensure shared songs are in the lookup cache so getSong() finds them
+  if (!state._sharedSongsCache) state._sharedSongsCache = [];
+  for (const s of allSharedSongs) {
+    if (!state._sharedSongsCache.find(c => c.id === s.id)) {
+      state._sharedSongsCache.push(s);
+    }
+  }
+
+  const ownSongs = state.songs.map(s => ({ ...s, _shared: false }));
+  const allSongs = [...ownSongs, ...allSharedSongs];
+
+  const ownerFilter = songsListState.ownerFilter || "all";
+  const songs = ownerFilter === "mine" ? ownSongs
+    : ownerFilter === "shared" ? allSharedSongs
+    : allSongs;
+
   const projects = Array.from(
     new Set([
       ...(state.settings?.defaultProject ? [state.settings.defaultProject.trim()] : []),
-      ...state.songs.map((s) => (s.project || "").trim()).filter(Boolean),
+      ...songs.map((s) => (s.project || "").trim()).filter(Boolean),
     ])
   ).sort((a, b) => a.localeCompare(b));
 
+  const ownerLabels = { all: "All", mine: "Mine", shared: "Shared" };
+  const chevronDown = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`;
+
   activeScreenEl.innerHTML = `
-    <div class="songsPageTitle">Songs</div>
+    <div class="songsTitleRow">
+      <div class="songsPageTitle">Songs</div>
+      <div class="ownerDropWrap">
+        <button class="ownerDropBtn">${ownerLabels[ownerFilter]}${chevronDown}</button>
+      </div>
+    </div>
     <div class="songsHead">
       <div class="songsBar">
         <input
@@ -12797,6 +12946,32 @@ function renderSongsList() {
   $("#q").addEventListener("input", applyFilter);
 
   $("#openSongFilters")?.addEventListener("click", openSongFilters);
+
+  // Owner filter dropdown
+  const dropBtn = activeScreenEl.querySelector(".ownerDropBtn");
+  const dropWrap = activeScreenEl.querySelector(".ownerDropWrap");
+  dropBtn?.addEventListener("click", () => {
+    const existing = dropWrap?.querySelector(".ownerDropMenu");
+    if (existing) { existing.remove(); return; }
+    const menu = document.createElement("div");
+    menu.className = "ownerDropMenu";
+    menu.innerHTML = ["all", "mine", "shared"].map(v =>
+      `<button class="ownerDropItem${ownerFilter === v ? " active" : ""}" data-owner="${v}">${ownerLabels[v]}</button>`
+    ).join("");
+    dropWrap?.appendChild(menu);
+    menu.querySelectorAll(".ownerDropItem").forEach(item => {
+      item.addEventListener("click", () => {
+        menu.remove();
+        songsListState.ownerFilter = item.getAttribute("data-owner") || "all";
+        songsListScrollTop = 0;
+        renderSongsList();
+      });
+    });
+    const close = (e) => {
+      if (!menu.contains(e.target) && e.target !== dropBtn) { menu.remove(); document.removeEventListener("pointerdown", close); }
+    };
+    setTimeout(() => document.addEventListener("pointerdown", close), 0);
+  });
 
   $("#songsAddFab")?.addEventListener("click", () => openCreateOverlay());
 

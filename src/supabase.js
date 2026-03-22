@@ -133,9 +133,17 @@ export async function supabasePushState(state) {
       updated_at: s.updatedAt || new Date().toISOString(),
     }));
 
-    if (songRows.length) {
-      console.log("[Supabase] Push: upserting songs", songRows.map(s => ({ id: s.id, title: s.title, project_id: s.project_id })));
-      const { error } = await supabase.from("songs").upsert(songRows, { onConflict: "id" });
+    // Deduplicate by id — Postgres rejects duplicate keys in a single upsert batch
+    const seenSongIds = new Set();
+    const dedupedSongRows = songRows.filter(s => {
+      if (seenSongIds.has(s.id)) return false;
+      seenSongIds.add(s.id);
+      return true;
+    });
+
+    if (dedupedSongRows.length) {
+      console.log("[Supabase] Push: upserting songs", dedupedSongRows.map(s => ({ id: s.id, title: s.title, project_id: s.project_id })));
+      const { error } = await supabase.from("songs").upsert(dedupedSongRows, { onConflict: "id" });
       if (error) { console.warn("[Supabase] songs upsert FAILED:", error.message, error.details, error.hint, error.code); return false; }
       console.log("[Supabase] Push: songs upsert OK");
     }
@@ -165,8 +173,15 @@ export async function supabasePushState(state) {
       }
     }
 
-    if (versionRows.length) {
-      const { error } = await supabase.from("versions").upsert(versionRows, { onConflict: "id" });
+    const seenVersionIds = new Set();
+    const dedupedVersionRows = versionRows.filter(v => {
+      if (seenVersionIds.has(v.id)) return false;
+      seenVersionIds.add(v.id);
+      return true;
+    });
+
+    if (dedupedVersionRows.length) {
+      const { error } = await supabase.from("versions").upsert(dedupedVersionRows, { onConflict: "id" });
       if (error) { console.warn("[Supabase] versions upsert:", error); return false; }
     }
 
