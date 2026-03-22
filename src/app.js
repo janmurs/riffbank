@@ -18,6 +18,61 @@ const SHOW_BUILD_BADGE = true;
 // ── Activity log (alerts bell) ──
 // Each entry: { id, songTitle, status: "saving"|"compressing"|"uploading"|"syncing"|"done"|"failed", ts, message }
 const activityLog = [];
+
+// ── Persistent notification inbox (survives refresh, 30-day retention) ──
+const NOTIF_STORAGE_KEY = "riffbank_notifications";
+const NOTIF_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+function _loadNotifications() {
+  try {
+    const raw = localStorage.getItem(NOTIF_STORAGE_KEY);
+    if (!raw) return [];
+    const items = JSON.parse(raw);
+    const cutoff = Date.now() - NOTIF_MAX_AGE_MS;
+    return items.filter(n => n.ts >= cutoff);
+  } catch { return []; }
+}
+
+function _saveNotifications(items) {
+  try { localStorage.setItem(NOTIF_STORAGE_KEY, JSON.stringify(items)); } catch {}
+}
+
+function addNotification({ title, body, type = "share" }) {
+  const items = _loadNotifications();
+  items.unshift({ id: crypto.randomUUID(), title, body, type, ts: Date.now(), read: false });
+  if (items.length > 100) items.length = 100;
+  _saveNotifications(items);
+  _updateNotifBadge();
+  if (drawerView === "alerts") renderAlerts();
+}
+
+function markNotificationsRead() {
+  const items = _loadNotifications();
+  let changed = false;
+  for (const n of items) { if (!n.read) { n.read = true; changed = true; } }
+  if (changed) { _saveNotifications(items); _updateNotifBadge(); }
+}
+
+function _updateNotifBadge() {
+  const unread = _loadNotifications().filter(n => !n.read).length;
+  const btn = document.querySelector("#htbNotif");
+  if (!btn) return;
+  let badge = btn.querySelector(".bellBadge");
+  const total = unread + activityLog.filter(a => a.status !== "done" && a.status !== "failed").length;
+  if (total > 0) {
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.className = "bellBadge";
+      badge.style.cssText = "position:absolute;top:0;right:0;min-width:16px;height:16px;background:#f43f5e;border-radius:8px;font-size:10px;font-weight:700;color:#fff;display:flex;align-items:center;justify-content:center;padding:0 4px;line-height:1;";
+      btn.style.position = "relative";
+      btn.appendChild(badge);
+    }
+    badge.textContent = total;
+    badge.style.display = "flex";
+  } else if (badge) {
+    badge.style.display = "none";
+  }
+}
 function logActivity(id, songTitle, status, message) {
   const existing = activityLog.find(a => a.id === id);
   if (existing) {
@@ -34,23 +89,7 @@ function logActivity(id, songTitle, status, message) {
   if (drawerView === "alerts") renderAlerts();
 }
 function updateBellBadge() {
-  const active = activityLog.filter(a => a.status !== "done" && a.status !== "failed").length;
-  const btn = document.querySelector("#htbNotif");
-  if (!btn) return;
-  let badge = btn.querySelector(".bellBadge");
-  if (active > 0) {
-    if (!badge) {
-      badge = document.createElement("span");
-      badge.className = "bellBadge";
-      badge.style.cssText = "position:absolute;top:0;right:0;min-width:16px;height:16px;background:#f43f5e;border-radius:8px;font-size:10px;font-weight:700;color:#fff;display:flex;align-items:center;justify-content:center;padding:0 4px;line-height:1;";
-      btn.style.position = "relative";
-      btn.appendChild(badge);
-    }
-    badge.textContent = active;
-    badge.style.display = "flex";
-  } else if (badge) {
-    badge.style.display = "none";
-  }
+  _updateNotifBadge();
 }
 
 // Debug toggle: highlight sync status on song cards
@@ -2974,7 +3013,7 @@ function syncBackButton() {
   if (!headerBackEl) return;
   // Profile is always root — never show back button
   if (currentTab === "profile") { headerBackEl.style.display = "none"; return; }
-  // Collab root uses its own inline back/menu button (slides with content)
+  // Collab root — no sidebar, hide back button
   const onCollabRoot = currentTab === "collab" && !overlayView && !selectedSongId && !projectDetailScreen && !drawerView;
   if (onCollabRoot) { headerBackEl.style.display = "none"; return; }
   const onRoot =
@@ -2990,7 +3029,9 @@ function syncBackButton() {
 }
 
 // Wire back button once
-headerBackEl?.addEventListener("click", () => goBack({ animate: true }));
+headerBackEl?.addEventListener("click", () => {
+  goBack({ animate: true });
+});
 
 function syncTabs() {
   const highlightTab = currentTab === "songs" ? "home" : currentTab;
@@ -3345,7 +3386,7 @@ function _applyAllBadges(msgCount, friendCount) {
   // Inline back button badge (slides with content)
   const inlineBadge = document.querySelector(".collabInlineBadge");
   if (inlineBadge) { inlineBadge.textContent = total || ""; inlineBadge.style.display = total ? "flex" : "none"; }
-  // Header back button badge (hidden on Collab root, used on sub-screens)
+  // Header back button badge
   const backBadge = document.getElementById("headerBackBadge");
   if (backBadge) { backBadge.style.display = "none"; }
   // Messages sidebar badge
@@ -3361,9 +3402,15 @@ function _applyAllBadges(msgCount, friendCount) {
 // Poll message badges every 10s
 setInterval(syncMessageBadges, 10000);
 
+// Poll shared data every 30s to detect new shares and show notifications
+setInterval(() => { refreshSharedData().catch(() => {}); }, 30000);
+
 // Also check when app comes back to foreground
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") syncMessageBadges();
+  if (document.visibilityState === "visible") {
+    syncMessageBadges();
+    refreshSharedData().catch(() => {});
+  }
 });
 
 function openSalSheet() {
@@ -7369,7 +7416,24 @@ async function init() {
     } catch (e) { console.warn("[Init] sync failed:", e); }
   }
 
-  // Now safe to show the app shell (auth + import overlays are appended to body, not .app)
+  // ── Boot overlay: reuse splash look while data syncs ──
+  const bootOverlay = document.createElement("div");
+  bootOverlay.id = "splash";
+  bootOverlay.setAttribute("aria-hidden", "false");
+  bootOverlay.classList.add("phase1"); // skip intro anim, go straight to visible
+  bootOverlay.innerHTML = `
+    <div class="splashInner">
+      <div id="splashTitle" class="ready" style="animation:welcomeTitleShimmer 3s ease infinite;opacity:1;transform:none">RiffBank</div>
+      <div id="splashSub" class="splashSub show static">
+        <span id="splashSubText" class="splashSubText">Indexing your universe</span>
+        <span class="splashEllipsis" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </span>
+      </div>
+    </div>`;
+  document.body.appendChild(bootOverlay);
+  // Force paint so overlay is visible before we remove splashing
+  bootOverlay.offsetHeight;
   document.body.classList.remove("splashing");
 
   // Build badge — always-visible cache version indicator for debugging
@@ -7407,7 +7471,7 @@ async function init() {
     }
   }
 
-  // Render immediately so user sees the home screen right after welcome
+  // Render the app behind the boot overlay
   setHeader("RiffBank");
   syncTabs();
   render();
@@ -7416,9 +7480,20 @@ async function init() {
   // Now that the home screen is painted, fade out any remaining onboarding overlays
   dismissOnboarding();
 
-  // Background: restore cover art, scan cached blobs, sync from Supabase (non-blocking)
-  restoreCoverUrlsFromCache().then(() => render()).catch(() => {});
+  // ── Await critical data tasks (with timeout so app never freezes) ──
+  const withTimeout = (p, ms) => Promise.race([p, new Promise(r => setTimeout(r, ms))]);
 
+  await withTimeout(Promise.all([
+    restoreCoverUrlsFromCache().then(() => render()).catch(() => {}),
+    (!_importFlowRan
+      ? incrementalSyncFromSupabase().then(() => {
+          preFetchCloudAudio().catch(console.warn);
+        }).catch(console.warn)
+      : Promise.resolve()),
+    refreshSharedData().catch(console.warn),
+  ]), 8000); // 8s max — don't block the app forever
+
+  // Scan cached audio blobs (non-blocking, doesn't affect rendering)
   (async () => {
     for (const song of (state.songs || [])) {
       for (const v of (song.versions || [])) {
@@ -7431,18 +7506,26 @@ async function init() {
     }
   })();
 
-  // Incremental sync from Supabase (skip if import flow already pulled data)
-  if (!_importFlowRan) {
-    incrementalSyncFromSupabase().then(() => {
-      preFetchCloudAudio().catch(console.warn);
-    }).catch(console.warn);
-  }
+  // Final render with all data in place
+  render();
+  syncMiniPlayerUI();
 
-  // Pre-fetch shared data in background so Collab tab loads fast
-  refreshSharedData().catch(console.warn);
+  // Transition subtext, then fade out
+  const bootSubText = bootOverlay.querySelector("#splashSubText");
+  if (bootSubText) bootSubText.textContent = "Entering RiffBank...";
+  await new Promise(r => setTimeout(r, 600));
+
+  bootOverlay.classList.add("hide");
+  bootOverlay.addEventListener("transitionend", () => bootOverlay.remove());
 
   // Sync unread message badges
   syncMessageBadges();
+
+  // Request notification permission early so share notifications work
+  requestNotificationPermission();
+
+  // Update notification bell badge on startup
+  _updateNotifBadge();
 
   // Check for Web Share Target file
   checkSharedAudioFile();
@@ -9581,25 +9664,36 @@ let _knownSharedProjectIds = new Set();
 
 function _showShareNotification(newItems) {
   if (!newItems.length) return;
-  if (!("Notification" in window) || Notification.permission !== "granted") return;
-  if (document.visibilityState === "visible" && currentTab === "collab") return;
+
+  // Persist each share to the notification inbox
+  for (const item of newItems) {
+    addNotification({
+      title: item.name,
+      body: `Shared with you by ${item.from}`,
+      type: "share",
+    });
+  }
 
   const label = newItems.length === 1
     ? `"${newItems[0].name}" was shared with you by ${newItems[0].from}`
     : `${newItems.length} new items shared with you`;
 
-  const reg = navigator.serviceWorker?.controller ? navigator.serviceWorker.ready : null;
-  if (reg) {
-    reg.then(r => {
-      r.showNotification("RiffBank", {
-        body: label,
-        icon: "/icon-1024.png",
-        badge: "/icon-1024.png",
-        tag: "riffbank-new-share",
-        renotify: true,
-        data: { url: "/" },
-      });
-    }).catch(() => {});
+  // Push notification (if permitted and not currently in collab)
+  if ("Notification" in window && Notification.permission === "granted"
+      && !(document.visibilityState === "visible" && currentTab === "collab")) {
+    const reg = navigator.serviceWorker?.controller ? navigator.serviceWorker.ready : null;
+    if (reg) {
+      reg.then(r => {
+        r.showNotification("RiffBank", {
+          body: label,
+          icon: "/icon-1024.png",
+          badge: "/icon-1024.png",
+          tag: "riffbank-new-share",
+          renotify: true,
+          data: { url: "/" },
+        });
+      }).catch(() => {});
+    }
   }
 
   // Also show in-app toast
@@ -9657,36 +9751,108 @@ function renderCollab() {
   appEl?.classList.add("collapseTitle");
   const h1 = appEl?.querySelector(".titleblock h1");
   if (h1) h1.style.opacity = "0";
-  _collabSidebarOpen = false;
 
   // Apply cached badge counts immediately (no lag), then refresh in background
   _applyAllBadges(_unreadMsgCount, _pendingFriendCount);
   syncMessageBadges();
 
-  // Show loading state first, then fetch
-  if (!sharedData.loaded) {
-    activeScreenEl.innerHTML = `
-      <div class="collabShell">
-        <div class="collabSidebar">${_collabSidebarHTML()}</div>
-        <div class="collabMain">
-          <div class="collabWrap">
-            ${_collabInlineBackHTML()}
-            <div class="songsPageTitle">Collab</div>
-            <div class="collabEmpty" style="text-align:center; padding-top:60px;">
-              <div class="collabSpinner"></div>
-              <div style="margin-top:16px">Loading shared content...</div>
-            </div>
-          </div>
+  // Build badge subtitles
+  const friendBadge = _pendingFriendCount ? `${_pendingFriendCount} pending` : "";
+  const msgBadge = _unreadMsgCount ? `${_unreadMsgCount} unread` : "";
+  const sharedCount = (sharedData.songs?.length || 0) + (sharedData.projects || []).reduce((n, p) => n + (p.songs?.length || 0), 0);
+
+  activeScreenEl.innerHTML = `
+    <div class="songsPageTitle">Collab</div>
+
+    <div class="collabGrid">
+      <div class="hCard hCollabFriends hWide" role="button" tabindex="0" data-collab-nav="friends" aria-label="Friends">
+        <div class="hShimmer"></div>
+        <div class="hGrad"></div>
+        <div class="hBody">
+          <div class="hLabel">Friends</div>
+          ${friendBadge ? `<div class="hSub">${friendBadge}</div>` : ""}
         </div>
       </div>
-    `;
-    _wireCollabSidebar();
-    _wireCollabInlineBack();
-    refreshSharedData().then(() => renderCollabContent());
-    return;
-  }
 
-  renderCollabContent();
+      <div class="hCard hCollabSongs hWide" role="button" tabindex="0" data-collab-nav="songs" aria-label="Songs">
+        <div class="hShimmer"></div>
+        <div class="hGrad"></div>
+        <div class="hBody">
+          <div class="hLabel">Songs</div>
+          ${sharedCount ? `<div class="hSub">${sharedCount} shared</div>` : ""}
+        </div>
+      </div>
+
+      <div class="hCard hCollabMessages hWide" role="button" tabindex="0" data-collab-nav="messages" aria-label="Messages">
+        <div class="hShimmer"></div>
+        <div class="hGrad"></div>
+        <div class="hBody">
+          <div class="hLabel">Messages</div>
+          ${msgBadge ? `<div class="hSub">${msgBadge}</div>` : ""}
+        </div>
+      </div>
+
+      <div class="hCard hCollabAdd hWide" role="button" tabindex="0" data-collab-nav="add" aria-label="Add Friend">
+        <div class="hShimmer"></div>
+        <div class="hGrad"></div>
+        <div class="hBody">
+          <div class="hLabel">Add Friend</div>
+          <div class="hSub">Find &amp; invite people</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  // Wire card taps
+  activeScreenEl.querySelectorAll("[data-collab-nav]").forEach(card => {
+    card.addEventListener("click", () => {
+      const target = card.getAttribute("data-collab-nav");
+      if (target === "friends") {
+        navigateForward(() => { openFriendsList(); });
+      } else if (target === "songs") {
+        navigateForward(() => {
+          songsListState.ownerFilter = "shared";
+          currentTab = "songs";
+          songsView = "list";
+          selectedSongId = null;
+        });
+      } else if (target === "messages") {
+        navigateForward(() => { openMessages(); });
+      } else if (target === "add") {
+        navigateForward(() => { openAddFriend(); });
+      }
+    });
+  });
+
+  // Refresh shared data & badges in background
+  refreshSharedData().catch(() => {});
+
+  // Collapse title scroll handler
+  if (activeScreenEl._collapseTitleScroll) {
+    activeScreenEl.removeEventListener("scroll", activeScreenEl._collapseTitleScroll);
+    activeScreenEl._collapseTitleScroll = null;
+  }
+  const _screen = activeScreenEl;
+  const _sm = document.querySelector(".app.collapseTitle .titleblock h1");
+  if (_sm) {
+    requestAnimationFrame(() => {
+      const bt = _screen.querySelector(".songsPageTitle");
+      if (!bt) return;
+      const topbarEl = document.querySelector(".topbar");
+      const screenTop = _screen.getBoundingClientRect().top;
+      const topbarBottom = topbarEl ? topbarEl.getBoundingClientRect().bottom : 80;
+      const fadeStart = bt.offsetTop - (topbarBottom - screenTop);
+      const fadeEnd = fadeStart + (bt.offsetHeight || 40);
+      const range = fadeEnd - fadeStart;
+      const onScroll = () => {
+        const progress = Math.min(1, Math.max(0, (_screen.scrollTop - fadeStart) / range));
+        _sm.style.opacity = progress;
+      };
+      _screen._collapseTitleScroll = onScroll;
+      _screen.addEventListener("scroll", onScroll, { passive: true });
+      onScroll();
+    });
+  }
 }
 
 function _updateCollabBadges(friendCount, msgCount) {
@@ -9994,7 +10160,6 @@ function renderCollabContent() {
       <div class="collabSidebar">${_collabSidebarHTML()}</div>
       <div class="collabMain">
         <div class="collabWrap">
-          ${_collabInlineBackHTML()}
           <div class="songsPageTitle">Collab</div>
           ${hasShared ? `
             <!-- Shared With Me -->
@@ -10052,7 +10217,6 @@ function renderCollabContent() {
 
   // Wire sidebar swipe + buttons
   _wireCollabSidebar();
-  _wireCollabInlineBack();
 
   // Wire FAB → share picker
   $("#collabShareFab")?.addEventListener("click", () => {
@@ -11405,10 +11569,18 @@ function openCollabSharePicker() {
 function renderAlerts() {
   setHeader("Alerts");
 
+  // Mark all inbox notifications as read when viewing
+  markNotificationsRead();
+
   const statusIcon = (s) => {
     if (s === "done") return `<span style="color:#22c55e">&#10003;</span>`;
     if (s === "failed") return `<span style="color:#f43f5e">&#10007;</span>`;
     return `<span class="alertSpinner"></span>`;
+  };
+
+  const notifIcon = (type) => {
+    if (type === "share") return `<span style="color:#a855f7"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg></span>`;
+    return `<span style="color:#888">&#x1F514;</span>`;
   };
 
   const timeAgo = (ts) => {
@@ -11419,7 +11591,23 @@ function renderAlerts() {
     return `${Math.floor(s / 86400)}d ago`;
   };
 
-  const items = activityLog.length
+  // Notification inbox items (shares, etc.)
+  const notifications = _loadNotifications();
+  const notifHTML = notifications.length
+    ? notifications.map(n => `
+      <div class="alertRow${n.read ? "" : " alertUnread"}">
+        <div class="alertIcon">${notifIcon(n.type)}</div>
+        <div class="alertBody">
+          <div class="alertTitle">${escapeHtml(n.title)}</div>
+          <div class="alertMsg">${escapeHtml(n.body)}</div>
+        </div>
+        <div class="alertTime">${timeAgo(n.ts)}</div>
+      </div>
+    `).join("")
+    : "";
+
+  // Activity log items (uploads, syncs)
+  const activityHTML = activityLog.length
     ? activityLog.map(a => `
       <div class="alertRow">
         <div class="alertIcon">${statusIcon(a.status)}</div>
@@ -11430,11 +11618,15 @@ function renderAlerts() {
         <div class="alertTime">${timeAgo(a.ts)}</div>
       </div>
     `).join("")
-    : `<div style="padding:40px 20px;text-align:center;color:#666">No activity yet</div>`;
+    : "";
+
+  const hasContent = notifications.length || activityLog.length;
 
   activeScreenEl.innerHTML = `
     <div style="padding:16px">
-      ${items}
+      ${notifications.length ? `<div class="alertSectionLabel">Notifications</div>${notifHTML}` : ""}
+      ${activityLog.length ? `<div class="alertSectionLabel" style="${notifications.length ? "margin-top:20px" : ""}">Activity</div>${activityHTML}` : ""}
+      ${!hasContent ? `<div style="padding:40px 20px;text-align:center;color:#666">No notifications yet</div>` : ""}
     </div>
   `;
 }

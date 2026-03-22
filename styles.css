@@ -1402,6 +1402,22 @@ textarea{ min-height:100px; resize:vertical; }
 .hLyrics   { background: linear-gradient(135deg, #12256b, #1e3a8a, #3b1475, #1e3a8a, #12256b); background-size: 300% 300%; animation: gradDrift 24s ease infinite; --card-border: #eab308; }
 .hNext     { background: linear-gradient(135deg, #560f30, #7b1038, #31115e, #7b1038, #560f30); background-size: 300% 300%; animation: gradDrift 20s ease infinite; --card-border: #f97316; }
 
+/* ── Collab card grid ── */
+.collabGrid{
+  display:grid;
+  grid-template-columns:1fr;
+  gap:12px;
+  padding:12px 2px 2px;
+}
+.collabGrid .hCard{ min-height:120px; }
+.collabGrid .hCard .hLabel{ font-size:18px; }
+.collabGrid .hCard .hSub{ font-size:12px; }
+
+.hCollabFriends  { background: linear-gradient(135deg, #0d3d4f, #0e7490, #155e75, #0e7490, #0d3d4f); background-size: 300% 300%; animation: gradDrift 24s ease infinite; --card-border: #22d3ee; }
+.hCollabSongs    { background: linear-gradient(135deg, #3b1475, #5b21b6, #7c3aed, #5b21b6, #3b1475); background-size: 300% 300%; animation: gradDrift 22s ease infinite; --card-border: #a78bfa; }
+.hCollabMessages { background: linear-gradient(135deg, #12256b, #1e3a8a, #1d4ed8, #1e3a8a, #12256b); background-size: 300% 300%; animation: gradDrift 26s ease infinite; --card-border: #60a5fa; }
+.hCollabAdd      { background: linear-gradient(135deg, #560f30, #9d174d, #be185d, #9d174d, #560f30); background-size: 300% 300%; animation: gradDrift 20s ease infinite; --card-border: #f472b6; }
+
 /* 2. Ambient glow breathing — subtle internal energy pulse */
 @keyframes glowBreathe {
   0%   { opacity: 0.22; transform: scale(1)   translate(0%, 0%); }
@@ -1507,6 +1523,8 @@ textarea{ min-height:100px; resize:vertical; }
 .alertTime{flex-shrink:0;font-size:11px;color:#555;padding-top:2px}
 @keyframes alertSpin{to{transform:rotate(360deg)}}
 .alertSpinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.15);border-top-color:#60a5fa;border-radius:50%;animation:alertSpin .8s linear infinite}
+.alertUnread{background:rgba(168,85,247,.08);border-radius:8px;padding:12px 10px;margin:0 -10px}
+.alertSectionLabel{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#666;margin-bottom:8px}
 
 .gsWrap{
   display: flex;
@@ -6054,7 +6072,7 @@ body {
 
 /* ── Collab Tab ──────────────────────────────────── */
 .collabWrap {
-  padding: 6px 0 120px;
+  padding: 0 0 120px;
   display: flex; flex-direction: column; gap: 28px;
 }
 .collabWrap .playerHead {
