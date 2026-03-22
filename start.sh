@@ -25,8 +25,10 @@ for i in $(seq 1 30); do
     echo ""
     echo "  ✅ RiffBank is live!"
     echo ""
-    echo "  Local:  http://localhost:3000"
-    echo "  Phone:  $URL"
+    echo "  Local:   http://localhost:3000"
+    echo "  Phone:   $URL"
+    echo ""
+    echo "  📨 Invite: $URL/invite.html"
     echo ""
     break
   fi
