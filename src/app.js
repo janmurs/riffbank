@@ -7436,6 +7436,29 @@ async function init() {
   bootOverlay.offsetHeight;
   document.body.classList.remove("splashing");
 
+  // ── Subtext jump-swap helper (rotate transition between lines) ──
+  const JUMP_MS = parseInt(getComputedStyle(document.documentElement)
+    .getPropertyValue("--splash-jump-ms").trim(), 10) || 520;
+  const _sleep = ms => new Promise(r => setTimeout(r, ms));
+  const bootSub = bootOverlay.querySelector("#splashSub");
+  const bootSubText = bootOverlay.querySelector("#splashSubText");
+
+  async function jumpSwap(nextText) {
+    if (!bootSub || !bootSubText) return;
+    bootSub.classList.remove("static");
+    bootSub.classList.remove("jumpIn", "jumpOut");
+    void bootSub.offsetHeight;
+    bootSub.classList.add("jumpOut");
+    await _sleep(JUMP_MS);
+    bootSub.classList.remove("jumpOut");
+    bootSubText.textContent = nextText;
+    void bootSub.offsetHeight;
+    bootSub.classList.add("jumpIn");
+    await _sleep(JUMP_MS);
+    bootSub.classList.remove("jumpIn");
+    bootSub.classList.add("static");
+  }
+
   // Build badge — always-visible cache version indicator for debugging
   if (SHOW_BUILD_BADGE) {
     const reg = await navigator.serviceWorker?.getRegistration?.();
@@ -7480,10 +7503,10 @@ async function init() {
   // Now that the home screen is painted, fade out any remaining onboarding overlays
   dismissOnboarding();
 
-  // ── Await critical data tasks (with timeout so app never freezes) ──
+  // ── Sync data while cycling through subtext lines ──
   const withTimeout = (p, ms) => Promise.race([p, new Promise(r => setTimeout(r, ms))]);
 
-  await withTimeout(Promise.all([
+  const syncTask = withTimeout(Promise.all([
     restoreCoverUrlsFromCache().then(() => render()).catch(() => {}),
     (!_importFlowRan
       ? incrementalSyncFromSupabase().then(() => {
@@ -7492,6 +7515,13 @@ async function init() {
       : Promise.resolve()),
     refreshSharedData().catch(console.warn),
   ]), 8000); // 8s max — don't block the app forever
+
+  // Cycle subtext: "Indexing your universe" → "Syncing sessions" → "Entering RiffBank"
+  await _sleep(2400);
+  await jumpSwap("Syncing sessions");
+  await Promise.all([_sleep(2400), syncTask]); // wait for both hold time & sync
+  await jumpSwap("Entering RiffBank");
+  await _sleep(900);
 
   // Scan cached audio blobs (non-blocking, doesn't affect rendering)
   (async () => {
@@ -7506,14 +7536,9 @@ async function init() {
     }
   })();
 
-  // Final render with all data in place
+  // Final render with all data in place, then fade out
   render();
   syncMiniPlayerUI();
-
-  // Transition subtext, then fade out
-  const bootSubText = bootOverlay.querySelector("#splashSubText");
-  if (bootSubText) bootSubText.textContent = "Entering RiffBank...";
-  await new Promise(r => setTimeout(r, 600));
 
   bootOverlay.classList.add("hide");
   bootOverlay.addEventListener("transitionend", () => bootOverlay.remove());
