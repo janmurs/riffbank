@@ -583,11 +583,15 @@ class Nav {
       if (noVT) { this._transitionActive = false; mutate(); return; }
 
       docEl.classList.add(vtClass);
+      console.log("[VT] starting forward transition");
       const transition = document.startViewTransition(() => {
+        console.log("[VT] mutate callback running");
         mutate();
         this._transitionActive = false;
+        console.log("[VT] mutate done, activeScreen:", activeScreenName);
       });
-      transition.finished.finally(() => docEl.classList.remove(vtClass));
+      transition.ready.then(() => console.log("[VT] ready — animating")).catch(e => console.warn("[VT] ready rejected:", e.message));
+      transition.finished.then(() => console.log("[VT] finished OK")).catch(e => console.warn("[VT] finished rejected:", e.message)).finally(() => docEl.classList.remove(vtClass));
     }
 
     else if (direction === "back") {
@@ -605,14 +609,18 @@ class Nav {
 
       docEl.classList.add(vtClass);
       this._transitionActive = true;
+      console.log("[VT] starting back transition");
       const transition = document.startViewTransition(() => {
+        console.log("[VT] back mutate running");
         mutate();
         this._transitionActive = false;
+        console.log("[VT] back mutate done, activeScreen:", activeScreenName);
         // Restore scroll so the API captures the correct scroll position
         const screen = document.querySelector(".screen.is-active");
         if (aceScrollTop && screen) screen.scrollTop = aceScrollTop;
       });
-      transition.finished.finally(() => docEl.classList.remove(vtClass));
+      transition.ready.then(() => console.log("[VT] back ready — animating")).catch(e => console.warn("[VT] back ready rejected:", e.message));
+      transition.finished.then(() => console.log("[VT] back finished OK")).catch(e => console.warn("[VT] back finished rejected:", e.message)).finally(() => docEl.classList.remove(vtClass));
     }
 
     else if (direction === "jumpHome") {
@@ -622,7 +630,7 @@ class Nav {
 
       docEl.classList.add(vtClass);
       const transition = document.startViewTransition(() => mutate());
-      transition.finished.finally(() => docEl.classList.remove(vtClass));
+      transition.finished.catch(() => {}).finally(() => docEl.classList.remove(vtClass));
     }
   }
 
@@ -5612,32 +5620,32 @@ function render() {
     return renderLyricsScratch();
   }
   if (overlayView === "friendRequests") {
-    setActiveScreen("collab");
+    setActiveScreen("drawer");
     if (!_isBack) activeScreenEl.scrollTop = 0;
     return renderFriendRequests();
   }
   if (overlayView === "friendsList") {
-    setActiveScreen("collab");
+    setActiveScreen("drawer");
     if (!_isBack) activeScreenEl.scrollTop = 0;
     return renderFriendsList();
   }
   if (overlayView === "addFriend") {
-    setActiveScreen("collab");
+    setActiveScreen("drawer");
     if (!_isBack) activeScreenEl.scrollTop = 0;
     return renderAddFriend();
   }
   if (overlayView === "friendProfile") {
-    setActiveScreen("collab");
+    setActiveScreen("drawer");
     if (!_isBack) activeScreenEl.scrollTop = 0;
     return renderFriendProfile(friendProfileId);
   }
   if (overlayView === "messages") {
-    setActiveScreen("collab");
+    setActiveScreen("drawer");
     if (!_isBack) activeScreenEl.scrollTop = 0;
     return renderMessages();
   }
   if (overlayView === "chat") {
-    setActiveScreen("collab");
+    setActiveScreen("drawer");
     if (!_isBack) activeScreenEl.scrollTop = 0;
     return renderChat(friendProfileId);
   }
@@ -7521,6 +7529,7 @@ async function init() {
   // ── Sync data while cycling through subtext lines ──
   const withTimeout = (p, ms) => Promise.race([p, new Promise(r => setTimeout(r, ms))]);
 
+  let syncDone = false;
   const syncTask = withTimeout(Promise.all([
     restoreCoverUrlsFromCache().then(() => render()).catch(() => {}),
     (!_importFlowRan
@@ -7528,15 +7537,25 @@ async function init() {
           preFetchCloudAudio().catch(console.warn);
         }).catch(console.warn)
       : Promise.resolve()),
-    // refreshSharedData runs after boot, not during
-  ]), 8000); // 8s max — don't block the app forever
+  ]), 8000).then(() => { syncDone = true; }); // 8s max — don't block the app forever
 
-  // Cycle subtext: "Indexing your universe" → "Syncing sessions" → "Entering RiffBank"
-  await _sleep(2400);
-  await jumpSwap("Syncing sessions");
-  await Promise.all([_sleep(2400), syncTask]); // wait for both hold time & sync
+  // Cycle subtext until sync finishes, then show "Entering RiffBank"
+  const lines = ["Indexing your universe", "Syncing sessions"];
+  let lineIdx = 0;
+  const MIN_HOLD = 1200; // minimum time per line so it doesn't flash
+
+  // Show first line for at least MIN_HOLD, then cycle until sync is done
+  await _sleep(MIN_HOLD);
+  while (!syncDone) {
+    lineIdx = (lineIdx + 1) % lines.length;
+    await jumpSwap(lines[lineIdx]);
+    // Wait for either sync to finish or MIN_HOLD, whichever is longer
+    await Promise.race([syncTask, _sleep(MIN_HOLD)]);
+  }
+
+  // Sync is done — show "Entering RiffBank" briefly then dismiss
   await jumpSwap("Entering RiffBank");
-  await _sleep(900);
+  await _sleep(700);
 
   // Scan cached audio blobs (non-blocking, doesn't affect rendering)
   (async () => {
@@ -9856,7 +9875,7 @@ function renderCollab() {
     card.addEventListener("click", () => {
       const target = card.getAttribute("data-collab-nav");
       if (target === "friends") {
-        navigateForward(() => { openFriendsList(); });
+        openFriendsList();
       } else if (target === "songs") {
         console.log("[Collab] Songs card tapped — navigating forward");
         navigateForward(() => {
@@ -9868,18 +9887,18 @@ function renderCollab() {
           console.log("[Collab] State set, render will follow");
         });
       } else if (target === "messages") {
-        navigateForward(() => { openMessages(); });
+        openMessages();
       } else if (target === "add") {
-        navigateForward(() => { openAddFriend(); });
+        openAddFriend();
       }
     });
   });
 
-  // Refresh shared data when opening Collab (with cooldown to avoid connection pool issues)
-  const _now = Date.now();
-  if (!refreshSharedData._lastRun || (_now - refreshSharedData._lastRun > 60000)) {
-    refreshSharedData().catch(() => {});
-  }
+  // Refresh shared data when opening Collab (with cooldown + delay to avoid interrupting transitions)
+  // const _now = Date.now();
+  // if (!refreshSharedData._lastRun || (_now - refreshSharedData._lastRun > 60000)) {
+  //   setTimeout(() => refreshSharedData().catch(() => {}), 500);
+  // }
 
   // Collapse title scroll handler
   if (activeScreenEl._collapseTitleScroll) {
@@ -10477,7 +10496,8 @@ function renderFriendsList() {
     </div>
   `;
 
-  getMyFriends().then(friends => {
+  // Delay async fetch so view transition can capture snapshot first
+  setTimeout(() => getMyFriends().then(friends => {
     const body = activeScreenEl.querySelector(".friendsBody");
     if (!body) return;
     if (!friends.length) {
@@ -10539,7 +10559,7 @@ function renderFriendsList() {
   }).catch(() => {
     const body = activeScreenEl.querySelector(".friendsBody");
     if (body) body.innerHTML = `<div class="friendsEmpty">Failed to load friends.</div>`;
-  });
+  }), 350); // 350ms delay to let view transition capture snapshot
 }
 
 // ── Public Profile View (friend/user profile) ──
@@ -10853,7 +10873,7 @@ function renderMessages() {
     </div>
   `;
 
-  getConversations().then(convos => {
+  setTimeout(() => getConversations().then(convos => {
     const body = activeScreenEl.querySelector(".msgBody");
     if (!body) return;
     if (!convos.length) {
@@ -10864,7 +10884,7 @@ function renderMessages() {
   }).catch(() => {
     const body = activeScreenEl.querySelector(".msgBody");
     if (body) body.innerHTML = `<div class="friendsEmpty">Failed to load messages.</div>`;
-  });
+  }), 350);
 }
 
 function _renderConvoList(body, convos) {
