@@ -110,6 +110,7 @@ import {
   supabaseUploadAudio, supabaseFetchAudioBlob, supabaseDeleteAudio, supabaseDiscoverAudioPaths,
   supabaseUploadCover, supabaseFetchCoverBlob, supabaseCountUserSongs,
   createShareInvite, getShareInvite, acceptShareInvite,
+  fetchAllSharedData,
   pullSharedProjects, pullSharedSongs, pullMySharedProjects, pullMySharedSongs,
   listMyInvites, deleteShareInvite,
   removeProjectMember, upsertProfile, searchUsers, shareWithUser,
@@ -1060,6 +1061,21 @@ const AUDIO_DB = "riffbank_audio_v1";
 const AUDIO_STORE = "files";
 const audioUrlCache = new Map(); // localAudioId -> objectURL
 const coverUrlCache = new Map(); // coverPath -> blob objectURL (persists via IndexedDB)
+
+// One-time cache flush to fix stale audio from public URL migration (v2026-03-23)
+if (!localStorage.getItem("_audioCacheFlushed_v1")) {
+  try {
+    const _flushReq = indexedDB.open(AUDIO_DB, 1);
+    _flushReq.onsuccess = () => {
+      const db = _flushReq.result;
+      if (db.objectStoreNames.contains(AUDIO_STORE)) {
+        const tx = db.transaction(AUDIO_STORE, "readwrite");
+        tx.objectStore(AUDIO_STORE).clear();
+        tx.oncomplete = () => { localStorage.setItem("_audioCacheFlushed_v1", "1"); console.log("[Cache] Audio cache flushed (one-time migration)"); };
+      }
+    };
+  } catch (e) { console.warn("[Cache] flush failed:", e); }
+}
 
 // ---------------------
 // iOS audio unlock (required if you do async before play())
@@ -3402,14 +3418,13 @@ function _applyAllBadges(msgCount, friendCount) {
 // Poll message badges every 10s
 setInterval(syncMessageBadges, 10000);
 
-// Poll shared data every 30s to detect new shares and show notifications
-setInterval(() => { refreshSharedData().catch(() => {}); }, 30000);
+// Shared data polling disabled — fetch on-demand from Collab tab only
 
 // Also check when app comes back to foreground
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     syncMessageBadges();
-    refreshSharedData().catch(() => {});
+    // refreshSharedData on visibility — disabled to prevent connection issues
   }
 });
 
@@ -7513,7 +7528,7 @@ async function init() {
           preFetchCloudAudio().catch(console.warn);
         }).catch(console.warn)
       : Promise.resolve()),
-    refreshSharedData().catch(console.warn),
+    // refreshSharedData runs after boot, not during
   ]), 8000); // 8s max — don't block the app forever
 
   // Cycle subtext: "Indexing your universe" → "Syncing sessions" → "Entering RiffBank"
@@ -7554,6 +7569,10 @@ async function init() {
 
   // Check for Web Share Target file
   checkSharedAudioFile();
+
+  // Fetch shared data 10s after boot (delayed so it doesn't compete with initial load)
+  // Shared data refresh — wait 30s to ensure all boot queries are done
+  setTimeout(() => refreshSharedData().catch(console.warn), 30000);
 }
 
 // Incremental sync: pull Supabase state and merge only new/changed songs
@@ -9725,15 +9744,17 @@ function _showShareNotification(newItems) {
   toast(label);
 }
 
+let _refreshSharedRunning = false;
 async function refreshSharedData() {
+  if (_refreshSharedRunning) return; // prevent overlapping runs
+  _refreshSharedRunning = true;
+  refreshSharedData._lastRun = Date.now();
   try {
-    const [projects, songs, invites, myProjects, mySongs] = await Promise.all([
-      pullSharedProjects(),
-      pullSharedSongs(),
-      listMyInvites(),
-      pullMySharedProjects(),
-      pullMySharedSongs(),
-    ]);
+    console.log("[Collab] fetching all shared data (single RPC)...");
+    const result = await fetchAllSharedData();
+    if (!result) { console.warn("[Collab] RPC returned null"); return; }
+    const { projects, songs, invites, myProjects, mySongs } = result;
+    console.log("[Collab] all done");
 
     // Detect newly shared items
     const newItems = [];
@@ -9762,6 +9783,8 @@ async function refreshSharedData() {
   } catch (e) {
     console.warn("[Collab] Failed to fetch shared data:", e);
     if (!sharedData.loaded) sharedData = { projects: [], songs: [], invites: [], myProjects: [], mySongs: [], loaded: true };
+  } finally {
+    _refreshSharedRunning = false;
   }
 }
 
@@ -9835,11 +9858,14 @@ function renderCollab() {
       if (target === "friends") {
         navigateForward(() => { openFriendsList(); });
       } else if (target === "songs") {
+        console.log("[Collab] Songs card tapped — navigating forward");
         navigateForward(() => {
+          console.log("[Collab] Inside navigateForward callback — setting ownerFilter=shared");
           songsListState.ownerFilter = "shared";
           currentTab = "songs";
           songsView = "list";
           selectedSongId = null;
+          console.log("[Collab] State set, render will follow");
         });
       } else if (target === "messages") {
         navigateForward(() => { openMessages(); });
@@ -9849,8 +9875,11 @@ function renderCollab() {
     });
   });
 
-  // Refresh shared data & badges in background
-  refreshSharedData().catch(() => {});
+  // Refresh shared data when opening Collab (with cooldown to avoid connection pool issues)
+  const _now = Date.now();
+  if (!refreshSharedData._lastRun || (_now - refreshSharedData._lastRun > 60000)) {
+    refreshSharedData().catch(() => {});
+  }
 
   // Collapse title scroll handler
   if (activeScreenEl._collapseTitleScroll) {
@@ -10318,12 +10347,10 @@ function renderCollabContent() {
     });
   });
 
-  // Pull fresh data in background if stale
-  if (sharedData.loaded) {
-    refreshSharedData().then(() => {
-      // Only re-render if data actually changed
-    }).catch(() => {});
-  }
+  // Pull fresh data in background if stale — disabled for debugging
+  // if (sharedData.loaded) {
+  //   refreshSharedData().then(() => {}).catch(() => {});
+  // }
 }
 
 // ── Friends Overlays ─────────────────────────────
@@ -12956,6 +12983,7 @@ function coverSvg(song, { lite = false } = {}) {
 // Songs list + create
 // ---------------------
 function renderSongsList() {
+  console.log("[renderSongsList] START, ownerFilter:", songsListState.ownerFilter);
   setHeader("Songs");
   const appEl = document.querySelector(".app");
   appEl?.classList.add("collapseTitle");
@@ -12963,20 +12991,34 @@ function renderSongsList() {
   const h1 = appEl?.querySelector(".titleblock h1");
   if (h1) h1.style.opacity = "0";
 
-  // Merge own songs + shared songs
-  const sharedSongs = (sharedData.songs || []).map(ss => ({ ...ss.song, _shared: true, _sharedBy: ss.ownerName || "Someone" }));
-  const sharedProjectSongs = (sharedData.projects || []).flatMap(sp =>
-    (sp.songs || []).map(s => ({ ...s, _shared: true, _sharedBy: sp.ownerName || "Someone" }))
-  );
-  const allSharedSongs = [...sharedSongs, ...sharedProjectSongs].filter(s => !state.songs.find(own => own.id === s.id));
-
-  // Ensure shared songs are in the lookup cache so getSong() finds them
+  // Merge own songs + shared songs — use stable cached objects to preserve cover resolution flags
   if (!state._sharedSongsCache) state._sharedSongsCache = [];
-  for (const s of allSharedSongs) {
-    if (!state._sharedSongsCache.find(c => c.id === s.id)) {
+  const _sharedRaw = [
+    ...(sharedData.songs || []).map(ss => ({ ...ss.song, _shared: true, _sharedBy: ss.ownerName || "Someone" })),
+    ...(sharedData.projects || []).flatMap(sp =>
+      (sp.songs || []).map(s => ({ ...s, _shared: true, _sharedBy: sp.ownerName || "Someone" }))
+    ),
+  ].filter(s => !state.songs.find(own => own.id === s.id));
+
+  // Upsert into stable cache — same object reference across renders
+  for (const s of _sharedRaw) {
+    const existing = state._sharedSongsCache.find(c => c.id === s.id);
+    if (existing) {
+      // Update data but keep the same object reference (preserves _coverResolving etc)
+      for (const k of Object.keys(s)) {
+        if (k !== "_coverResolving" && k !== "_userCoverResolving" && k !== "coverImageUrl" && k !== "userCoverImageUrl") {
+          existing[k] = s[k];
+        }
+      }
+      // Only set cover URLs if not already resolved
+      if (!existing.coverImageUrl && s.coverImageUrl) existing.coverImageUrl = s.coverImageUrl;
+      if (!existing.userCoverImageUrl && s.userCoverImageUrl) existing.userCoverImageUrl = s.userCoverImageUrl;
+    } else {
       state._sharedSongsCache.push(s);
     }
   }
+  // Use cached objects (stable references)
+  const allSharedSongs = state._sharedSongsCache.filter(s => s._shared);
 
   const ownSongs = state.songs.map(s => ({ ...s, _shared: false }));
   const allSongs = [...ownSongs, ...allSharedSongs];
@@ -13023,6 +13065,7 @@ function renderSongsList() {
     </button>
   `;
 
+  console.log("[renderSongsList] innerHTML set, building list...");
   const listEl = $("#songList");
 
   const applyFilter = () => {
