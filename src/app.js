@@ -6,14 +6,14 @@
 // - Export / Import
 // - Supabase integration (auth, cloud sync, audio/cover storage)
 
-window.onerror = (m, src, line, col) => alert(`JS ERROR:\n${m}\n${line}:${col}`);
+window.onerror = (m, src, line, col) => console.error(`[RiffBank] JS ERROR: ${m} (${line}:${col})`);
 
 // Dev toggles: skip splash / welcome screen
  const DISABLE_SPLASH = true;
  const DISABLE_WELCOME = true;
 
 // Debug: show cache version badge on every screen (toggle on/off)
-const SHOW_BUILD_BADGE = true;
+const SHOW_BUILD_BADGE = false;
 
 // ── Activity log (alerts bell) ──
 // Each entry: { id, songTitle, status: "saving"|"compressing"|"uploading"|"syncing"|"done"|"failed", ts, message }
@@ -1046,7 +1046,7 @@ function navigateForward(mutateFn) {
   const captured = {
     currentTab, drawerView, projectDetailScreen, releaseDetailId,
     selectedSongId, selectedVersionId, songsView, overlayView, friendProfileId,
-    songsBackTarget, lyricsEditSongId, collabMode, headerTitle: headerTitle?.textContent ?? "RiffBank"
+    songsBackTarget, lyricsEditSongId, collabMode, songsFromCollab, headerTitle: headerTitle?.textContent ?? "RiffBank"
   };
   nav.captureState(captured);
   nav.slideTransition({
@@ -1474,10 +1474,7 @@ function isHomeRoot() {
 }
 
 function toast(msg) {
-  if (!toastEl) return;
-  toastEl.textContent = msg;
-  toastEl.classList.add("show");
-  setTimeout(() => toastEl.classList.remove("show"), 1400);
+  console.log("[RiffBank]", msg);
 }
 
 // ---------------------
@@ -2456,7 +2453,7 @@ async function recoverAndUploadAudio() {
     ? `Recovery: ${uploaded} uploaded, ${failed} failed` + (relinked ? `, ${relinked} re-linked` : "")
     : "Recovery: nothing to do (all synced or no blobs found)";
   if (errors.length) msg += "\n\nErrors:\n" + errors.slice(0, 5).join("\n");
-  alert(msg);
+  console.log("[RiffBank Recovery]", msg);
 }
 
 // Debug: run `debugRecovery()` in browser console or tap "Debug Recovery" in Settings
@@ -2496,7 +2493,7 @@ window.debugRecovery = async () => {
   lines.push("");
   for (const d of details) lines.push(d);
 
-  alert(lines.join("\n"));
+  console.log("[RiffBank Debug]\n" + lines.join("\n"));
 };
 
 // Pick audio from iOS Files picker
@@ -2976,6 +2973,7 @@ const songsListState = {
 
 let projectsOwnerFilter = "all"; // "all" | "mine" | "shared"
 
+let songsFromCollab = false; // true when Songs opened from Collab screen
 let drawerView = null;
 let songsBackTarget = null; // e.g. "projects" | "collabs"
 let drawerOpen = false;
@@ -3520,6 +3518,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
         songsView = "list";
         songsListScrollTop = 0;
         collabMode = false;
+        songsFromCollab = false;
         currentTab = "home";
         if (screens.home) screens.home.scrollTop = 0;
         try { window.scrollTo(0, 0); } catch {}
@@ -3545,6 +3544,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
     songsView = "list";
     songsListScrollTop = 0;
     collabMode = false;
+    songsFromCollab = false;
 
     currentTab = targetTab;
     if (targetTab === "player") {
@@ -3668,6 +3668,7 @@ function goBack({ animate = false } = {}) {
       songsBackTarget = restoreState.songsBackTarget;
       lyricsEditSongId = restoreState.lyricsEditSongId ?? null;
       collabMode = restoreState.collabMode ?? false;
+      songsFromCollab = restoreState.songsFromCollab ?? false;
       // Going back to home resets songs scroll so next visit starts fresh
       if (restoreState.currentTab === "home" && !restoreState.drawerView) songsListScrollTop = 0;
       setHeader(restoreState.headerTitle);
@@ -5530,7 +5531,7 @@ $("#importFile")?.addEventListener("change", async (e) => {
     const incoming = JSON.parse(txt);
 
     if (!incoming || !incoming.songs || !incoming.settings) {
-      alert("That file doesn't look like a RiffBank backup.");
+      console.warn("[RiffBank] That file doesn't look like a RiffBank backup.");
       return;
     }
 
@@ -5542,7 +5543,7 @@ $("#importFile")?.addEventListener("change", async (e) => {
     toast("Imported ✅");
     render();
   } catch {
-    alert("Could not parse that JSON file.");
+    console.warn("[RiffBank] Could not parse that JSON file.");
   } finally {
     if (input) input.value = "";
   }
@@ -7004,8 +7005,6 @@ function openAvatarCrop(file) {
 // ── Profile Setup (shown once after first signup) ──
 
 async function showProfileSetupIfNeeded() {
-  if (localStorage.getItem("profileSetupDone")) return;
-
   try {
     const { data: userData } = await supabase.auth.getUser();
     const uid = userData?.user?.id;
@@ -7020,6 +7019,7 @@ async function showProfileSetupIfNeeded() {
     }
   } catch {
     // profiles table may not exist yet — still show setup
+    if (localStorage.getItem("profileSetupDone")) return;
   }
 
   await showProfileSetup();
@@ -8812,6 +8812,8 @@ function renderHome() {
       if (target === "songs") {
         navigateForward(() => {
           resetSongsFilters({ keepSort: true });
+          songsListState.ownerFilter = "all";
+          songsFromCollab = false;
           songsBackTarget = null;
           songsListScrollTop = 0;
           currentTab = "songs";
@@ -8822,6 +8824,7 @@ function renderHome() {
       }
       if (target === "projects") {
         navigateForward(() => {
+          projectsOwnerFilter = "all";
           drawerView = "projects";
           closeDrawer();
           selectedSongId = null;
@@ -9868,6 +9871,7 @@ function renderCollab() {
         navigateForward(() => {
           console.log("[Collab] Inside navigateForward callback — setting ownerFilter=shared");
           songsListState.ownerFilter = "shared";
+          songsFromCollab = true;
           currentTab = "songs";
           songsView = "list";
           selectedSongId = null;
@@ -11394,7 +11398,10 @@ function renderProfileContent(profile) {
   // Sign out
   $("#profSignOut")?.addEventListener("click", async () => {
     if (!confirm("Sign out of RiffBank?")) return;
-    try { await signOut(); location.reload(); } catch (e) { toast(e.message || "Sign out failed"); }
+    try {
+      localStorage.removeItem("profileSetupDone");
+      await signOut(); location.reload();
+    } catch (e) { toast(e.message || "Sign out failed"); }
   });
 
   // Reset welcome flow (testing)
@@ -13047,10 +13054,10 @@ function renderSongsList() {
 
   activeScreenEl.innerHTML = `
     <div class="songsTitleRow">
-      <div class="songsPageTitle">Songs</div>
-      <div class="ownerDropWrap">
+      <div class="songsPageTitle">${songsFromCollab ? "Shared Songs" : "Songs"}</div>
+      ${songsFromCollab ? "" : `<div class="ownerDropWrap">
         <button class="ownerDropBtn">${ownerLabels[ownerFilter]}${chevronDown}</button>
-      </div>
+      </div>`}
     </div>
     <div class="songsHead">
       <div class="songsBar">
@@ -15080,7 +15087,7 @@ function renderSettings() {
     const greens = results.length - reds.length - yellows.length;
     let msg = `${results.length} versions: ${greens} synced, ${yellows.length} local only, ${reds.length} no audio`;
     if (reds.length) msg += `\n\nBroken:\n${reds.map(r => `• ${r.song} / ${r.version}`).join("\n")}`;
-    alert(msg);
+    console.log("[RiffBank Audit]", msg);
   });
 
   $("#wipe").addEventListener("click", async () => {
