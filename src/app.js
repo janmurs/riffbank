@@ -1065,25 +1065,12 @@ const toastEl = $("#toast");
 // ---------------------
 // Audio storage (IndexedDB) - Phase 1
 // ---------------------
-const AUDIO_DB = "riffbank_audio_v1";
+const AUDIO_DB = "riffbank_audio_v2";
 const AUDIO_STORE = "files";
 const audioUrlCache = new Map(); // localAudioId -> objectURL
 const coverUrlCache = new Map(); // coverPath -> blob objectURL (persists via IndexedDB)
 
-// One-time cache flush to fix stale audio from public URL migration (v2026-03-23)
-if (!localStorage.getItem("_audioCacheFlushed_v1")) {
-  try {
-    const _flushReq = indexedDB.open(AUDIO_DB, 1);
-    _flushReq.onsuccess = () => {
-      const db = _flushReq.result;
-      if (db.objectStoreNames.contains(AUDIO_STORE)) {
-        const tx = db.transaction(AUDIO_STORE, "readwrite");
-        tx.objectStore(AUDIO_STORE).clear();
-        tx.oncomplete = () => { localStorage.setItem("_audioCacheFlushed_v1", "1"); console.log("[Cache] Audio cache flushed (one-time migration)"); };
-      }
-    };
-  } catch (e) { console.warn("[Cache] flush failed:", e); }
-}
+// v2 DB name abandons the corrupt v1 DB — no flush needed
 
 // ---------------------
 // iOS audio unlock (required if you do async before play())
