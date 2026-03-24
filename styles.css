@@ -4856,6 +4856,7 @@ body {
   opacity: 0;
 }
 .app.pdActive .topbar .headerBack{
+  left: 16px;
   color: #fff;
   filter: drop-shadow(0 1px 3px rgba(0,0,0,.6));
 }

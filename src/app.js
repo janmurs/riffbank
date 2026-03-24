@@ -3566,6 +3566,12 @@ document.querySelectorAll(".tab").forEach((btn) => {
 
 // Tap header to go Home (feels app-y)
 headerTitle?.addEventListener("click", () => {
+  // Ignore taps when already on a root tab with no nav depth — prevents ghost
+  // back-button behaviour on Collab/Home/Player root screens where the collapsed
+  // titleblock overlaps the area where a back chevron would appear.
+  const onRoot = ROOT_TABS.has(currentTab) || currentTab === "collab" || currentTab === "profile";
+  if (onRoot && nav.depth === 0 && !drawerView && !overlayView && !selectedSongId && !projectDetailScreen) return;
+
   const resetToHome = () => {
     drawerView = null;
     overlayView = null;
@@ -7008,20 +7014,25 @@ async function showProfileSetupIfNeeded() {
   try {
     const { data: userData } = await supabase.auth.getUser();
     const uid = userData?.user?.id;
-    if (!uid) return;
+    console.log("[ProfileSetup] uid:", uid);
+    if (!uid) { console.log("[ProfileSetup] no uid, skipping"); return; }
 
     // Check if profile already exists in DB — skip setup if so
     const { data: existing } = await supabase
       .from("profiles").select("id, display_name").eq("id", uid).maybeSingle();
+    console.log("[ProfileSetup] existing:", existing);
     if (existing?.display_name) {
+      console.log("[ProfileSetup] profile exists, skipping");
       localStorage.setItem("profileSetupDone", "1");
       return;
     }
-  } catch {
+  } catch (e) {
+    console.warn("[ProfileSetup] error:", e);
     // profiles table may not exist yet — still show setup
     if (localStorage.getItem("profileSetupDone")) return;
   }
 
+  console.log("[ProfileSetup] showing setup");
   await showProfileSetup();
 }
 
