@@ -37,9 +37,18 @@ function _saveNotifications(items) {
   try { localStorage.setItem(NOTIF_STORAGE_KEY, JSON.stringify(items)); } catch {}
 }
 
-function addNotification({ title, body, type = "share" }) {
+function addNotification({ title, body, type = "share", friendshipId, requesterName, requesterId, avatarUrl }) {
   const items = _loadNotifications();
-  items.unshift({ id: crypto.randomUUID(), title, body, type, ts: Date.now(), read: false });
+  // Don't duplicate friend request notifications for the same friendship
+  if (type === "friend_request" && friendshipId) {
+    if (items.some(n => n.type === "friend_request" && n.friendshipId === friendshipId)) return;
+  }
+  const entry = { id: crypto.randomUUID(), title, body, type, ts: Date.now(), read: false };
+  if (friendshipId) entry.friendshipId = friendshipId;
+  if (requesterName) entry.requesterName = requesterName;
+  if (requesterId) entry.requesterId = requesterId;
+  if (avatarUrl) entry.avatarUrl = avatarUrl;
+  items.unshift(entry);
   if (items.length > 100) items.length = 100;
   _saveNotifications(items);
   _updateNotifBadge();
@@ -3329,6 +3338,11 @@ function syncProfileNavIcon() {
 // Unread message badge — updates Collab nav icon + Messages sidebar button
 let _unreadMsgCount = 0;
 let _prevUnreadMsgCount = 0;
+let _prevPendingFriendCount = 0;
+// Track which friend requests we've already created notifications for
+let _knownFriendRequestIds = new Set(
+  _loadNotifications().filter(n => n.friendshipId).map(n => n.friendshipId)
+);
 
 // Request notification permission (called once on first message interaction)
 let _notifPermissionAsked = false;
@@ -3380,11 +3394,36 @@ function syncMessageBadges() {
     if (msgCount > _unreadMsgCount) {
       _showMessageNotification(msgCount);
     }
+    // Detect new friend requests and add to notification inbox
+    if (friendCount > _prevPendingFriendCount && _prevPendingFriendCount >= 0) {
+      _addFriendRequestNotifications();
+    }
     _prevUnreadMsgCount = _unreadMsgCount;
     _unreadMsgCount = msgCount;
+    _prevPendingFriendCount = _pendingFriendCount;
     _pendingFriendCount = friendCount;
     _applyAllBadges(msgCount, friendCount);
   });
+}
+
+// Fetch pending friend requests and add notifications for any we haven't seen
+function _addFriendRequestNotifications() {
+  getPendingFriendRequests().then(requests => {
+    for (const r of requests) {
+      if (_knownFriendRequestIds.has(r.id)) continue;
+      _knownFriendRequestIds.add(r.id);
+      const name = r.profile?.display_name || "Someone";
+      addNotification({
+        title: "Friend Request",
+        body: `${name} sent you a friend request`,
+        type: "friend_request",
+        friendshipId: r.id,
+        requesterName: name,
+        requesterId: r.requester_id,
+        avatarUrl: r.profile?.avatar_url || null,
+      });
+    }
+  }).catch(() => {});
 }
 
 function _applyAllBadges(msgCount, friendCount) {
@@ -7575,7 +7614,17 @@ async function init() {
   bootOverlay.classList.add("hide");
   bootOverlay.addEventListener("transitionend", () => bootOverlay.remove());
 
-  // Sync unread message badges
+  // Sync unread message badges — seed notifications for any pending friend requests not yet in inbox
+  getPendingFriendRequests().then(requests => {
+    for (const r of requests) {
+      _knownFriendRequestIds.add(r.id);
+      const existing = _loadNotifications();
+      if (!existing.some(n => n.friendshipId === r.id)) {
+        const name = r.profile?.display_name || "Someone";
+        addNotification({ title: "Friend Request", body: `${name} sent you a friend request`, type: "friend_request", friendshipId: r.id, requesterName: name, requesterId: r.requester_id, avatarUrl: r.profile?.avatar_url || null });
+      }
+    }
+  }).catch(() => {});
   syncMessageBadges();
 
   // Request notification permission early so share notifications work
@@ -9812,6 +9861,7 @@ async function refreshSharedData() {
 let _collabSidebarOpen = false;
 let _friendsOverlayEl = null;
 let _pendingFriendCount = 0;
+let _pendingFriendAction = null; // { friendshipId, notifId } — set when navigating to profile from notification
 
 function renderCollab() {
   setHeader("Collab");
@@ -9837,7 +9887,7 @@ function renderCollab() {
         <div class="hShimmer"></div>
         <div class="hGrad"></div>
         <div class="hBody">
-          <div class="hLabel">Friends</div>
+          <div class="hLabel">Friends ${_pendingFriendCount ? `<span class="hCardBadge">${_pendingFriendCount}</span>` : ""}</div>
           ${friendBadge ? `<div class="hSub">${friendBadge}</div>` : ""}
         </div>
       </div>
@@ -10459,6 +10509,10 @@ function renderFriendRequests() {
           setTimeout(() => row.remove(), 300);
           toast("Friend request accepted!");
           _pendingFriendCount = Math.max(0, _pendingFriendCount - 1);
+          _applyAllBadges(_unreadMsgCount, _pendingFriendCount);
+          const notifs = _loadNotifications();
+          const match = notifs.find(n => n.type === "friend_request" && n.friendshipId === id);
+          if (match) _updateFriendNotification(match.id, "accepted");
         } catch (err) { toast(err.message || "Failed"); }
       });
     });
@@ -10475,6 +10529,10 @@ function renderFriendRequests() {
           setTimeout(() => row.remove(), 300);
           toast("Request declined");
           _pendingFriendCount = Math.max(0, _pendingFriendCount - 1);
+          _applyAllBadges(_unreadMsgCount, _pendingFriendCount);
+          const notifs = _loadNotifications();
+          const match = notifs.find(n => n.type === "friend_request" && n.friendshipId === id);
+          if (match) _updateFriendNotification(match.id, "declined");
         } catch (err) { toast(err.message || "Failed"); }
       });
     });
@@ -10493,10 +10551,89 @@ function openFriendsList() {
 function renderFriendsList() {
   setHeader("Friends");
   activeScreenEl.innerHTML = `
+    <div id="friendsPendingSection" style="display:none"></div>
     <div class="friendsBody" style="padding:16px 16px 40px; display:flex; flex-direction:column; gap:10px;">
       <div class="friendsEmpty"><div class="collabSpinner"></div><div style="margin-top:12px">Loading...</div></div>
     </div>
   `;
+
+  // Load pending friend requests at top
+  if (_pendingFriendCount) {
+    const pendingEl = activeScreenEl.querySelector("#friendsPendingSection");
+    getPendingFriendRequests().then(requests => {
+      if (!requests.length || !pendingEl) return;
+      pendingEl.style.display = "";
+      pendingEl.innerHTML = `
+        <div style="padding:16px 16px 0">
+          <div class="collabPendingSectionLabel">Pending Requests</div>
+          ${requests.map(r => `
+            <div class="collabPendingRow alertRowClickable" data-req-id="${r.id}" data-req-profile="${r.requester_id}">
+              ${_friendAvatarHTML(r.profile)}
+              <div class="friendInfo">
+                <div class="friendName">${escapeHtml(r.profile?.display_name || "Unknown")}</div>
+                <div class="friendMeta">${_friendMetaText(r.profile)}</div>
+              </div>
+              <div class="friendActions">
+                <button class="friendAcceptBtn" data-fl-accept="${r.id}">Accept</button>
+                <button class="friendDeclineBtn" data-fl-decline="${r.id}">Decline</button>
+              </div>
+            </div>
+          `).join("")}
+        </div>
+      `;
+      pendingEl.querySelectorAll("[data-fl-accept]").forEach(btn => {
+        btn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          const id = btn.getAttribute("data-fl-accept");
+          btn.textContent = "...";
+          try {
+            await acceptFriendRequest(id);
+            const row = btn.closest(".collabPendingRow");
+            row.style.opacity = ".4";
+            setTimeout(() => { row.remove(); if (!pendingEl.querySelector(".collabPendingRow")) pendingEl.style.display = "none"; }, 300);
+            toast("Friend request accepted!");
+            _pendingFriendCount = Math.max(0, _pendingFriendCount - 1);
+            _applyAllBadges(_unreadMsgCount, _pendingFriendCount);
+            const notifs = _loadNotifications();
+            const match = notifs.find(n => n.type === "friend_request" && n.friendshipId === id);
+            if (match) _updateFriendNotification(match.id, "accepted");
+          } catch (err) { toast(err.message || "Failed"); btn.textContent = "Accept"; }
+        });
+      });
+      pendingEl.querySelectorAll("[data-fl-decline]").forEach(btn => {
+        btn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          const id = btn.getAttribute("data-fl-decline");
+          btn.textContent = "...";
+          try {
+            await removeFriendship(id);
+            const row = btn.closest(".collabPendingRow");
+            row.style.opacity = ".4";
+            setTimeout(() => { row.remove(); if (!pendingEl.querySelector(".collabPendingRow")) pendingEl.style.display = "none"; }, 300);
+            toast("Request declined");
+            _pendingFriendCount = Math.max(0, _pendingFriendCount - 1);
+            _applyAllBadges(_unreadMsgCount, _pendingFriendCount);
+            const notifs = _loadNotifications();
+            const match = notifs.find(n => n.type === "friend_request" && n.friendshipId === id);
+            if (match) _updateFriendNotification(match.id, "declined");
+          } catch (err) { toast(err.message || "Failed"); btn.textContent = "Decline"; }
+        });
+      });
+      // Click row (outside buttons) → open profile with accept/decline bar
+      pendingEl.querySelectorAll("[data-req-profile]").forEach(row => {
+        row.addEventListener("click", (e) => {
+          if (e.target.closest("[data-fl-accept]") || e.target.closest("[data-fl-decline]")) return;
+          const userId = row.getAttribute("data-req-profile");
+          if (userId) {
+            navigateForward(() => {
+              friendProfileId = userId;
+              overlayView = "friendProfile";
+            });
+          }
+        });
+      });
+    }).catch(() => {});
+  }
 
   // Delay async fetch so view transition can capture snapshot first
   setTimeout(() => getMyFriends().then(friends => {
@@ -10581,14 +10718,24 @@ function renderFriendProfile(userId) {
     </div>
   `;
 
-  // Fetch profile + shared data in parallel
+  // Fetch profile + shared data + pending friendship status in parallel
   Promise.all([
     supabase.from("profiles").select("id, first_name, last_name, display_name, avatar_url, location, instrument, genre, bio").eq("id", userId).maybeSingle(),
     _getSharedWithUser(userId),
-  ]).then(([{ data: profile }, shared]) => {
+    getPendingFriendRequests().catch(() => []),
+  ]).then(([{ data: profile }, shared, pendingRequests]) => {
     if (!profile) {
       activeScreenEl.innerHTML = `<div class="profileWrap"><div class="friendsEmpty">Profile not found.</div></div>`;
       return;
+    }
+    // Auto-detect pending friend request from this user (works from any entry point)
+    if (!_pendingFriendAction) {
+      const pending = pendingRequests.find(r => r.requester_id === userId);
+      if (pending) {
+        const notifs = _loadNotifications();
+        const match = notifs.find(n => n.type === "friend_request" && n.friendshipId === pending.id);
+        _pendingFriendAction = { friendshipId: pending.id, notifId: match?.id || null };
+      }
     }
     _renderFriendProfileContent(profile, shared);
   }).catch(() => {
@@ -10719,9 +10866,47 @@ function _renderFriendProfileContent(profile, shared) {
         <div class="pdSongList">${allRows}</div>
       </div>
     </div>
+    ${_pendingFriendAction ? `
+      <div class="friendActionBar" id="fpFriendActionBar">
+        <button class="friendActionAccept" id="fpActionAccept">Accept Friend Request</button>
+        <button class="friendActionDecline" id="fpActionDecline">Decline</button>
+      </div>
+    ` : ""}
   `;
 
   activeScreenEl.scrollTop = 0;
+
+  // Wire accept/decline action bar if present
+  if (_pendingFriendAction) {
+    const action = _pendingFriendAction;
+    _pendingFriendAction = null; // consume it
+    $("#fpActionAccept")?.addEventListener("click", async () => {
+      const btn = $("#fpActionAccept");
+      btn.textContent = "Accepting...";
+      try {
+        await acceptFriendRequest(action.friendshipId);
+        if (action.notifId) _updateFriendNotification(action.notifId, "accepted");
+        _pendingFriendCount = Math.max(0, _pendingFriendCount - 1);
+        _applyAllBadges(_unreadMsgCount, _pendingFriendCount);
+        toast("Friend request accepted!");
+        const bar = $("#fpFriendActionBar");
+        if (bar) { bar.style.opacity = "0"; setTimeout(() => bar.remove(), 300); }
+      } catch (err) { toast(err.message || "Failed"); btn.textContent = "Accept Friend Request"; }
+    });
+    $("#fpActionDecline")?.addEventListener("click", async () => {
+      const btn = $("#fpActionDecline");
+      btn.textContent = "...";
+      try {
+        await removeFriendship(action.friendshipId);
+        if (action.notifId) _updateFriendNotification(action.notifId, "declined");
+        _pendingFriendCount = Math.max(0, _pendingFriendCount - 1);
+        _applyAllBadges(_unreadMsgCount, _pendingFriendCount);
+        toast("Request declined");
+        const bar = $("#fpFriendActionBar");
+        if (bar) { bar.style.opacity = "0"; setTimeout(() => bar.remove(), 300); }
+      } catch (err) { toast(err.message || "Failed"); btn.textContent = "Decline"; }
+    });
+  }
 
   // Tab switching
   const tabBody = $("#fpTabBody");
@@ -11657,6 +11842,7 @@ function renderAlerts() {
 
   const notifIcon = (type) => {
     if (type === "share") return `<span style="color:#a855f7"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg></span>`;
+    if (type === "friend_request" || type === "friend_accepted" || type === "friend_declined") return `<span style="color:#3b82f6"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg></span>`;
     return `<span style="color:#888">&#x1F514;</span>`;
   };
 
@@ -11668,19 +11854,36 @@ function renderAlerts() {
     return `${Math.floor(s / 86400)}d ago`;
   };
 
+  // Build avatar HTML for friend request notifications (supports preset: and http avatars)
+  const notifAvatar = (n) => {
+    const initial = (n.requesterName || "?").charAt(0).toUpperCase();
+    return `<div class="alertAvatar">${renderAvatarHtml(n.avatarUrl, 36, initial)}</div>`;
+  };
+
   // Notification inbox items (shares, etc.)
   const notifications = _loadNotifications();
   const notifHTML = notifications.length
-    ? notifications.map(n => `
-      <div class="alertRow${n.read ? "" : " alertUnread"}">
-        <div class="alertIcon">${notifIcon(n.type)}</div>
+    ? notifications.map(n => {
+      const isFR = n.type === "friend_request" || n.type === "friend_accepted" || n.type === "friend_declined";
+      const isPendingFR = n.type === "friend_request" && n.friendshipId;
+      const avatarHTML = isFR ? notifAvatar(n) : `<div class="alertIcon">${notifIcon(n.type)}</div>`;
+      const clickable = isPendingFR && n.requesterId ? `data-notif-profile="${n.requesterId}" data-notif-friendship="${n.friendshipId}" data-notif-id="${n.id}"` : "";
+      const actionBtns = isPendingFR ? `
+        <div class="alertFriendActions">
+          <button class="alertAcceptBtn" data-notif-accept="${n.id}" data-friendship-id="${n.friendshipId}">Accept</button>
+          <button class="alertDeclineBtn" data-notif-decline="${n.id}" data-friendship-id="${n.friendshipId}">Decline</button>
+        </div>` : "";
+      return `
+      <div class="alertRow${n.read ? "" : " alertUnread"}${isPendingFR ? " alertRowClickable" : ""}" ${clickable}>
+        ${avatarHTML}
         <div class="alertBody">
           <div class="alertTitle">${escapeHtml(n.title)}</div>
           <div class="alertMsg">${escapeHtml(n.body)}</div>
+          ${actionBtns}
         </div>
         <div class="alertTime">${timeAgo(n.ts)}</div>
-      </div>
-    `).join("")
+      </div>`;
+    }).join("")
     : "";
 
   // Activity log items (uploads, syncs)
@@ -11706,6 +11909,73 @@ function renderAlerts() {
       ${!hasContent ? `<div style="padding:40px 20px;text-align:center;color:#666">No notifications yet</div>` : ""}
     </div>
   `;
+
+  // Wire accept/decline buttons on friend request notifications
+  activeScreenEl.querySelectorAll("[data-notif-accept]").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const notifId = btn.getAttribute("data-notif-accept");
+      const friendshipId = btn.getAttribute("data-friendship-id");
+      btn.textContent = "...";
+      try {
+        await acceptFriendRequest(friendshipId);
+        _updateFriendNotification(notifId, "accepted");
+        _pendingFriendCount = Math.max(0, _pendingFriendCount - 1);
+        _applyAllBadges(_unreadMsgCount, _pendingFriendCount);
+        toast("Friend request accepted!");
+        renderAlerts();
+      } catch (err) { toast(err.message || "Failed"); btn.textContent = "Accept"; }
+    });
+  });
+  activeScreenEl.querySelectorAll("[data-notif-decline]").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const notifId = btn.getAttribute("data-notif-decline");
+      const friendshipId = btn.getAttribute("data-friendship-id");
+      btn.textContent = "...";
+      try {
+        await removeFriendship(friendshipId);
+        _updateFriendNotification(notifId, "declined");
+        _pendingFriendCount = Math.max(0, _pendingFriendCount - 1);
+        _applyAllBadges(_unreadMsgCount, _pendingFriendCount);
+        toast("Request declined");
+        renderAlerts();
+      } catch (err) { toast(err.message || "Failed"); btn.textContent = "Decline"; }
+    });
+  });
+
+  // Clickable friend request rows → open profile with accept/decline bar
+  activeScreenEl.querySelectorAll("[data-notif-profile]").forEach(row => {
+    row.addEventListener("click", (e) => {
+      // Don't navigate if they clicked the accept/decline buttons
+      if (e.target.closest("[data-notif-accept]") || e.target.closest("[data-notif-decline]")) return;
+      const userId = row.getAttribute("data-notif-profile");
+      const friendshipId = row.getAttribute("data-notif-friendship");
+      const notifId = row.getAttribute("data-notif-id");
+      if (userId) {
+        _pendingFriendAction = { friendshipId, notifId };
+        navigateForward(() => {
+          drawerView = null; // clear so render() doesn't re-enter alerts
+          friendProfileId = userId;
+          overlayView = "friendProfile";
+        });
+      }
+    });
+  });
+}
+
+// Update a friend request notification to show accepted/declined status
+function _updateFriendNotification(notifId, action) {
+  const items = _loadNotifications();
+  const n = items.find(i => i.id === notifId);
+  if (!n) return;
+  const name = n.requesterName || "Someone";
+  n.type = action === "accepted" ? "friend_accepted" : "friend_declined";
+  n.title = action === "accepted" ? "Friend Added" : "Request Declined";
+  n.body = `You ${action} ${name}'s friend request`;
+  delete n.friendshipId; // no longer actionable
+  n.ts = Date.now();
+  _saveNotifications(items);
 }
 
 function renderGlobalSearch() {
