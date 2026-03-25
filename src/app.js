@@ -1623,7 +1623,7 @@ if (typeof isNowPlayingFullscreen !== "undefined" && isNowPlayingFullscreen) {
   const song = getSong(now.songId);
   const v = song ? getVersion(song, now.versionId) : null;
 
-  if (!song || !v || !isPlayable(v)) {
+  if (!song) {
     miniPlayerEl.classList.add("hidden");
     miniPlayerEl.classList.remove("visible");
     miniPlayerEl.setAttribute("aria-hidden", "true");
@@ -1734,13 +1734,27 @@ miniScrubEl?.addEventListener("input", (e) => {
   }
 });
 
+let _autoSkipCount = 0; // guard against infinite skip loops
 async function playNowPlaying({ autoplay = true } = {}){
   const now = state.player?.nowPlaying;
   if (!now || !globalAudio) return;
 
   const url = await getPlayableUrlForVersion(now.songId, now.versionId);
-  if (!url) return toast("No playable audio 😅");
-  if (url === "drive-auth-required") return toast("Could not load audio — check your connection");
+  if (!url || url === "drive-auth-required") {
+    // Auto-skip to next playable track (limit skips to prevent infinite loop)
+    if (_autoSkipCount < 20) {
+      _autoSkipCount++;
+      console.warn(`[Player] Skipping unplayable track (${now.songId}), advancing...`);
+      if (advanceToNextTrack({ render: false })) return;
+    }
+    _autoSkipCount = 0;
+    // Keep mini player visible even though audio failed — don't leave user stranded
+    hasPlayedThisSession = true;
+    toast("No playable audio 😅");
+    await syncMiniPlayerUI();
+    return;
+  }
+  _autoSkipCount = 0; // reset on successful play
 
   // Mark that this session has begun playback (so mini player can appear)
   hasPlayedThisSession = true;
@@ -4242,34 +4256,52 @@ function advanceToNextTrack({ render: doRender = false } = {}) {
   }
 
   const q = state.player?.queue || [];
-  if (q.length) {
-    if (state.player.nowPlaying) {
-      if (!state.player.playHistory) state.player.playHistory = [];
-      state.player.playHistory.push(state.player.nowPlaying);
+
+  // Helper: find next playable item in a queue, skipping unplayable entries
+  function shiftPlayable(arr) {
+    while (arr.length) {
+      const candidate = arr.shift();
+      const s = getSong(candidate.songId);
+      const ver = s ? getVersion(s, candidate.versionId) : null;
+      if (ver && isPlayable(ver)) return candidate;
     }
-    _miniCarouselDir = 1; // forward → slide left
-    state.player.nowPlaying = q.shift();
-    saveState();
-    playNowPlaying({ autoplay: true });
-    if (doRender) render();
-    return true;
+    return null;
   }
-  // Queue exhausted — rebuild from repeatQueue if repeat-all is on
-  if (state.player?.repeat === true) {
-    const rq = state.player?.repeatQueue || [];
-    if (rq.length) {
+
+  if (q.length) {
+    const next = shiftPlayable(q);
+    if (next) {
       if (state.player.nowPlaying) {
         if (!state.player.playHistory) state.player.playHistory = [];
         state.player.playHistory.push(state.player.nowPlaying);
       }
       _miniCarouselDir = 1; // forward → slide left
-      const fresh = state.player.shuffle ? shuffleArray([...rq]) : [...rq];
-      state.player.nowPlaying = fresh.shift();
-      state.player.queue = fresh;
+      state.player.nowPlaying = next;
       saveState();
       playNowPlaying({ autoplay: true });
       if (doRender) render();
       return true;
+    }
+  }
+  // Queue exhausted — rebuild from repeatQueue if repeat-all is on
+  if (state.player?.repeat === true) {
+    const rq = state.player?.repeatQueue || [];
+    if (rq.length) {
+      const fresh = state.player.shuffle ? shuffleArray([...rq]) : [...rq];
+      const next = shiftPlayable(fresh);
+      if (next) {
+        if (state.player.nowPlaying) {
+          if (!state.player.playHistory) state.player.playHistory = [];
+          state.player.playHistory.push(state.player.nowPlaying);
+        }
+        _miniCarouselDir = 1; // forward → slide left
+        state.player.nowPlaying = next;
+        state.player.queue = fresh; // remaining (already shifted)
+        saveState();
+        playNowPlaying({ autoplay: true });
+        if (doRender) render();
+        return true;
+      }
     }
   }
   return false;
@@ -4300,6 +4332,41 @@ function advanceToPrevTrack({ render: doRender = false } = {}) {
 globalAudio?.addEventListener("ended", () => {
   if (!advanceToNextTrack({ render: fullPlayerOpen })) syncMiniPlayerUI();
 });
+
+// Auto-skip on audio load/decode errors so playback doesn't silently stop
+globalAudio?.addEventListener("error", () => {
+  const now = state.player?.nowPlaying;
+  if (!now) return;
+  console.warn(`[Player] Audio error for ${now.songId}, skipping...`);
+  // Clear the broken cached URL so retry can re-fetch from source
+  _clearAudioCacheForNowPlaying();
+  if (!advanceToNextTrack({ render: fullPlayerOpen })) {
+    toast("Playback error — no more tracks");
+    syncMiniPlayerUI();
+  }
+});
+
+// Audio stalled mid-playback (common on iOS when blob URL expires after backgrounding)
+// Retry once by re-fetching the audio from IndexedDB/cloud
+let _stallRetried = false;
+globalAudio?.addEventListener("stalled", () => {
+  if (_stallRetried || !state.player?.nowPlaying) return;
+  if (globalAudio.paused) return; // don't retry if intentionally paused
+  console.warn("[Player] Audio stalled — retrying from source...");
+  _stallRetried = true;
+  _clearAudioCacheForNowPlaying();
+  playNowPlaying({ autoplay: true });
+});
+globalAudio?.addEventListener("playing", () => { _stallRetried = false; });
+
+function _clearAudioCacheForNowPlaying() {
+  const now = state.player?.nowPlaying;
+  if (!now) return;
+  const song = getSong(now.songId);
+  const v = song ? getVersion(song, now.versionId) : null;
+  if (v?.fileId) audioUrlCache.delete(`file:${v.fileId}`);
+  if (v?.audioPath) audioUrlCache.delete(`supa:${v.audioPath}`);
+}
 
 // ---------------------
 // Bottom sheet (GLOBAL)
@@ -7464,19 +7531,7 @@ async function init() {
     await showAuthScreen();
   }
 
-  // Profile setup — show once after signup if no profile exists
-  await showProfileSetupIfNeeded();
-
-  // If local state is empty, pull from Supabase before showing the app
-  // (on fresh install / cache wipe, localStorage has no songs yet)
-  if (!state.songs.length) {
-    try {
-      await incrementalSyncFromSupabase();
-      _importFlowRan = true; // skip the background re-sync later
-    } catch (e) { console.warn("[Init] sync failed:", e); }
-  }
-
-  // ── Boot overlay: reuse splash look while data syncs ──
+  // ── Boot overlay: show immediately after auth so there's no black screen ──
   const bootOverlay = document.createElement("div");
   bootOverlay.id = "splash";
   bootOverlay.setAttribute("aria-hidden", "false");
@@ -7492,9 +7547,21 @@ async function init() {
       </div>
     </div>`;
   document.body.appendChild(bootOverlay);
-  // Force paint so overlay is visible before we remove splashing
+  // Force paint so overlay is visible before we do anything else
   bootOverlay.offsetHeight;
   document.body.classList.remove("splashing");
+
+  // Profile setup — show once after signup if no profile exists
+  await showProfileSetupIfNeeded();
+
+  // If local state is empty, pull from Supabase before showing the app
+  // (on fresh install / cache wipe, localStorage has no songs yet)
+  if (!state.songs.length) {
+    try {
+      await incrementalSyncFromSupabase();
+      _importFlowRan = true; // skip the background re-sync later
+    } catch (e) { console.warn("[Init] sync failed:", e); }
+  }
 
   // ── Subtext jump-swap helper (rotate transition between lines) ──
   const JUMP_MS = parseInt(getComputedStyle(document.documentElement)
@@ -7636,9 +7703,11 @@ async function init() {
   // Check for Web Share Target file
   checkSharedAudioFile();
 
-  // Fetch shared data 10s after boot (delayed so it doesn't compete with initial load)
-  // Shared data refresh — wait 30s to ensure all boot queries are done
-  setTimeout(() => refreshSharedData().catch(console.warn), 30000);
+  // Fetch shared data shortly after boot so shared songs appear quickly
+  setTimeout(() => refreshSharedData().then(() => {
+    // Re-render if user is on a tab that shows shared content
+    if (currentTab === "player" || currentTab === "collab") render();
+  }).catch(console.warn), 3000);
 }
 
 // Incremental sync: pull Supabase state and merge only new/changed songs
@@ -14573,7 +14642,13 @@ function renderPlayer() {
   // Play all — resets shuffle so songs play in order
   $("#playerPlayAll")?.addEventListener("click", async () => {
     if (!items.length) return toast("Playlist empty 😅");
-    const all = items.map(x => ({ songId: x.songId, versionId: x.versionId }));
+    // Only queue versions that actually have audio
+    const all = items.filter(x => {
+      const s = getSong(x.songId);
+      const v = s ? getVersion(s, x.versionId) : null;
+      return v && isPlayable(v);
+    }).map(x => ({ songId: x.songId, versionId: x.versionId }));
+    if (!all.length) return toast("No playable songs 😅");
     state.player.nowPlaying = all[0];
     state.player.queue = all.slice(1);
     state.player.repeatQueue = all;
@@ -14587,7 +14662,14 @@ function renderPlayer() {
   // Shuffle — also turns on shuffle mode in the full player
   $("#playerShuffle")?.addEventListener("click", async () => {
     if (!items.length) return toast("Playlist empty 😅");
-    const all = shuffleArray(items).map(x => ({ songId: x.songId, versionId: x.versionId }));
+    // Only queue versions that actually have audio
+    const playable = items.filter(x => {
+      const s = getSong(x.songId);
+      const v = s ? getVersion(s, x.versionId) : null;
+      return v && isPlayable(v);
+    });
+    if (!playable.length) return toast("No playable songs 😅");
+    const all = shuffleArray(playable).map(x => ({ songId: x.songId, versionId: x.versionId }));
     state.player.nowPlaying = all[0];
     state.player.queue = all.slice(1);
     state.player.repeatQueue = all;
