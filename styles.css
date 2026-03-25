@@ -1402,6 +1402,22 @@ textarea{ min-height:100px; resize:vertical; }
 .hLyrics   { background: linear-gradient(135deg, #12256b, #1e3a8a, #3b1475, #1e3a8a, #12256b); background-size: 300% 300%; animation: gradDrift 24s ease infinite; --card-border: #eab308; }
 .hNext     { background: linear-gradient(135deg, #560f30, #7b1038, #31115e, #7b1038, #560f30); background-size: 300% 300%; animation: gradDrift 20s ease infinite; --card-border: #f97316; }
 
+/* ── Collab card grid ── */
+.collabGrid{
+  display:grid;
+  grid-template-columns:1fr;
+  gap:12px;
+  padding:12px 2px 2px;
+}
+.collabGrid .hCard{ min-height:120px; }
+.collabGrid .hCard .hLabel{ font-size:18px; }
+.collabGrid .hCard .hSub{ font-size:12px; }
+
+.hCollabFriends  { background: linear-gradient(135deg, #0d3d4f, #0e7490, #155e75, #0e7490, #0d3d4f); background-size: 300% 300%; animation: gradDrift 24s ease infinite; --card-border: #22d3ee; }
+.hCollabSongs    { background: linear-gradient(135deg, #3b1475, #5b21b6, #7c3aed, #5b21b6, #3b1475); background-size: 300% 300%; animation: gradDrift 22s ease infinite; --card-border: #a78bfa; }
+.hCollabMessages { background: linear-gradient(135deg, #12256b, #1e3a8a, #1d4ed8, #1e3a8a, #12256b); background-size: 300% 300%; animation: gradDrift 26s ease infinite; --card-border: #60a5fa; }
+.hCollabAdd      { background: linear-gradient(135deg, #560f30, #9d174d, #be185d, #9d174d, #560f30); background-size: 300% 300%; animation: gradDrift 20s ease infinite; --card-border: #f472b6; }
+
 /* 2. Ambient glow breathing — subtle internal energy pulse */
 @keyframes glowBreathe {
   0%   { opacity: 0.22; transform: scale(1)   translate(0%, 0%); }
@@ -1507,6 +1523,31 @@ textarea{ min-height:100px; resize:vertical; }
 .alertTime{flex-shrink:0;font-size:11px;color:#555;padding-top:2px}
 @keyframes alertSpin{to{transform:rotate(360deg)}}
 .alertSpinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.15);border-top-color:#60a5fa;border-radius:50%;animation:alertSpin .8s linear infinite}
+.alertUnread{background:rgba(168,85,247,.08);border-radius:8px;padding:12px 10px;margin:0 -10px}
+.alertSectionLabel{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#666;margin-bottom:8px}
+.alertFriendActions{display:flex;gap:8px;margin-top:8px}
+.alertAcceptBtn{background:#3b82f6;color:#fff;border:none;border-radius:8px;padding:6px 16px;font-size:13px;font-weight:600;cursor:pointer}
+.alertAcceptBtn:active{opacity:.8}
+.alertDeclineBtn{background:rgba(255,255,255,.08);color:#aaa;border:none;border-radius:8px;padding:6px 16px;font-size:13px;font-weight:600;cursor:pointer}
+.alertDeclineBtn:active{opacity:.7}
+
+.collabPendingSection{padding:0 16px 8px}
+.collabPendingSectionLabel{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#666;margin-bottom:8px;padding-top:4px}
+.collabPendingRow{display:flex;align-items:center;gap:10px;padding:10px 12px;background:rgba(255,255,255,.04);border-radius:12px;margin-bottom:8px}
+
+.hCardBadge{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;background:#f43f5e;border-radius:10px;font-size:12px;font-weight:700;color:#fff;padding:0 6px;margin-left:8px;vertical-align:middle;line-height:1}
+
+.alertAvatar{flex-shrink:0;width:36px;height:36px;border-radius:50%;overflow:hidden;background:linear-gradient(135deg,#3b82f6,#8b5cf6);display:flex;align-items:center;justify-content:center}
+.alertAvatar img{width:100%;height:100%;object-fit:cover}
+.alertAvatar span{color:#fff;font-weight:700;font-size:15px}
+.alertRowClickable{cursor:pointer;border-radius:10px;padding:12px 10px;margin:0 -10px;transition:background .15s}
+.alertRowClickable:active{background:rgba(255,255,255,.06)}
+
+.friendActionBar{position:sticky;bottom:0;left:0;right:0;display:flex;gap:10px;padding:16px;background:linear-gradient(transparent,rgba(15,15,20,.95) 30%);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);transition:opacity .3s}
+.friendActionAccept{flex:1;padding:14px;border:none;border-radius:12px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);color:#fff;font-size:15px;font-weight:700;cursor:pointer}
+.friendActionAccept:active{opacity:.85}
+.friendActionDecline{padding:14px 20px;border:none;border-radius:12px;background:rgba(255,255,255,.08);color:#aaa;font-size:15px;font-weight:600;cursor:pointer}
+.friendActionDecline:active{opacity:.7}
 
 .gsWrap{
   display: flex;
@@ -1694,6 +1735,79 @@ textarea{ min-height:100px; resize:vertical; }
   opacity: 0;                 /* JS sets opacity directly via scroll position */
 }
 
+/* ── Owner filter dropdown (inline with page title) ── */
+.songsTitleRow{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:24px 2px 0;
+  gap:12px;
+}
+.songsTitleRow .songsPageTitle{ padding:0; }
+
+.ownerDropWrap{ position:relative; flex-shrink:0; }
+.ownerDropBtn{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:6px;
+  min-width:108px;
+  background:rgba(255,255,255,.1);
+  border:1px solid rgba(255,255,255,.15);
+  border-radius:999px;
+  padding:7px 12px 7px 14px;
+  color:rgba(255,255,255,.85);
+  font-size:16px;
+  font-weight:700;
+  letter-spacing:-.2px;
+  -webkit-tap-highlight-color:transparent;
+}
+.ownerDropBtn svg{ width:14px; height:14px; opacity:.6; flex-shrink:0; }
+.ownerDropBtn:active{ background:rgba(255,255,255,.16); }
+
+.ownerDropMenu{
+  position:absolute;
+  right:0;
+  top:calc(100% + 6px);
+  background:rgba(30,30,34,.96);
+  border:1px solid rgba(255,255,255,.12);
+  border-radius:14px;
+  padding:4px;
+  z-index:100;
+  min-width:120px;
+  backdrop-filter:blur(20px);
+  -webkit-backdrop-filter:blur(20px);
+  box-shadow:0 8px 32px rgba(0,0,0,.5);
+  animation:ownerDropIn .15s ease-out;
+}
+@keyframes ownerDropIn{
+  from{ opacity:0; transform:translateY(-6px) scale(.96); }
+  to{ opacity:1; transform:none; }
+}
+.ownerDropItem{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  width:100%;
+  padding:10px 14px;
+  border:none;
+  background:none;
+  color:rgba(255,255,255,.7);
+  font-size:15px;
+  font-weight:600;
+  letter-spacing:-.1px;
+  border-radius:10px;
+  -webkit-tap-highlight-color:transparent;
+}
+.ownerDropItem:active{ background:rgba(255,255,255,.08); }
+.ownerDropItem.active{ color:#fff; background:rgba(255,255,255,.1); }
+.ownerDropItem.active::after{
+  content:"";
+  margin-left:auto;
+  width:6px; height:6px;
+  border-radius:50%;
+  background:var(--accent, #a78bfa);
+}
 .songsPageTitle{
   font-size:34px;
   font-weight:700;
@@ -4765,6 +4879,7 @@ body {
   opacity: 0;
 }
 .app.pdActive .topbar .headerBack{
+  left: 16px;
   color: #fff;
   filter: drop-shadow(0 1px 3px rgba(0,0,0,.6));
 }
@@ -5981,7 +6096,7 @@ body {
 
 /* ── Collab Tab ──────────────────────────────────── */
 .collabWrap {
-  padding: 6px 0 120px;
+  padding: 0 0 120px;
   display: flex; flex-direction: column; gap: 28px;
 }
 .collabWrap .playerHead {

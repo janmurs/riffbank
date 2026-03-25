@@ -6,18 +6,82 @@
 // - Export / Import
 // - Supabase integration (auth, cloud sync, audio/cover storage)
 
-window.onerror = (m, src, line, col) => alert(`JS ERROR:\n${m}\n${line}:${col}`);
+window.onerror = (m, src, line, col) => console.error(`[RiffBank] JS ERROR: ${m} (${line}:${col})`);
 
 // Dev toggles: skip splash / welcome screen
  const DISABLE_SPLASH = true;
  const DISABLE_WELCOME = true;
 
 // Debug: show cache version badge on every screen (toggle on/off)
-const SHOW_BUILD_BADGE = true;
+const SHOW_BUILD_BADGE = false;
 
 // ── Activity log (alerts bell) ──
 // Each entry: { id, songTitle, status: "saving"|"compressing"|"uploading"|"syncing"|"done"|"failed", ts, message }
 const activityLog = [];
+
+// ── Persistent notification inbox (survives refresh, 30-day retention) ──
+const NOTIF_STORAGE_KEY = "riffbank_notifications";
+const NOTIF_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+function _loadNotifications() {
+  try {
+    const raw = localStorage.getItem(NOTIF_STORAGE_KEY);
+    if (!raw) return [];
+    const items = JSON.parse(raw);
+    const cutoff = Date.now() - NOTIF_MAX_AGE_MS;
+    return items.filter(n => n.ts >= cutoff);
+  } catch { return []; }
+}
+
+function _saveNotifications(items) {
+  try { localStorage.setItem(NOTIF_STORAGE_KEY, JSON.stringify(items)); } catch {}
+}
+
+function addNotification({ title, body, type = "share", friendshipId, requesterName, requesterId, avatarUrl }) {
+  const items = _loadNotifications();
+  // Don't duplicate friend request notifications for the same friendship
+  if (type === "friend_request" && friendshipId) {
+    if (items.some(n => n.type === "friend_request" && n.friendshipId === friendshipId)) return;
+  }
+  const entry = { id: crypto.randomUUID(), title, body, type, ts: Date.now(), read: false };
+  if (friendshipId) entry.friendshipId = friendshipId;
+  if (requesterName) entry.requesterName = requesterName;
+  if (requesterId) entry.requesterId = requesterId;
+  if (avatarUrl) entry.avatarUrl = avatarUrl;
+  items.unshift(entry);
+  if (items.length > 100) items.length = 100;
+  _saveNotifications(items);
+  _updateNotifBadge();
+  if (drawerView === "alerts") renderAlerts();
+}
+
+function markNotificationsRead() {
+  const items = _loadNotifications();
+  let changed = false;
+  for (const n of items) { if (!n.read) { n.read = true; changed = true; } }
+  if (changed) { _saveNotifications(items); _updateNotifBadge(); }
+}
+
+function _updateNotifBadge() {
+  const unread = _loadNotifications().filter(n => !n.read).length;
+  const btn = document.querySelector("#htbNotif");
+  if (!btn) return;
+  let badge = btn.querySelector(".bellBadge");
+  const total = unread + activityLog.filter(a => a.status !== "done" && a.status !== "failed").length;
+  if (total > 0) {
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.className = "bellBadge";
+      badge.style.cssText = "position:absolute;top:0;right:0;min-width:16px;height:16px;background:#f43f5e;border-radius:8px;font-size:10px;font-weight:700;color:#fff;display:flex;align-items:center;justify-content:center;padding:0 4px;line-height:1;";
+      btn.style.position = "relative";
+      btn.appendChild(badge);
+    }
+    badge.textContent = total;
+    badge.style.display = "flex";
+  } else if (badge) {
+    badge.style.display = "none";
+  }
+}
 function logActivity(id, songTitle, status, message) {
   const existing = activityLog.find(a => a.id === id);
   if (existing) {
@@ -34,23 +98,7 @@ function logActivity(id, songTitle, status, message) {
   if (drawerView === "alerts") renderAlerts();
 }
 function updateBellBadge() {
-  const active = activityLog.filter(a => a.status !== "done" && a.status !== "failed").length;
-  const btn = document.querySelector("#htbNotif");
-  if (!btn) return;
-  let badge = btn.querySelector(".bellBadge");
-  if (active > 0) {
-    if (!badge) {
-      badge = document.createElement("span");
-      badge.className = "bellBadge";
-      badge.style.cssText = "position:absolute;top:0;right:0;min-width:16px;height:16px;background:#f43f5e;border-radius:8px;font-size:10px;font-weight:700;color:#fff;display:flex;align-items:center;justify-content:center;padding:0 4px;line-height:1;";
-      btn.style.position = "relative";
-      btn.appendChild(badge);
-    }
-    badge.textContent = active;
-    badge.style.display = "flex";
-  } else if (badge) {
-    badge.style.display = "none";
-  }
+  _updateNotifBadge();
 }
 
 // Debug toggle: highlight sync status on song cards
@@ -71,6 +119,7 @@ import {
   supabaseUploadAudio, supabaseFetchAudioBlob, supabaseDeleteAudio, supabaseDiscoverAudioPaths,
   supabaseUploadCover, supabaseFetchCoverBlob, supabaseCountUserSongs,
   createShareInvite, getShareInvite, acceptShareInvite,
+  fetchAllSharedData,
   pullSharedProjects, pullSharedSongs, pullMySharedProjects, pullMySharedSongs,
   listMyInvites, deleteShareInvite,
   removeProjectMember, upsertProfile, searchUsers, shareWithUser,
@@ -543,11 +592,15 @@ class Nav {
       if (noVT) { this._transitionActive = false; mutate(); return; }
 
       docEl.classList.add(vtClass);
+      console.log("[VT] starting forward transition");
       const transition = document.startViewTransition(() => {
+        console.log("[VT] mutate callback running");
         mutate();
         this._transitionActive = false;
+        console.log("[VT] mutate done, activeScreen:", activeScreenName);
       });
-      transition.finished.finally(() => docEl.classList.remove(vtClass));
+      transition.ready.then(() => console.log("[VT] ready — animating")).catch(e => console.warn("[VT] ready rejected:", e.message));
+      transition.finished.then(() => console.log("[VT] finished OK")).catch(e => console.warn("[VT] finished rejected:", e.message)).finally(() => docEl.classList.remove(vtClass));
     }
 
     else if (direction === "back") {
@@ -565,14 +618,18 @@ class Nav {
 
       docEl.classList.add(vtClass);
       this._transitionActive = true;
+      console.log("[VT] starting back transition");
       const transition = document.startViewTransition(() => {
+        console.log("[VT] back mutate running");
         mutate();
         this._transitionActive = false;
+        console.log("[VT] back mutate done, activeScreen:", activeScreenName);
         // Restore scroll so the API captures the correct scroll position
         const screen = document.querySelector(".screen.is-active");
         if (aceScrollTop && screen) screen.scrollTop = aceScrollTop;
       });
-      transition.finished.finally(() => docEl.classList.remove(vtClass));
+      transition.ready.then(() => console.log("[VT] back ready — animating")).catch(e => console.warn("[VT] back ready rejected:", e.message));
+      transition.finished.then(() => console.log("[VT] back finished OK")).catch(e => console.warn("[VT] back finished rejected:", e.message)).finally(() => docEl.classList.remove(vtClass));
     }
 
     else if (direction === "jumpHome") {
@@ -582,7 +639,7 @@ class Nav {
 
       docEl.classList.add(vtClass);
       const transition = document.startViewTransition(() => mutate());
-      transition.finished.finally(() => docEl.classList.remove(vtClass));
+      transition.finished.catch(() => {}).finally(() => docEl.classList.remove(vtClass));
     }
   }
 
@@ -998,7 +1055,7 @@ function navigateForward(mutateFn) {
   const captured = {
     currentTab, drawerView, projectDetailScreen, releaseDetailId,
     selectedSongId, selectedVersionId, songsView, overlayView, friendProfileId,
-    songsBackTarget, lyricsEditSongId, collabMode, headerTitle: headerTitle?.textContent ?? "RiffBank"
+    songsBackTarget, lyricsEditSongId, collabMode, songsFromCollab, headerTitle: headerTitle?.textContent ?? "RiffBank"
   };
   nav.captureState(captured);
   nav.slideTransition({
@@ -1017,10 +1074,12 @@ const toastEl = $("#toast");
 // ---------------------
 // Audio storage (IndexedDB) - Phase 1
 // ---------------------
-const AUDIO_DB = "riffbank_audio_v1";
+const AUDIO_DB = "riffbank_audio_v2";
 const AUDIO_STORE = "files";
 const audioUrlCache = new Map(); // localAudioId -> objectURL
 const coverUrlCache = new Map(); // coverPath -> blob objectURL (persists via IndexedDB)
+
+// v2 DB name abandons the corrupt v1 DB — no flush needed
 
 // ---------------------
 // iOS audio unlock (required if you do async before play())
@@ -1424,10 +1483,7 @@ function isHomeRoot() {
 }
 
 function toast(msg) {
-  if (!toastEl) return;
-  toastEl.textContent = msg;
-  toastEl.classList.add("show");
-  setTimeout(() => toastEl.classList.remove("show"), 1400);
+  console.log("[RiffBank]", msg);
 }
 
 // ---------------------
@@ -1805,7 +1861,7 @@ function loadState() {
   return {
     version: 1,
     settings: {
-      defaultProject: "SkeletonDanceParty",
+      defaultProject: "",
       defaultGenre: "Metalcore",
       defaultSprint: "Unsorted",
       lyricsScratch: ""
@@ -2406,7 +2462,7 @@ async function recoverAndUploadAudio() {
     ? `Recovery: ${uploaded} uploaded, ${failed} failed` + (relinked ? `, ${relinked} re-linked` : "")
     : "Recovery: nothing to do (all synced or no blobs found)";
   if (errors.length) msg += "\n\nErrors:\n" + errors.slice(0, 5).join("\n");
-  alert(msg);
+  console.log("[RiffBank Recovery]", msg);
 }
 
 // Debug: run `debugRecovery()` in browser console or tap "Debug Recovery" in Settings
@@ -2446,7 +2502,7 @@ window.debugRecovery = async () => {
   lines.push("");
   for (const d of details) lines.push(d);
 
-  alert(lines.join("\n"));
+  console.log("[RiffBank Debug]\n" + lines.join("\n"));
 };
 
 // Pick audio from iOS Files picker
@@ -2921,8 +2977,12 @@ const songsListState = {
   query: "",
   statusFilter: "",
   projectFilter: "",
+  ownerFilter: "all", // "all" | "mine" | "shared"
 };
 
+let projectsOwnerFilter = "all"; // "all" | "mine" | "shared"
+
+let songsFromCollab = false; // true when Songs opened from Collab screen
 let drawerView = null;
 let songsBackTarget = null; // e.g. "projects" | "collabs"
 let drawerOpen = false;
@@ -2971,7 +3031,7 @@ function syncBackButton() {
   if (!headerBackEl) return;
   // Profile is always root — never show back button
   if (currentTab === "profile") { headerBackEl.style.display = "none"; return; }
-  // Collab root uses its own inline back/menu button (slides with content)
+  // Collab root — no sidebar, hide back button
   const onCollabRoot = currentTab === "collab" && !overlayView && !selectedSongId && !projectDetailScreen && !drawerView;
   if (onCollabRoot) { headerBackEl.style.display = "none"; return; }
   const onRoot =
@@ -2987,7 +3047,9 @@ function syncBackButton() {
 }
 
 // Wire back button once
-headerBackEl?.addEventListener("click", () => goBack({ animate: true }));
+headerBackEl?.addEventListener("click", () => {
+  goBack({ animate: true });
+});
 
 function syncTabs() {
   const highlightTab = currentTab === "songs" ? "home" : currentTab;
@@ -3276,6 +3338,11 @@ function syncProfileNavIcon() {
 // Unread message badge — updates Collab nav icon + Messages sidebar button
 let _unreadMsgCount = 0;
 let _prevUnreadMsgCount = 0;
+let _prevPendingFriendCount = 0;
+// Track which friend requests we've already created notifications for
+let _knownFriendRequestIds = new Set(
+  _loadNotifications().filter(n => n.friendshipId).map(n => n.friendshipId)
+);
 
 // Request notification permission (called once on first message interaction)
 let _notifPermissionAsked = false;
@@ -3327,11 +3394,36 @@ function syncMessageBadges() {
     if (msgCount > _unreadMsgCount) {
       _showMessageNotification(msgCount);
     }
+    // Detect new friend requests and add to notification inbox
+    if (friendCount > _prevPendingFriendCount && _prevPendingFriendCount >= 0) {
+      _addFriendRequestNotifications();
+    }
     _prevUnreadMsgCount = _unreadMsgCount;
     _unreadMsgCount = msgCount;
+    _prevPendingFriendCount = _pendingFriendCount;
     _pendingFriendCount = friendCount;
     _applyAllBadges(msgCount, friendCount);
   });
+}
+
+// Fetch pending friend requests and add notifications for any we haven't seen
+function _addFriendRequestNotifications() {
+  getPendingFriendRequests().then(requests => {
+    for (const r of requests) {
+      if (_knownFriendRequestIds.has(r.id)) continue;
+      _knownFriendRequestIds.add(r.id);
+      const name = r.profile?.display_name || "Someone";
+      addNotification({
+        title: "Friend Request",
+        body: `${name} sent you a friend request`,
+        type: "friend_request",
+        friendshipId: r.id,
+        requesterName: name,
+        requesterId: r.requester_id,
+        avatarUrl: r.profile?.avatar_url || null,
+      });
+    }
+  }).catch(() => {});
 }
 
 function _applyAllBadges(msgCount, friendCount) {
@@ -3342,7 +3434,7 @@ function _applyAllBadges(msgCount, friendCount) {
   // Inline back button badge (slides with content)
   const inlineBadge = document.querySelector(".collabInlineBadge");
   if (inlineBadge) { inlineBadge.textContent = total || ""; inlineBadge.style.display = total ? "flex" : "none"; }
-  // Header back button badge (hidden on Collab root, used on sub-screens)
+  // Header back button badge
   const backBadge = document.getElementById("headerBackBadge");
   if (backBadge) { backBadge.style.display = "none"; }
   // Messages sidebar badge
@@ -3358,9 +3450,14 @@ function _applyAllBadges(msgCount, friendCount) {
 // Poll message badges every 10s
 setInterval(syncMessageBadges, 10000);
 
+// Shared data polling disabled — fetch on-demand from Collab tab only
+
 // Also check when app comes back to foreground
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") syncMessageBadges();
+  if (document.visibilityState === "visible") {
+    syncMessageBadges();
+    // refreshSharedData on visibility — disabled to prevent connection issues
+  }
 });
 
 function openSalSheet() {
@@ -3460,6 +3557,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
         songsView = "list";
         songsListScrollTop = 0;
         collabMode = false;
+        songsFromCollab = false;
         currentTab = "home";
         if (screens.home) screens.home.scrollTop = 0;
         try { window.scrollTo(0, 0); } catch {}
@@ -3485,6 +3583,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
     songsView = "list";
     songsListScrollTop = 0;
     collabMode = false;
+    songsFromCollab = false;
 
     currentTab = targetTab;
     if (targetTab === "player") {
@@ -3506,6 +3605,12 @@ document.querySelectorAll(".tab").forEach((btn) => {
 
 // Tap header to go Home (feels app-y)
 headerTitle?.addEventListener("click", () => {
+  // Ignore taps when already on a root tab with no nav depth — prevents ghost
+  // back-button behaviour on Collab/Home/Player root screens where the collapsed
+  // titleblock overlaps the area where a back chevron would appear.
+  const onRoot = ROOT_TABS.has(currentTab) || currentTab === "collab" || currentTab === "profile";
+  if (onRoot && nav.depth === 0 && !drawerView && !overlayView && !selectedSongId && !projectDetailScreen) return;
+
   const resetToHome = () => {
     drawerView = null;
     overlayView = null;
@@ -3608,6 +3713,7 @@ function goBack({ animate = false } = {}) {
       songsBackTarget = restoreState.songsBackTarget;
       lyricsEditSongId = restoreState.lyricsEditSongId ?? null;
       collabMode = restoreState.collabMode ?? false;
+      songsFromCollab = restoreState.songsFromCollab ?? false;
       // Going back to home resets songs scroll so next visit starts fresh
       if (restoreState.currentTab === "home" && !restoreState.drawerView) songsListScrollTop = 0;
       setHeader(restoreState.headerTitle);
@@ -5470,7 +5576,7 @@ $("#importFile")?.addEventListener("change", async (e) => {
     const incoming = JSON.parse(txt);
 
     if (!incoming || !incoming.songs || !incoming.settings) {
-      alert("That file doesn't look like a RiffBank backup.");
+      console.warn("[RiffBank] That file doesn't look like a RiffBank backup.");
       return;
     }
 
@@ -5482,7 +5588,7 @@ $("#importFile")?.addEventListener("change", async (e) => {
     toast("Imported ✅");
     render();
   } catch {
-    alert("Could not parse that JSON file.");
+    console.warn("[RiffBank] Could not parse that JSON file.");
   } finally {
     if (input) input.value = "";
   }
@@ -5547,32 +5653,32 @@ function render() {
     return renderLyricsScratch();
   }
   if (overlayView === "friendRequests") {
-    setActiveScreen("collab");
+    setActiveScreen("drawer");
     if (!_isBack) activeScreenEl.scrollTop = 0;
     return renderFriendRequests();
   }
   if (overlayView === "friendsList") {
-    setActiveScreen("collab");
+    setActiveScreen("drawer");
     if (!_isBack) activeScreenEl.scrollTop = 0;
     return renderFriendsList();
   }
   if (overlayView === "addFriend") {
-    setActiveScreen("collab");
+    setActiveScreen("drawer");
     if (!_isBack) activeScreenEl.scrollTop = 0;
     return renderAddFriend();
   }
   if (overlayView === "friendProfile") {
-    setActiveScreen("collab");
+    setActiveScreen("drawer");
     if (!_isBack) activeScreenEl.scrollTop = 0;
     return renderFriendProfile(friendProfileId);
   }
   if (overlayView === "messages") {
-    setActiveScreen("collab");
+    setActiveScreen("drawer");
     if (!_isBack) activeScreenEl.scrollTop = 0;
     return renderMessages();
   }
   if (overlayView === "chat") {
-    setActiveScreen("collab");
+    setActiveScreen("drawer");
     if (!_isBack) activeScreenEl.scrollTop = 0;
     return renderChat(friendProfileId);
   }
@@ -6944,25 +7050,28 @@ function openAvatarCrop(file) {
 // ── Profile Setup (shown once after first signup) ──
 
 async function showProfileSetupIfNeeded() {
-  if (localStorage.getItem("profileSetupDone")) return;
-
   try {
     const { data: userData } = await supabase.auth.getUser();
     const uid = userData?.user?.id;
-    if (!uid) return;
+    console.log("[ProfileSetup] uid:", uid);
+    if (!uid) { console.log("[ProfileSetup] no uid, skipping"); return; }
 
     // Check if profile already exists in DB — skip setup if so
     const { data: existing } = await supabase
       .from("profiles").select("id, display_name").eq("id", uid).maybeSingle();
+    console.log("[ProfileSetup] existing:", existing);
     if (existing?.display_name) {
+      console.log("[ProfileSetup] profile exists, skipping");
       localStorage.setItem("profileSetupDone", "1");
       return;
     }
-  } catch {
-    // profiles table may not exist yet — skip gracefully
-    return;
+  } catch (e) {
+    console.warn("[ProfileSetup] error:", e);
+    // profiles table may not exist yet — still show setup
+    if (localStorage.getItem("profileSetupDone")) return;
   }
 
+  console.log("[ProfileSetup] showing setup");
   await showProfileSetup();
 }
 
@@ -7358,11 +7467,57 @@ async function init() {
   // Profile setup — show once after signup if no profile exists
   await showProfileSetupIfNeeded();
 
-  // Post-auth: check for cloud songs and offer import
-  await runSalImportFlow();
+  // If local state is empty, pull from Supabase before showing the app
+  // (on fresh install / cache wipe, localStorage has no songs yet)
+  if (!state.songs.length) {
+    try {
+      await incrementalSyncFromSupabase();
+      _importFlowRan = true; // skip the background re-sync later
+    } catch (e) { console.warn("[Init] sync failed:", e); }
+  }
 
-  // Now safe to show the app shell (auth + import overlays are appended to body, not .app)
+  // ── Boot overlay: reuse splash look while data syncs ──
+  const bootOverlay = document.createElement("div");
+  bootOverlay.id = "splash";
+  bootOverlay.setAttribute("aria-hidden", "false");
+  bootOverlay.classList.add("phase1"); // skip intro anim, go straight to visible
+  bootOverlay.innerHTML = `
+    <div class="splashInner">
+      <div id="splashTitle" class="ready" style="animation:welcomeTitleShimmer 3s ease infinite;opacity:1;transform:none">RiffBank</div>
+      <div id="splashSub" class="splashSub show static">
+        <span id="splashSubText" class="splashSubText">Indexing your universe</span>
+        <span class="splashEllipsis" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </span>
+      </div>
+    </div>`;
+  document.body.appendChild(bootOverlay);
+  // Force paint so overlay is visible before we remove splashing
+  bootOverlay.offsetHeight;
   document.body.classList.remove("splashing");
+
+  // ── Subtext jump-swap helper (rotate transition between lines) ──
+  const JUMP_MS = parseInt(getComputedStyle(document.documentElement)
+    .getPropertyValue("--splash-jump-ms").trim(), 10) || 520;
+  const _sleep = ms => new Promise(r => setTimeout(r, ms));
+  const bootSub = bootOverlay.querySelector("#splashSub");
+  const bootSubText = bootOverlay.querySelector("#splashSubText");
+
+  async function jumpSwap(nextText) {
+    if (!bootSub || !bootSubText) return;
+    bootSub.classList.remove("static");
+    bootSub.classList.remove("jumpIn", "jumpOut");
+    void bootSub.offsetHeight;
+    bootSub.classList.add("jumpOut");
+    await _sleep(JUMP_MS);
+    bootSub.classList.remove("jumpOut");
+    bootSubText.textContent = nextText;
+    void bootSub.offsetHeight;
+    bootSub.classList.add("jumpIn");
+    await _sleep(JUMP_MS);
+    bootSub.classList.remove("jumpIn");
+    bootSub.classList.add("static");
+  }
 
   // Build badge — always-visible cache version indicator for debugging
   if (SHOW_BUILD_BADGE) {
@@ -7399,7 +7554,7 @@ async function init() {
     }
   }
 
-  // Render immediately so user sees the home screen right after welcome
+  // Render the app behind the boot overlay
   setHeader("RiffBank");
   syncTabs();
   render();
@@ -7408,9 +7563,38 @@ async function init() {
   // Now that the home screen is painted, fade out any remaining onboarding overlays
   dismissOnboarding();
 
-  // Background: restore cover art, scan cached blobs, sync from Supabase (non-blocking)
-  restoreCoverUrlsFromCache().then(() => render()).catch(() => {});
+  // ── Sync data while cycling through subtext lines ──
+  const withTimeout = (p, ms) => Promise.race([p, new Promise(r => setTimeout(r, ms))]);
 
+  let syncDone = false;
+  const syncTask = withTimeout(Promise.all([
+    restoreCoverUrlsFromCache().then(() => render()).catch(() => {}),
+    (!_importFlowRan
+      ? incrementalSyncFromSupabase().then(() => {
+          preFetchCloudAudio().catch(console.warn);
+        }).catch(console.warn)
+      : Promise.resolve()),
+  ]), 8000).then(() => { syncDone = true; }); // 8s max — don't block the app forever
+
+  // Cycle subtext until sync finishes, then show "Entering RiffBank"
+  const lines = ["Indexing your universe", "Syncing sessions"];
+  let lineIdx = 0;
+  const MIN_HOLD = 1200; // minimum time per line so it doesn't flash
+
+  // Show first line for at least MIN_HOLD, then cycle until sync is done
+  await _sleep(MIN_HOLD);
+  while (!syncDone) {
+    lineIdx = (lineIdx + 1) % lines.length;
+    await jumpSwap(lines[lineIdx]);
+    // Wait for either sync to finish or MIN_HOLD, whichever is longer
+    await Promise.race([syncTask, _sleep(MIN_HOLD)]);
+  }
+
+  // Sync is done — show "Entering RiffBank" briefly then dismiss
+  await jumpSwap("Entering RiffBank");
+  await _sleep(700);
+
+  // Scan cached audio blobs (non-blocking, doesn't affect rendering)
   (async () => {
     for (const song of (state.songs || [])) {
       for (const v of (song.versions || [])) {
@@ -7423,21 +7607,38 @@ async function init() {
     }
   })();
 
-  // Incremental sync from Supabase (skip if import flow already pulled data)
-  if (!_importFlowRan) {
-    incrementalSyncFromSupabase().then(() => {
-      preFetchCloudAudio().catch(console.warn);
-    }).catch(console.warn);
-  }
+  // Final render with all data in place, then fade out
+  render();
+  syncMiniPlayerUI();
 
-  // Pre-fetch shared data in background so Collab tab loads fast
-  refreshSharedData().catch(console.warn);
+  bootOverlay.classList.add("hide");
+  bootOverlay.addEventListener("transitionend", () => bootOverlay.remove());
 
-  // Sync unread message badges
+  // Sync unread message badges — seed notifications for any pending friend requests not yet in inbox
+  getPendingFriendRequests().then(requests => {
+    for (const r of requests) {
+      _knownFriendRequestIds.add(r.id);
+      const existing = _loadNotifications();
+      if (!existing.some(n => n.friendshipId === r.id)) {
+        const name = r.profile?.display_name || "Someone";
+        addNotification({ title: "Friend Request", body: `${name} sent you a friend request`, type: "friend_request", friendshipId: r.id, requesterName: name, requesterId: r.requester_id, avatarUrl: r.profile?.avatar_url || null });
+      }
+    }
+  }).catch(() => {});
   syncMessageBadges();
+
+  // Request notification permission early so share notifications work
+  requestNotificationPermission();
+
+  // Update notification bell badge on startup
+  _updateNotifBadge();
 
   // Check for Web Share Target file
   checkSharedAudioFile();
+
+  // Fetch shared data 10s after boot (delayed so it doesn't compete with initial load)
+  // Shared data refresh — wait 30s to ensure all boot queries are done
+  setTimeout(() => refreshSharedData().catch(console.warn), 30000);
 }
 
 // Incremental sync: pull Supabase state and merge only new/changed songs
@@ -7535,20 +7736,43 @@ function renderProjects() {
   const h1 = appEl?.querySelector(".titleblock h1");
   if (h1) h1.style.opacity = "0";
 
-  const projects = Array.from(
+  // Shared projects
+  const sharedProjectNames = (sharedData.projects || []).map(sp => sp.projectName).filter(Boolean);
+  const _sharedProjSet = new Set(sharedProjectNames);
+
+  const pOwner = projectsOwnerFilter || "all";
+
+  const ownProjects = Array.from(
     new Set([
       ...(state.settings?.defaultProject ? [state.settings.defaultProject.trim()] : []),
       ...(state.projects || []).map(p => p.trim()).filter(Boolean),
       ...state.songs.map(s => (s.project || "").trim()).filter(Boolean)
     ])
-  ).sort((a, b) => a.localeCompare(b));
+  );
+
+  let projects;
+  if (pOwner === "mine") {
+    projects = ownProjects.filter(p => !_sharedProjSet.has(p)).sort((a, b) => a.localeCompare(b));
+  } else if (pOwner === "shared") {
+    projects = [..._sharedProjSet].sort((a, b) => a.localeCompare(b));
+  } else {
+    projects = Array.from(new Set([...ownProjects, ...sharedProjectNames])).sort((a, b) => a.localeCompare(b));
+  }
 
   let projQuery = "";
+
+  // Get shared songs for a project name
+  const _sharedSongsForProj = (projName) => {
+    const sp = (sharedData.projects || []).find(sp => sp.projectName === projName);
+    return sp?.songs || [];
+  };
 
   const buildCards = (q) => projects
     .filter(p => !q || p.toLowerCase().includes(q.toLowerCase()))
     .map((p, i) => {
-      const projSongs = state.songs.filter(s => (s.project || "").trim() === p);
+      const ownProjSongs = state.songs.filter(s => (s.project || "").trim() === p);
+      const sharedProjSongs = _sharedSongsForProj(p);
+      const projSongs = [...ownProjSongs, ...sharedProjSongs.filter(s => !ownProjSongs.find(o => o.id === s.id))];
       const count = projSongs.length;
       const repSong = projSongs.slice().sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))[0]
         || { id: p, title: p, project: p, genre: "" };
@@ -7580,8 +7804,16 @@ function renderProjects() {
       `;
     }).join("");
 
+  const pOwnerLabels = { all: "All", mine: "Mine", shared: "Shared" };
+  const pChevronDown = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`;
+
   activeScreenEl.innerHTML = `
-    <div class="songsPageTitle">Projects</div>
+    <div class="songsTitleRow">
+      <div class="songsPageTitle">Projects</div>
+      <div class="ownerDropWrap">
+        <button class="ownerDropBtn">${pOwnerLabels[pOwner]}${pChevronDown}</button>
+      </div>
+    </div>
     <div class="songsHead">
       <div class="songsBar">
         <input id="projSearch" type="text" placeholder="Search projects..." />
@@ -7713,6 +7945,31 @@ function renderProjects() {
 
   $("#projSearch")?.addEventListener("input", applyProjFilter);
   applyProjFilter();
+
+  // Owner filter dropdown
+  const pDropBtn = activeScreenEl.querySelector(".ownerDropBtn");
+  const pDropWrap = activeScreenEl.querySelector(".ownerDropWrap");
+  pDropBtn?.addEventListener("click", () => {
+    const existing = pDropWrap?.querySelector(".ownerDropMenu");
+    if (existing) { existing.remove(); return; }
+    const menu = document.createElement("div");
+    menu.className = "ownerDropMenu";
+    menu.innerHTML = ["all", "mine", "shared"].map(v =>
+      `<button class="ownerDropItem${pOwner === v ? " active" : ""}" data-owner="${v}">${pOwnerLabels[v]}</button>`
+    ).join("");
+    pDropWrap?.appendChild(menu);
+    menu.querySelectorAll(".ownerDropItem").forEach(item => {
+      item.addEventListener("click", () => {
+        menu.remove();
+        projectsOwnerFilter = item.getAttribute("data-owner") || "all";
+        renderProjects();
+      });
+    });
+    const close = (e) => {
+      if (!menu.contains(e.target) && e.target !== pDropBtn) { menu.remove(); document.removeEventListener("pointerdown", close); }
+    };
+    setTimeout(() => document.addEventListener("pointerdown", close), 0);
+  });
 
   $("#projAddFab")?.addEventListener("click", () => {
     const name = prompt("New project name:");
@@ -8615,6 +8872,8 @@ function renderHome() {
       if (target === "songs") {
         navigateForward(() => {
           resetSongsFilters({ keepSort: true });
+          songsListState.ownerFilter = "all";
+          songsFromCollab = false;
           songsBackTarget = null;
           songsListScrollTop = 0;
           currentTab = "songs";
@@ -8625,6 +8884,7 @@ function renderHome() {
       }
       if (target === "projects") {
         navigateForward(() => {
+          projectsOwnerFilter = "all";
           drawerView = "projects";
           closeDrawer();
           selectedSongId = null;
@@ -9511,19 +9771,89 @@ function openShareRoleSheet(opts) {
   openShareOverlay(opts);
 }
 
+// Track known shared IDs so we can detect new shares
+let _knownSharedSongIds = new Set();
+let _knownSharedProjectIds = new Set();
+
+function _showShareNotification(newItems) {
+  if (!newItems.length) return;
+
+  // Persist each share to the notification inbox
+  for (const item of newItems) {
+    addNotification({
+      title: item.name,
+      body: `Shared with you by ${item.from}`,
+      type: "share",
+    });
+  }
+
+  const label = newItems.length === 1
+    ? `"${newItems[0].name}" was shared with you by ${newItems[0].from}`
+    : `${newItems.length} new items shared with you`;
+
+  // Push notification (if permitted and not currently in collab)
+  if ("Notification" in window && Notification.permission === "granted"
+      && !(document.visibilityState === "visible" && currentTab === "collab")) {
+    const reg = navigator.serviceWorker?.controller ? navigator.serviceWorker.ready : null;
+    if (reg) {
+      reg.then(r => {
+        r.showNotification("RiffBank", {
+          body: label,
+          icon: "/icon-1024.png",
+          badge: "/icon-1024.png",
+          tag: "riffbank-new-share",
+          renotify: true,
+          data: { url: "/" },
+        });
+      }).catch(() => {});
+    }
+  }
+
+  // Also show in-app toast
+  toast(label);
+}
+
+let _refreshSharedRunning = false;
 async function refreshSharedData() {
+  if (_refreshSharedRunning) return; // prevent overlapping runs
+  _refreshSharedRunning = true;
+  refreshSharedData._lastRun = Date.now();
   try {
-    const [projects, songs, invites, myProjects, mySongs] = await Promise.all([
-      pullSharedProjects(),
-      pullSharedSongs(),
-      listMyInvites(),
-      pullMySharedProjects(),
-      pullMySharedSongs(),
-    ]);
+    console.log("[Collab] fetching all shared data (single RPC)...");
+    const result = await fetchAllSharedData();
+    if (!result) { console.warn("[Collab] RPC returned null"); return; }
+    const { projects, songs, invites, myProjects, mySongs } = result;
+    console.log("[Collab] all done");
+
+    // Detect newly shared items
+    const newItems = [];
+    for (const sp of (projects || [])) {
+      if (sp.projectId && !_knownSharedProjectIds.has(sp.projectId)) {
+        newItems.push({ name: sp.projectName || "a project", from: sp.ownerName || "Someone" });
+      }
+    }
+    for (const ss of (songs || [])) {
+      const sid = ss.song?.id;
+      if (sid && !_knownSharedSongIds.has(sid)) {
+        newItems.push({ name: ss.song?.title || "a song", from: ss.ownerName || "Someone" });
+      }
+    }
+
+    // Update known IDs
+    _knownSharedSongIds = new Set((songs || []).map(s => s.song?.id).filter(Boolean));
+    _knownSharedProjectIds = new Set((projects || []).map(p => p.projectId).filter(Boolean));
+
+    // Show notification for new shares (skip on first load)
+    if (sharedData.loaded && newItems.length) {
+      _showShareNotification(newItems);
+    }
+
     sharedData = { projects: projects || [], songs: songs || [], invites: invites || [], myProjects: myProjects || [], mySongs: mySongs || [], loaded: true };
   } catch (e) {
     console.warn("[Collab] Failed to fetch shared data:", e);
     if (!sharedData.loaded) sharedData = { projects: [], songs: [], invites: [], myProjects: [], mySongs: [], loaded: true };
+  } finally {
+    _refreshSharedRunning = false;
   }
 }
 
@@ -9531,6 +9861,7 @@ async function refreshSharedData() {
 let _collabSidebarOpen = false;
 let _friendsOverlayEl = null;
 let _pendingFriendCount = 0;
+let _pendingFriendAction = null; // { friendshipId, notifId } — set when navigating to profile from notification
 
 function renderCollab() {
   setHeader("Collab");
@@ -9538,36 +9869,115 @@ function renderCollab() {
   appEl?.classList.add("collapseTitle");
   const h1 = appEl?.querySelector(".titleblock h1");
   if (h1) h1.style.opacity = "0";
-  _collabSidebarOpen = false;
 
   // Apply cached badge counts immediately (no lag), then refresh in background
   _applyAllBadges(_unreadMsgCount, _pendingFriendCount);
   syncMessageBadges();
 
-  // Show loading state first, then fetch
-  if (!sharedData.loaded) {
-    activeScreenEl.innerHTML = `
-      <div class="collabShell">
-        <div class="collabSidebar">${_collabSidebarHTML()}</div>
-        <div class="collabMain">
-          <div class="collabWrap">
-            ${_collabInlineBackHTML()}
-            <div class="songsPageTitle">Collab</div>
-            <div class="collabEmpty" style="text-align:center; padding-top:60px;">
-              <div class="collabSpinner"></div>
-              <div style="margin-top:16px">Loading shared content...</div>
-            </div>
-          </div>
+  // Build badge subtitles
+  const friendBadge = _pendingFriendCount ? `${_pendingFriendCount} pending` : "";
+  const msgBadge = _unreadMsgCount ? `${_unreadMsgCount} unread` : "";
+  const sharedCount = (sharedData.songs?.length || 0) + (sharedData.projects || []).reduce((n, p) => n + (p.songs?.length || 0), 0);
+
+  activeScreenEl.innerHTML = `
+    <div class="songsPageTitle">Collab</div>
+
+    <div class="collabGrid">
+      <div class="hCard hCollabFriends hWide" role="button" tabindex="0" data-collab-nav="friends" aria-label="Friends">
+        <div class="hShimmer"></div>
+        <div class="hGrad"></div>
+        <div class="hBody">
+          <div class="hLabel">Friends ${_pendingFriendCount ? `<span class="hCardBadge">${_pendingFriendCount}</span>` : ""}</div>
+          ${friendBadge ? `<div class="hSub">${friendBadge}</div>` : ""}
         </div>
       </div>
-    `;
-    _wireCollabSidebar();
-    _wireCollabInlineBack();
-    refreshSharedData().then(() => renderCollabContent());
-    return;
-  }
 
-  renderCollabContent();
+      <div class="hCard hCollabSongs hWide" role="button" tabindex="0" data-collab-nav="songs" aria-label="Songs">
+        <div class="hShimmer"></div>
+        <div class="hGrad"></div>
+        <div class="hBody">
+          <div class="hLabel">Songs</div>
+          ${sharedCount ? `<div class="hSub">${sharedCount} shared</div>` : ""}
+        </div>
+      </div>
+
+      <div class="hCard hCollabMessages hWide" role="button" tabindex="0" data-collab-nav="messages" aria-label="Messages">
+        <div class="hShimmer"></div>
+        <div class="hGrad"></div>
+        <div class="hBody">
+          <div class="hLabel">Messages</div>
+          ${msgBadge ? `<div class="hSub">${msgBadge}</div>` : ""}
+        </div>
+      </div>
+
+      <div class="hCard hCollabAdd hWide" role="button" tabindex="0" data-collab-nav="add" aria-label="Add Friend">
+        <div class="hShimmer"></div>
+        <div class="hGrad"></div>
+        <div class="hBody">
+          <div class="hLabel">Add Friend</div>
+          <div class="hSub">Find &amp; invite people</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  // Wire card taps
+  activeScreenEl.querySelectorAll("[data-collab-nav]").forEach(card => {
+    card.addEventListener("click", () => {
+      const target = card.getAttribute("data-collab-nav");
+      if (target === "friends") {
+        openFriendsList();
+      } else if (target === "songs") {
+        console.log("[Collab] Songs card tapped — navigating forward");
+        navigateForward(() => {
+          console.log("[Collab] Inside navigateForward callback — setting ownerFilter=shared");
+          songsListState.ownerFilter = "shared";
+          songsFromCollab = true;
+          currentTab = "songs";
+          songsView = "list";
+          selectedSongId = null;
+          console.log("[Collab] State set, render will follow");
+        });
+      } else if (target === "messages") {
+        openMessages();
+      } else if (target === "add") {
+        openAddFriend();
+      }
+    });
+  });
+
+  // Refresh shared data when opening Collab (with cooldown + delay to avoid interrupting transitions)
+  // const _now = Date.now();
+  // if (!refreshSharedData._lastRun || (_now - refreshSharedData._lastRun > 60000)) {
+  //   setTimeout(() => refreshSharedData().catch(() => {}), 500);
+  // }
+
+  // Collapse title scroll handler
+  if (activeScreenEl._collapseTitleScroll) {
+    activeScreenEl.removeEventListener("scroll", activeScreenEl._collapseTitleScroll);
+    activeScreenEl._collapseTitleScroll = null;
+  }
+  const _screen = activeScreenEl;
+  const _sm = document.querySelector(".app.collapseTitle .titleblock h1");
+  if (_sm) {
+    requestAnimationFrame(() => {
+      const bt = _screen.querySelector(".songsPageTitle");
+      if (!bt) return;
+      const topbarEl = document.querySelector(".topbar");
+      const screenTop = _screen.getBoundingClientRect().top;
+      const topbarBottom = topbarEl ? topbarEl.getBoundingClientRect().bottom : 80;
+      const fadeStart = bt.offsetTop - (topbarBottom - screenTop);
+      const fadeEnd = fadeStart + (bt.offsetHeight || 40);
+      const range = fadeEnd - fadeStart;
+      const onScroll = () => {
+        const progress = Math.min(1, Math.max(0, (_screen.scrollTop - fadeStart) / range));
+        _sm.style.opacity = progress;
+      };
+      _screen._collapseTitleScroll = onScroll;
+      _screen.addEventListener("scroll", onScroll, { passive: true });
+      onScroll();
+    });
+  }
 }
 
 function _updateCollabBadges(friendCount, msgCount) {
@@ -9875,7 +10285,6 @@ function renderCollabContent() {
       <div class="collabSidebar">${_collabSidebarHTML()}</div>
       <div class="collabMain">
         <div class="collabWrap">
-          ${_collabInlineBackHTML()}
           <div class="songsPageTitle">Collab</div>
           ${hasShared ? `
             <!-- Shared With Me -->
@@ -9933,7 +10342,6 @@ function renderCollabContent() {
 
   // Wire sidebar swipe + buttons
   _wireCollabSidebar();
-  _wireCollabInlineBack();
 
   // Wire FAB → share picker
   $("#collabShareFab")?.addEventListener("click", () => {
@@ -10010,12 +10418,10 @@ function renderCollabContent() {
     });
   });
 
-  // Pull fresh data in background if stale
-  if (sharedData.loaded) {
-    refreshSharedData().then(() => {
-      // Only re-render if data actually changed
-    }).catch(() => {});
-  }
+  // Pull fresh data in background if stale — disabled for debugging
+  // if (sharedData.loaded) {
+  //   refreshSharedData().then(() => {}).catch(() => {});
+  // }
 }
 
 // ── Friends Overlays ─────────────────────────────
@@ -10103,6 +10509,10 @@ function renderFriendRequests() {
           setTimeout(() => row.remove(), 300);
           toast("Friend request accepted!");
           _pendingFriendCount = Math.max(0, _pendingFriendCount - 1);
+          _applyAllBadges(_unreadMsgCount, _pendingFriendCount);
+          const notifs = _loadNotifications();
+          const match = notifs.find(n => n.type === "friend_request" && n.friendshipId === id);
+          if (match) _updateFriendNotification(match.id, "accepted");
         } catch (err) { toast(err.message || "Failed"); }
       });
     });
@@ -10119,6 +10529,10 @@ function renderFriendRequests() {
           setTimeout(() => row.remove(), 300);
           toast("Request declined");
           _pendingFriendCount = Math.max(0, _pendingFriendCount - 1);
+          _applyAllBadges(_unreadMsgCount, _pendingFriendCount);
+          const notifs = _loadNotifications();
+          const match = notifs.find(n => n.type === "friend_request" && n.friendshipId === id);
+          if (match) _updateFriendNotification(match.id, "declined");
         } catch (err) { toast(err.message || "Failed"); }
       });
     });
@@ -10137,12 +10551,92 @@ function openFriendsList() {
 function renderFriendsList() {
   setHeader("Friends");
   activeScreenEl.innerHTML = `
+    <div id="friendsPendingSection" style="display:none"></div>
     <div class="friendsBody" style="padding:16px 16px 40px; display:flex; flex-direction:column; gap:10px;">
       <div class="friendsEmpty"><div class="collabSpinner"></div><div style="margin-top:12px">Loading...</div></div>
     </div>
   `;
 
-  getMyFriends().then(friends => {
+  // Load pending friend requests at top
+  if (_pendingFriendCount) {
+    const pendingEl = activeScreenEl.querySelector("#friendsPendingSection");
+    getPendingFriendRequests().then(requests => {
+      if (!requests.length || !pendingEl) return;
+      pendingEl.style.display = "";
+      pendingEl.innerHTML = `
+        <div style="padding:16px 16px 0">
+          <div class="collabPendingSectionLabel">Pending Requests</div>
+          ${requests.map(r => `
+            <div class="collabPendingRow alertRowClickable" data-req-id="${r.id}" data-req-profile="${r.requester_id}">
+              ${_friendAvatarHTML(r.profile)}
+              <div class="friendInfo">
+                <div class="friendName">${escapeHtml(r.profile?.display_name || "Unknown")}</div>
+                <div class="friendMeta">${_friendMetaText(r.profile)}</div>
+              </div>
+              <div class="friendActions">
+                <button class="friendAcceptBtn" data-fl-accept="${r.id}">Accept</button>
+                <button class="friendDeclineBtn" data-fl-decline="${r.id}">Decline</button>
+              </div>
+            </div>
+          `).join("")}
+        </div>
+      `;
+      pendingEl.querySelectorAll("[data-fl-accept]").forEach(btn => {
+        btn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          const id = btn.getAttribute("data-fl-accept");
+          btn.textContent = "...";
+          try {
+            await acceptFriendRequest(id);
+            const row = btn.closest(".collabPendingRow");
+            row.style.opacity = ".4";
+            setTimeout(() => { row.remove(); if (!pendingEl.querySelector(".collabPendingRow")) pendingEl.style.display = "none"; }, 300);
+            toast("Friend request accepted!");
+            _pendingFriendCount = Math.max(0, _pendingFriendCount - 1);
+            _applyAllBadges(_unreadMsgCount, _pendingFriendCount);
+            const notifs = _loadNotifications();
+            const match = notifs.find(n => n.type === "friend_request" && n.friendshipId === id);
+            if (match) _updateFriendNotification(match.id, "accepted");
+          } catch (err) { toast(err.message || "Failed"); btn.textContent = "Accept"; }
+        });
+      });
+      pendingEl.querySelectorAll("[data-fl-decline]").forEach(btn => {
+        btn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          const id = btn.getAttribute("data-fl-decline");
+          btn.textContent = "...";
+          try {
+            await removeFriendship(id);
+            const row = btn.closest(".collabPendingRow");
+            row.style.opacity = ".4";
+            setTimeout(() => { row.remove(); if (!pendingEl.querySelector(".collabPendingRow")) pendingEl.style.display = "none"; }, 300);
+            toast("Request declined");
+            _pendingFriendCount = Math.max(0, _pendingFriendCount - 1);
+            _applyAllBadges(_unreadMsgCount, _pendingFriendCount);
+            const notifs = _loadNotifications();
+            const match = notifs.find(n => n.type === "friend_request" && n.friendshipId === id);
+            if (match) _updateFriendNotification(match.id, "declined");
+          } catch (err) { toast(err.message || "Failed"); btn.textContent = "Decline"; }
+        });
+      });
+      // Click row (outside buttons) → open profile with accept/decline bar
+      pendingEl.querySelectorAll("[data-req-profile]").forEach(row => {
+        row.addEventListener("click", (e) => {
+          if (e.target.closest("[data-fl-accept]") || e.target.closest("[data-fl-decline]")) return;
+          const userId = row.getAttribute("data-req-profile");
+          if (userId) {
+            navigateForward(() => {
+              friendProfileId = userId;
+              overlayView = "friendProfile";
+            });
+          }
+        });
+      });
+    }).catch(() => {});
+  }
+
+  // Delay async fetch so view transition can capture snapshot first
+  setTimeout(() => getMyFriends().then(friends => {
     const body = activeScreenEl.querySelector(".friendsBody");
     if (!body) return;
     if (!friends.length) {
@@ -10204,7 +10698,7 @@ function renderFriendsList() {
   }).catch(() => {
     const body = activeScreenEl.querySelector(".friendsBody");
     if (body) body.innerHTML = `<div class="friendsEmpty">Failed to load friends.</div>`;
-  });
+  }), 350); // 350ms delay to let view transition capture snapshot
 }
 
 // ── Public Profile View (friend/user profile) ──
@@ -10224,14 +10718,24 @@ function renderFriendProfile(userId) {
     </div>
   `;
 
-  // Fetch profile + shared data in parallel
+  // Fetch profile + shared data + pending friendship status in parallel
   Promise.all([
     supabase.from("profiles").select("id, first_name, last_name, display_name, avatar_url, location, instrument, genre, bio").eq("id", userId).maybeSingle(),
     _getSharedWithUser(userId),
-  ]).then(([{ data: profile }, shared]) => {
+    getPendingFriendRequests().catch(() => []),
+  ]).then(([{ data: profile }, shared, pendingRequests]) => {
     if (!profile) {
       activeScreenEl.innerHTML = `<div class="profileWrap"><div class="friendsEmpty">Profile not found.</div></div>`;
       return;
+    }
+    // Auto-detect pending friend request from this user (works from any entry point)
+    if (!_pendingFriendAction) {
+      const pending = pendingRequests.find(r => r.requester_id === userId);
+      if (pending) {
+        const notifs = _loadNotifications();
+        const match = notifs.find(n => n.type === "friend_request" && n.friendshipId === pending.id);
+        _pendingFriendAction = { friendshipId: pending.id, notifId: match?.id || null };
+      }
     }
     _renderFriendProfileContent(profile, shared);
   }).catch(() => {
@@ -10362,9 +10866,47 @@ function _renderFriendProfileContent(profile, shared) {
         <div class="pdSongList">${allRows}</div>
       </div>
     </div>
+    ${_pendingFriendAction ? `
+      <div class="friendActionBar" id="fpFriendActionBar">
+        <button class="friendActionAccept" id="fpActionAccept">Accept Friend Request</button>
+        <button class="friendActionDecline" id="fpActionDecline">Decline</button>
+      </div>
+    ` : ""}
   `;
 
   activeScreenEl.scrollTop = 0;
+
+  // Wire accept/decline action bar if present
+  if (_pendingFriendAction) {
+    const action = _pendingFriendAction;
+    _pendingFriendAction = null; // consume it
+    $("#fpActionAccept")?.addEventListener("click", async () => {
+      const btn = $("#fpActionAccept");
+      btn.textContent = "Accepting...";
+      try {
+        await acceptFriendRequest(action.friendshipId);
+        if (action.notifId) _updateFriendNotification(action.notifId, "accepted");
+        _pendingFriendCount = Math.max(0, _pendingFriendCount - 1);
+        _applyAllBadges(_unreadMsgCount, _pendingFriendCount);
+        toast("Friend request accepted!");
+        const bar = $("#fpFriendActionBar");
+        if (bar) { bar.style.opacity = "0"; setTimeout(() => bar.remove(), 300); }
+      } catch (err) { toast(err.message || "Failed"); btn.textContent = "Accept Friend Request"; }
+    });
+    $("#fpActionDecline")?.addEventListener("click", async () => {
+      const btn = $("#fpActionDecline");
+      btn.textContent = "...";
+      try {
+        await removeFriendship(action.friendshipId);
+        if (action.notifId) _updateFriendNotification(action.notifId, "declined");
+        _pendingFriendCount = Math.max(0, _pendingFriendCount - 1);
+        _applyAllBadges(_unreadMsgCount, _pendingFriendCount);
+        toast("Request declined");
+        const bar = $("#fpFriendActionBar");
+        if (bar) { bar.style.opacity = "0"; setTimeout(() => bar.remove(), 300); }
+      } catch (err) { toast(err.message || "Failed"); btn.textContent = "Decline"; }
+    });
+  }
 
   // Tab switching
   const tabBody = $("#fpTabBody");
@@ -10518,7 +11060,7 @@ function renderMessages() {
     </div>
   `;
 
-  getConversations().then(convos => {
+  setTimeout(() => getConversations().then(convos => {
     const body = activeScreenEl.querySelector(".msgBody");
     if (!body) return;
     if (!convos.length) {
@@ -10529,7 +11071,7 @@ function renderMessages() {
   }).catch(() => {
     const body = activeScreenEl.querySelector(".msgBody");
     if (body) body.innerHTML = `<div class="friendsEmpty">Failed to load messages.</div>`;
-  });
+  }), 350);
 }
 
 function _renderConvoList(body, convos) {
@@ -11052,7 +11594,10 @@ function renderProfileContent(profile) {
   // Sign out
   $("#profSignOut")?.addEventListener("click", async () => {
     if (!confirm("Sign out of RiffBank?")) return;
-    try { await signOut(); location.reload(); } catch (e) { toast(e.message || "Sign out failed"); }
+    try {
+      localStorage.removeItem("profileSetupDone");
+      await signOut(); location.reload();
+    } catch (e) { toast(e.message || "Sign out failed"); }
   });
 
   // Reset welcome flow (testing)
@@ -11286,10 +11831,19 @@ function openCollabSharePicker() {
 function renderAlerts() {
   setHeader("Alerts");
 
+  // Mark all inbox notifications as read when viewing
+  markNotificationsRead();
+
   const statusIcon = (s) => {
     if (s === "done") return `<span style="color:#22c55e">&#10003;</span>`;
     if (s === "failed") return `<span style="color:#f43f5e">&#10007;</span>`;
     return `<span class="alertSpinner"></span>`;
+  };
+
+  const notifIcon = (type) => {
+    if (type === "share") return `<span style="color:#a855f7"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg></span>`;
+    if (type === "friend_request" || type === "friend_accepted" || type === "friend_declined") return `<span style="color:#3b82f6"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg></span>`;
+    return `<span style="color:#888">&#x1F514;</span>`;
   };
 
   const timeAgo = (ts) => {
@@ -11300,7 +11854,40 @@ function renderAlerts() {
     return `${Math.floor(s / 86400)}d ago`;
   };
 
-  const items = activityLog.length
+  // Build avatar HTML for friend request notifications (supports preset: and http avatars)
+  const notifAvatar = (n) => {
+    const initial = (n.requesterName || "?").charAt(0).toUpperCase();
+    return `<div class="alertAvatar">${renderAvatarHtml(n.avatarUrl, 36, initial)}</div>`;
+  };
+
+  // Notification inbox items (shares, etc.)
+  const notifications = _loadNotifications();
+  const notifHTML = notifications.length
+    ? notifications.map(n => {
+      const isFR = n.type === "friend_request" || n.type === "friend_accepted" || n.type === "friend_declined";
+      const isPendingFR = n.type === "friend_request" && n.friendshipId;
+      const avatarHTML = isFR ? notifAvatar(n) : `<div class="alertIcon">${notifIcon(n.type)}</div>`;
+      const clickable = isPendingFR && n.requesterId ? `data-notif-profile="${n.requesterId}" data-notif-friendship="${n.friendshipId}" data-notif-id="${n.id}"` : "";
+      const actionBtns = isPendingFR ? `
+        <div class="alertFriendActions">
+          <button class="alertAcceptBtn" data-notif-accept="${n.id}" data-friendship-id="${n.friendshipId}">Accept</button>
+          <button class="alertDeclineBtn" data-notif-decline="${n.id}" data-friendship-id="${n.friendshipId}">Decline</button>
+        </div>` : "";
+      return `
+      <div class="alertRow${n.read ? "" : " alertUnread"}${isPendingFR ? " alertRowClickable" : ""}" ${clickable}>
+        ${avatarHTML}
+        <div class="alertBody">
+          <div class="alertTitle">${escapeHtml(n.title)}</div>
+          <div class="alertMsg">${escapeHtml(n.body)}</div>
+          ${actionBtns}
+        </div>
+        <div class="alertTime">${timeAgo(n.ts)}</div>
+      </div>`;
+    }).join("")
+    : "";
+
+  // Activity log items (uploads, syncs)
+  const activityHTML = activityLog.length
     ? activityLog.map(a => `
       <div class="alertRow">
         <div class="alertIcon">${statusIcon(a.status)}</div>
@@ -11311,13 +11898,84 @@ function renderAlerts() {
         <div class="alertTime">${timeAgo(a.ts)}</div>
       </div>
     `).join("")
-    : `<div style="padding:40px 20px;text-align:center;color:#666">No activity yet</div>`;
+    : "";
+
+  const hasContent = notifications.length || activityLog.length;
 
   activeScreenEl.innerHTML = `
     <div style="padding:16px">
-      ${items}
+      ${notifications.length ? `<div class="alertSectionLabel">Notifications</div>${notifHTML}` : ""}
+      ${activityLog.length ? `<div class="alertSectionLabel" style="${notifications.length ? "margin-top:20px" : ""}">Activity</div>${activityHTML}` : ""}
+      ${!hasContent ? `<div style="padding:40px 20px;text-align:center;color:#666">No notifications yet</div>` : ""}
     </div>
   `;
+
+  // Wire accept/decline buttons on friend request notifications
+  activeScreenEl.querySelectorAll("[data-notif-accept]").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const notifId = btn.getAttribute("data-notif-accept");
+      const friendshipId = btn.getAttribute("data-friendship-id");
+      btn.textContent = "...";
+      try {
+        await acceptFriendRequest(friendshipId);
+        _updateFriendNotification(notifId, "accepted");
+        _pendingFriendCount = Math.max(0, _pendingFriendCount - 1);
+        _applyAllBadges(_unreadMsgCount, _pendingFriendCount);
+        toast("Friend request accepted!");
+        renderAlerts();
+      } catch (err) { toast(err.message || "Failed"); btn.textContent = "Accept"; }
+    });
+  });
+  activeScreenEl.querySelectorAll("[data-notif-decline]").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const notifId = btn.getAttribute("data-notif-decline");
+      const friendshipId = btn.getAttribute("data-friendship-id");
+      btn.textContent = "...";
+      try {
+        await removeFriendship(friendshipId);
+        _updateFriendNotification(notifId, "declined");
+        _pendingFriendCount = Math.max(0, _pendingFriendCount - 1);
+        _applyAllBadges(_unreadMsgCount, _pendingFriendCount);
+        toast("Request declined");
+        renderAlerts();
+      } catch (err) { toast(err.message || "Failed"); btn.textContent = "Decline"; }
+    });
+  });
+
+  // Clickable friend request rows → open profile with accept/decline bar
+  activeScreenEl.querySelectorAll("[data-notif-profile]").forEach(row => {
+    row.addEventListener("click", (e) => {
+      // Don't navigate if they clicked the accept/decline buttons
+      if (e.target.closest("[data-notif-accept]") || e.target.closest("[data-notif-decline]")) return;
+      const userId = row.getAttribute("data-notif-profile");
+      const friendshipId = row.getAttribute("data-notif-friendship");
+      const notifId = row.getAttribute("data-notif-id");
+      if (userId) {
+        _pendingFriendAction = { friendshipId, notifId };
+        navigateForward(() => {
+          drawerView = null; // clear so render() doesn't re-enter alerts
+          friendProfileId = userId;
+          overlayView = "friendProfile";
+        });
+      }
+    });
+  });
+}
+
+// Update a friend request notification to show accepted/declined status
+function _updateFriendNotification(notifId, action) {
+  const items = _loadNotifications();
+  const n = items.find(i => i.id === notifId);
+  if (!n) return;
+  const name = n.requesterName || "Someone";
+  n.type = action === "accepted" ? "friend_accepted" : "friend_declined";
+  n.title = action === "accepted" ? "Friend Added" : "Request Declined";
+  n.body = `You ${action} ${name}'s friend request`;
+  delete n.friendshipId; // no longer actionable
+  n.ts = Date.now();
+  _saveNotifications(items);
 }
 
 function renderGlobalSearch() {
@@ -12620,6 +13278,7 @@ function coverSvg(song, { lite = false } = {}) {
 // Songs list + create
 // ---------------------
 function renderSongsList() {
+  console.log("[renderSongsList] START, ownerFilter:", songsListState.ownerFilter);
   setHeader("Songs");
   const appEl = document.querySelector(".app");
   appEl?.classList.add("collapseTitle");
@@ -12627,16 +13286,60 @@ function renderSongsList() {
   const h1 = appEl?.querySelector(".titleblock h1");
   if (h1) h1.style.opacity = "0";
 
-  const songs = [...state.songs];
+  // Merge own songs + shared songs — use stable cached objects to preserve cover resolution flags
+  if (!state._sharedSongsCache) state._sharedSongsCache = [];
+  const _sharedRaw = [
+    ...(sharedData.songs || []).map(ss => ({ ...ss.song, _shared: true, _sharedBy: ss.ownerName || "Someone" })),
+    ...(sharedData.projects || []).flatMap(sp =>
+      (sp.songs || []).map(s => ({ ...s, _shared: true, _sharedBy: sp.ownerName || "Someone" }))
+    ),
+  ].filter(s => !state.songs.find(own => own.id === s.id));
+
+  // Upsert into stable cache — same object reference across renders
+  for (const s of _sharedRaw) {
+    const existing = state._sharedSongsCache.find(c => c.id === s.id);
+    if (existing) {
+      // Update data but keep the same object reference (preserves _coverResolving etc)
+      for (const k of Object.keys(s)) {
+        if (k !== "_coverResolving" && k !== "_userCoverResolving" && k !== "coverImageUrl" && k !== "userCoverImageUrl") {
+          existing[k] = s[k];
+        }
+      }
+      // Only set cover URLs if not already resolved
+      if (!existing.coverImageUrl && s.coverImageUrl) existing.coverImageUrl = s.coverImageUrl;
+      if (!existing.userCoverImageUrl && s.userCoverImageUrl) existing.userCoverImageUrl = s.userCoverImageUrl;
+    } else {
+      state._sharedSongsCache.push(s);
+    }
+  }
+  // Use cached objects (stable references)
+  const allSharedSongs = state._sharedSongsCache.filter(s => s._shared);
+
+  const ownSongs = state.songs.map(s => ({ ...s, _shared: false }));
+  const allSongs = [...ownSongs, ...allSharedSongs];
+
+  const ownerFilter = songsListState.ownerFilter || "all";
+  const songs = ownerFilter === "mine" ? ownSongs
+    : ownerFilter === "shared" ? allSharedSongs
+    : allSongs;
+
   const projects = Array.from(
     new Set([
       ...(state.settings?.defaultProject ? [state.settings.defaultProject.trim()] : []),
-      ...state.songs.map((s) => (s.project || "").trim()).filter(Boolean),
+      ...songs.map((s) => (s.project || "").trim()).filter(Boolean),
     ])
   ).sort((a, b) => a.localeCompare(b));
 
+  const ownerLabels = { all: "All", mine: "Mine", shared: "Shared" };
+  const chevronDown = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`;
+
   activeScreenEl.innerHTML = `
-    <div class="songsPageTitle">Songs</div>
+    <div class="songsTitleRow">
+      <div class="songsPageTitle">${songsFromCollab ? "Shared Songs" : "Songs"}</div>
+      ${songsFromCollab ? "" : `<div class="ownerDropWrap">
+        <button class="ownerDropBtn">${ownerLabels[ownerFilter]}${chevronDown}</button>
+      </div>`}
+    </div>
     <div class="songsHead">
       <div class="songsBar">
         <input
@@ -12657,6 +13360,7 @@ function renderSongsList() {
     </button>
   `;
 
+  console.log("[renderSongsList] innerHTML set, building list...");
   const listEl = $("#songList");
 
   const applyFilter = () => {
@@ -12797,6 +13501,32 @@ function renderSongsList() {
   $("#q").addEventListener("input", applyFilter);
 
   $("#openSongFilters")?.addEventListener("click", openSongFilters);
+
+  // Owner filter dropdown
+  const dropBtn = activeScreenEl.querySelector(".ownerDropBtn");
+  const dropWrap = activeScreenEl.querySelector(".ownerDropWrap");
+  dropBtn?.addEventListener("click", () => {
+    const existing = dropWrap?.querySelector(".ownerDropMenu");
+    if (existing) { existing.remove(); return; }
+    const menu = document.createElement("div");
+    menu.className = "ownerDropMenu";
+    menu.innerHTML = ["all", "mine", "shared"].map(v =>
+      `<button class="ownerDropItem${ownerFilter === v ? " active" : ""}" data-owner="${v}">${ownerLabels[v]}</button>`
+    ).join("");
+    dropWrap?.appendChild(menu);
+    menu.querySelectorAll(".ownerDropItem").forEach(item => {
+      item.addEventListener("click", () => {
+        menu.remove();
+        songsListState.ownerFilter = item.getAttribute("data-owner") || "all";
+        songsListScrollTop = 0;
+        renderSongsList();
+      });
+    });
+    const close = (e) => {
+      if (!menu.contains(e.target) && e.target !== dropBtn) { menu.remove(); document.removeEventListener("pointerdown", close); }
+    };
+    setTimeout(() => document.addEventListener("pointerdown", close), 0);
+  });
 
   $("#songsAddFab")?.addEventListener("click", () => openCreateOverlay());
 
@@ -14638,7 +15368,7 @@ function renderSettings() {
     const greens = results.length - reds.length - yellows.length;
     let msg = `${results.length} versions: ${greens} synced, ${yellows.length} local only, ${reds.length} no audio`;
     if (reds.length) msg += `\n\nBroken:\n${reds.map(r => `• ${r.song} / ${r.version}`).join("\n")}`;
-    alert(msg);
+    console.log("[RiffBank Audit]", msg);
   });
 
   $("#wipe").addEventListener("click", async () => {

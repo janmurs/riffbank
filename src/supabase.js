@@ -7,6 +7,31 @@ export const SUPABASE_ANON_KEY = "sb_publishable_txkI4NbwclNsBW_geDj_bw_xQNL4vqO
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+// Supabase client with 5s fetch timeout — use for non-critical calls (shared data)
+// AbortController actually cancels the HTTP request, freeing the connection slot
+export const supabaseTimed = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  global: {
+    fetch: (url, options = {}) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5000);
+      return fetch(url, { ...options, signal: controller.signal })
+        .finally(() => clearTimeout(timer));
+    },
+  },
+});
+
+// ── Timeout wrapper: prevents any Supabase call from hanging forever ──
+// Rejects on timeout so callers' try/catch can handle it
+function withTimeout(promise, ms = 5000) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Supabase timeout")), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 // ── Auth helpers ──────────────────────────────────────
 
 export async function signUp(email, password) {
@@ -85,15 +110,22 @@ async function ensureProject(name, userId) {
 // ── State sync ────────────────────────────────────────
 
 let _syncTimer = null;
+let _pushRunning = false;
 
 export function supabaseSyncStateSoon(state) {
   clearTimeout(_syncTimer);
-  _syncTimer = setTimeout(() => supabasePushState(state).catch(console.warn), 5000);
+  // 15s debounce — gives time for navigation/render to settle before pushing
+  _syncTimer = setTimeout(() => {
+    if (_pushRunning) return; // skip if already pushing
+    supabasePushState(state).catch(console.warn);
+  }, 15000);
 }
 
 export async function supabasePushState(state) {
+  if (_pushRunning) { console.warn("[Supabase] Push: already running, skipping"); return false; }
+  _pushRunning = true;
   const userId = await getUserId();
-  if (!userId) { console.warn("[Supabase] Push: no userId"); return false; }
+  if (!userId) { _pushRunning = false; console.warn("[Supabase] Push: no userId"); return false; }
 
   const songs = state.songs || [];
   console.log(`[Supabase] Push: ${songs.length} songs, userId=${userId}`);
@@ -105,14 +137,23 @@ export async function supabasePushState(state) {
       ...songs.map(s => s.project).filter(Boolean),
     ])];
     const projectMap = {};
+    console.time("[Push] ensureProjects");
     for (const name of projectNames) {
       projectMap[name] = await ensureProject(name, userId);
     }
+    console.timeEnd("[Push] ensureProjects");
     console.log("[Supabase] Push: projects resolved", projectMap);
 
-    // 2. Upsert songs
-    const songRows = songs.map(s => ({
+    // 2. Upsert songs (only songs we own — skip shared songs)
+    const ownSongs = songs.filter(s => {
+      if (s._shared) return false;
+      // If song has a project, it must be one of our projects
+      if (s.project && !projectMap[s.project]) return false;
+      return true;
+    });
+    const songRows = ownSongs.map(s => ({
       id: s.id,
+      owner_id: userId,
       project_id: s.project ? (projectMap[s.project] || null) : null,
       title: s.title || "",
       lyrics: s.lyrics || null,
@@ -133,16 +174,27 @@ export async function supabasePushState(state) {
       updated_at: s.updatedAt || new Date().toISOString(),
     }));
 
-    if (songRows.length) {
-      console.log("[Supabase] Push: upserting songs", songRows.map(s => ({ id: s.id, title: s.title, project_id: s.project_id })));
-      const { error } = await supabase.from("songs").upsert(songRows, { onConflict: "id" });
+    // Deduplicate by id — Postgres rejects duplicate keys in a single upsert batch
+    const seenSongIds = new Set();
+    const dedupedSongRows = songRows.filter(s => {
+      if (seenSongIds.has(s.id)) return false;
+      seenSongIds.add(s.id);
+      return true;
+    });
+
+    if (dedupedSongRows.length) {
+      console.log("[Supabase] Push: upserting songs", dedupedSongRows.length);
+      console.time("[Push] upsert_my_songs");
+      const { error } = await supabase.rpc("upsert_my_songs", { rows: dedupedSongRows });
+      console.timeEnd("[Push] upsert_my_songs");
       if (error) { console.warn("[Supabase] songs upsert FAILED:", error.message, error.details, error.hint, error.code); return false; }
       console.log("[Supabase] Push: songs upsert OK");
     }
 
-    // 3. Upsert versions
+    // 3. Upsert versions (only for songs we own)
+    const ownSongIds = new Set(dedupedSongRows.map(r => r.id));
     const versionRows = [];
-    for (const s of songs) {
+    for (const s of songs.filter(s => ownSongIds.has(s.id))) {
       for (const v of (s.versions || [])) {
         versionRows.push({
           id: v.id,
@@ -165,29 +217,42 @@ export async function supabasePushState(state) {
       }
     }
 
-    if (versionRows.length) {
-      const { error } = await supabase.from("versions").upsert(versionRows, { onConflict: "id" });
+    const seenVersionIds = new Set();
+    const dedupedVersionRows = versionRows.filter(v => {
+      if (seenVersionIds.has(v.id)) return false;
+      seenVersionIds.add(v.id);
+      return true;
+    });
+
+    if (dedupedVersionRows.length) {
+      console.time("[Push] upsert_my_versions");
+      const { error } = await supabase.rpc("upsert_my_versions", { rows: dedupedVersionRows });
+      console.timeEnd("[Push] upsert_my_versions");
       if (error) { console.warn("[Supabase] versions upsert:", error); return false; }
     }
 
     // NOTE: No cleanup/delete logic here. Server is source of truth.
     // Deletions happen explicitly via deleteSongEverywhere().
 
+    _pushRunning = false;
     return true;
   } catch (e) {
+    _pushRunning = false;
     console.warn("[Supabase] Push failed:", e);
     return false;
   }
 }
 
 export async function supabasePullState() {
+  try {
   const userId = await getUserId();
   if (!userId) return null;
 
-  const { data: projects } = await supabase
-    .from("projects")
-    .select("id, name")
-    .eq("owner_id", userId);
+  console.time("[Pull] projects");
+  const { data: projects } = await withTimeout(
+    supabase.from("projects").select("id, name").eq("owner_id", userId)
+  );
+  console.timeEnd("[Pull] projects");
 
   const projectMap = {};
   for (const p of (projects || [])) projectMap[p.id] = p.name;
@@ -196,10 +261,22 @@ export async function supabasePullState() {
   const projectNames = Object.values(projectMap).filter(Boolean);
   if (!projectIds.length) return { songs: [], releases: [], projects: projectNames };
 
-  const { data: dbSongs } = await supabase
-    .from("songs")
-    .select("*, versions(*)")
-    .in("project_id", projectIds);
+  // Fetch songs and versions separately to avoid PostgREST join triggering cross-table RLS
+  console.time("[Pull] songs");
+  const { data: dbSongs } = await withTimeout(
+    supabase.from("songs").select("*").eq("owner_id", userId)
+  );
+  console.timeEnd("[Pull] songs");
+  const songIds = (dbSongs || []).map(s => s.id);
+  let versionsBySong = {};
+  if (songIds.length) {
+    console.time("[Pull] versions RPC");
+    const { data: dbVersions } = await withTimeout(
+      supabaseTimed.rpc("fetch_versions_by_song_ids", { s_ids: songIds })
+    );
+    console.timeEnd("[Pull] versions RPC");
+    for (const v of (dbVersions || [])) (versionsBySong[v.song_id] ||= []).push(v);
+  }
 
   const songs = (dbSongs || []).map(s => ({
     id: s.id,
@@ -223,7 +300,7 @@ export async function supabasePullState() {
     coverSource: s.cover_source || "ai",
     createdAt: s.created_at,
     updatedAt: s.updated_at,
-    versions: (s.versions || []).map(v => ({
+    versions: (versionsBySong[s.id] || []).map(v => ({
       id: v.id,
       label: v.label || "",
       notes: v.notes || "",
@@ -244,6 +321,7 @@ export async function supabasePullState() {
   }));
 
   return { songs, releases: [], projects: projectNames };
+  } catch (e) { console.warn("[supabasePullState] failed:", e.message); return null; }
 }
 
 export async function supabasePullStateSilent() {
@@ -288,10 +366,14 @@ export async function supabaseUploadAudio({ blob, songId, versionId }) {
 
 export async function supabaseFetchAudioBlob(audioPath) {
   if (!audioPath) return null;
-  const { data, error } = await supabase.storage.from("audio").download(audioPath);
-  if (error) { console.warn("[Supabase] audio download failed:", audioPath, error.message); return null; }
-  if (!data) return null;
-  return data;
+  // Public bucket — use public URL directly (no RLS evaluation, works for own + shared)
+  const { data: urlData } = supabase.storage.from("audio").getPublicUrl(audioPath);
+  if (!urlData?.publicUrl) return null;
+  try {
+    const resp = await fetch(urlData.publicUrl);
+    if (!resp.ok) { console.warn("[Supabase] audio download failed:", audioPath, resp.status); return null; }
+    return await resp.blob();
+  } catch (e) { console.warn("[Supabase] audio fetch error:", e.message); return null; }
 }
 
 // Discover audio files in storage for versions missing audio_path in the DB.
@@ -339,9 +421,14 @@ export async function supabaseUploadCover({ blob, songId, pathOverride }) {
 
 export async function supabaseFetchCoverBlob(coverPath) {
   if (!coverPath) return null;
-  const { data, error } = await supabase.storage.from("covers").download(coverPath);
-  if (error || !data) return null;
-  return data;
+  // Public bucket — use public URL (works for own + shared files)
+  const { data: urlData } = supabase.storage.from("covers").getPublicUrl(coverPath);
+  if (!urlData?.publicUrl) return null;
+  try {
+    const resp = await fetch(urlData.publicUrl);
+    if (!resp.ok) return null;
+    return await resp.blob();
+  } catch { return null; }
 }
 
 // ── Sharing & Collaboration ──────────────────────────
@@ -401,9 +488,8 @@ export async function getShareInvite(token) {
     if (proj) targetName = proj.name;
   } else if (data.song_id) {
     targetType = "song";
-    const { data: song } = await supabase
-      .from("songs").select("title").eq("id", data.song_id).maybeSingle();
-    if (song) targetName = song.title;
+    const { data: rpcSongs } = await supabase.rpc("fetch_songs_by_ids", { song_ids: [data.song_id] });
+    if (rpcSongs?.[0]) targetName = rpcSongs[0].title;
   }
 
   return {
@@ -465,41 +551,123 @@ export async function acceptShareInvite(token) {
   return { role: invite.role, projectId: invite.project_id, songId: invite.song_id };
 }
 
+// ── Single RPC for ALL shared data (bypasses RLS, single connection) ──
+
+export async function fetchAllSharedData() {
+  const userId = await getUserId();
+  if (!userId) return null;
+
+  const { data, error } = await supabase.rpc("get_all_shared_data", { p_user_id: userId });
+  if (error) { console.warn("[fetchAllSharedData] RPC failed:", error.message); return null; }
+  if (!data) return null;
+
+  // Build versions lookup from the single RPC response
+  const versionsBySong = {};
+  for (const v of (data.versions || [])) (versionsBySong[v.song_id] ||= []).push(v);
+
+  // Build project songs lookup from sharedProjectSongs
+  const projectSongsByProject = {};
+  for (const s of (data.sharedProjectSongs || [])) {
+    (projectSongsByProject[s.project_id] ||= []).push(s);
+  }
+
+  // sharedProjects → array of { projectId, projectName, ownerName, ownerId, role, songs[] }
+  const projects = (data.sharedProjects || []).map(sp => {
+    const songs = (projectSongsByProject[sp.project_id] || []).map(s => ({
+      id: s.song_id, title: s.title || "", project: sp.project_name || "",
+      genre: s.genre || "", lyrics: s.lyrics || "", notes: s.notes || "",
+      coverPath: s.cover_path || null, coverSource: s.cover_source || "ai",
+      createdAt: s.created_at, updatedAt: s.updated_at,
+      versions: (versionsBySong[s.song_id] || []).map(v => ({
+        id: v.id, label: v.label || "", audioPath: v.audio_path || null,
+        isActive: !!v.is_active, createdAt: v.created_at, updatedAt: v.updated_at,
+      })),
+    }));
+    return {
+      projectId: sp.project_id, projectName: sp.project_name,
+      ownerName: sp.owner_name || "Someone", ownerId: sp.owner_id,
+      role: sp.role, songs,
+    };
+  });
+
+  // sharedSongs → array of { song, role, ownerId, ownerName }
+  const songs = (data.sharedSongs || []).map(ss => ({
+    song: {
+      id: ss.song_id, title: ss.title || "", project: ss.project_name || "",
+      genre: ss.genre || "", lyrics: ss.lyrics || "", notes: ss.notes || "",
+      coverPath: ss.cover_path || null, coverSource: ss.cover_source || "ai",
+      createdAt: ss.created_at, updatedAt: ss.updated_at,
+      versions: (versionsBySong[ss.song_id] || []).map(v => ({
+        id: v.id, label: v.label || "", audioPath: v.audio_path || null,
+        isActive: !!v.is_active, createdAt: v.created_at, updatedAt: v.updated_at,
+      })),
+    },
+    role: ss.role,
+    ownerId: ss.invited_by || ss.owner_id,
+    ownerName: ss.owner_name || "Someone",
+  }));
+
+  // mySharedProjects → array of { projectId, projectName, recipientName, recipientId, role }
+  const myProjects = (data.mySharedProjects || []).map(mp => ({
+    projectId: mp.project_id, projectName: mp.project_name,
+    recipientName: mp.recipient_name || "Someone", recipientId: mp.user_id,
+    role: mp.role,
+  }));
+
+  // mySharedSongs → array of { songId, songTitle, projectName, recipientName, recipientId, role }
+  const mySongs = (data.mySharedSongs || []).map(ms => ({
+    songId: ms.song_id, songTitle: ms.title || "Unknown",
+    projectName: ms.project_name || "", recipientName: ms.recipient_name || "Someone",
+    recipientId: ms.user_id, role: ms.role,
+  }));
+
+  // invites → array of { id, token, role, accepted, created_at, expires_at, project_id, song_id, targetName, targetType, expired }
+  const invites = (data.invites || []).map(inv => ({
+    ...inv,
+    targetName: inv.project_id ? inv.project_name : inv.song_title,
+    targetType: inv.project_id ? "project" : "song",
+    expired: inv.expires_at && new Date(inv.expires_at) < new Date(),
+  }));
+
+  return { projects, songs, invites, myProjects, mySongs };
+}
+
+// ── Legacy individual pull functions (kept for compatibility) ──
+
 // Fetch all projects shared WITH the current user (+ their songs)
 export async function pullSharedProjects() {
+  try {
   const userId = await getUserId();
   if (!userId) return [];
 
-  // Get memberships
-  const { data: memberships, error: memErr } = await supabase
-    .from("project_members")
-    .select("project_id, role, invited_by")
-    .eq("user_id", userId);
+  // Get memberships (supabaseTimed auto-aborts after 5s)
+  const { data: memberships, error: memErr } = await supabaseTimed
+    .from("project_members").select("project_id, role, invited_by").eq("user_id", userId);
 
   if (memErr || !memberships?.length) return [];
 
   const projectIds = memberships.map(m => m.project_id);
 
   // Fetch projects
-  const { data: projects } = await supabase
-    .from("projects")
-    .select("id, name, owner_id")
-    .in("id", projectIds);
+  const { data: projects } = await supabaseTimed
+    .from("projects").select("id, name, owner_id").in("id", projectIds);
 
   if (!projects?.length) return [];
 
-  // Fetch songs + versions for those projects
-  const { data: dbSongs } = await supabase
-    .from("songs")
-    .select("*, versions(*)")
-    .in("project_id", projectIds);
+  // Fetch songs + versions for those projects (RPC to bypass songs RLS)
+  const { data: rpcSongs } = await supabaseTimed.rpc("fetch_songs_by_project_ids", { p_ids: projectIds });
+  const songIdsForVersions = (rpcSongs || []).map(s => s.id);
+  let versionsBySong = {};
+  if (songIdsForVersions.length) {
+    const { data: vers } = await supabaseTimed.rpc("fetch_versions_by_song_ids", { s_ids: songIdsForVersions });
+    for (const v of (vers || [])) (versionsBySong[v.song_id] ||= []).push(v);
+  }
+  const dbSongs = (rpcSongs || []).map(s => ({ ...s, versions: versionsBySong[s.id] || [] }));
 
   // Fetch owner profiles
   const ownerIds = [...new Set(projects.map(p => p.owner_id))];
-  const { data: profiles } = await supabase
-    .from("profiles")
-    .select("id, display_name")
-    .in("id", ownerIds);
+  const { data: profiles } = await supabaseTimed
+    .from("profiles").select("id, display_name").in("id", ownerIds);
   const profileMap = {};
   for (const p of (profiles || [])) profileMap[p.id] = p.display_name;
 
@@ -564,38 +732,40 @@ export async function pullSharedProjects() {
       songs,
     };
   }).filter(Boolean);
+  } catch (e) { console.warn("[pullSharedProjects] failed:", e.message); return []; }
 }
 
 // Fetch individual songs shared directly with the current user
 export async function pullSharedSongs() {
+  try {
   const userId = await getUserId();
   if (!userId) return [];
 
-  const { data: shares, error } = await supabase
-    .from("song_shares")
-    .select("song_id, role, invited_by")
-    .eq("user_id", userId);
+  const { data: shares, error } = await supabaseTimed
+    .from("song_shares").select("song_id, role, invited_by").eq("user_id", userId);
 
   if (error || !shares?.length) return [];
 
   const songIds = shares.map(s => s.song_id);
 
-  const { data: dbSongs } = await supabase
-    .from("songs")
-    .select("*, versions(*), project_id")
-    .in("id", songIds);
+  // Use RPC to bypass songs RLS for shared data
+  const { data: rpcSongs } = await supabaseTimed.rpc("fetch_songs_by_ids", { song_ids: songIds });
+  const { data: rpcVersions } = await supabaseTimed.rpc("fetch_versions_by_song_ids", { s_ids: songIds });
+  const versionsBySong = {};
+  for (const v of (rpcVersions || [])) (versionsBySong[v.song_id] ||= []).push(v);
+  const dbSongs = (rpcSongs || []).map(s => ({ ...s, versions: versionsBySong[s.id] || [] }));
 
   if (!dbSongs?.length) return [];
 
   // Get project names & owner profiles
   const projectIds = [...new Set(dbSongs.map(s => s.project_id).filter(Boolean))];
-  const { data: projects } = await supabase
+  const { data: projects } = await supabaseTimed
     .from("projects").select("id, name, owner_id").in("id", projectIds);
   const projMap = {};
   const ownerIds = new Set();
   for (const p of (projects || [])) { projMap[p.id] = p; ownerIds.add(p.owner_id); }
 
-  const { data: profiles } = await supabase
+  const { data: profiles } = await supabaseTimed
     .from("profiles").select("id, display_name").in("id", [...ownerIds]);
   const profileMap = {};
   for (const p of (profiles || [])) profileMap[p.id] = p.display_name;
@@ -636,6 +806,7 @@ export async function pullSharedSongs() {
       ownerName: proj ? (profileMap[proj.owner_id] || "Someone") : "Someone",
     };
   });
+  } catch (e) { console.warn("[pullSharedSongs] failed:", e.message); return []; }
 }
 
 // Fetch projects the current user has shared with others
@@ -643,7 +814,7 @@ export async function pullMySharedProjects() {
   const userId = await getUserId();
   if (!userId) return [];
 
-  const { data: memberships, error } = await supabase
+  const { data: memberships, error } = await supabaseTimed
     .from("project_members")
     .select("project_id, user_id, role")
     .eq("invited_by", userId);
@@ -654,8 +825,8 @@ export async function pullMySharedProjects() {
   const recipientIds = [...new Set(memberships.map(m => m.user_id))];
 
   const [{ data: projects }, { data: profiles }] = await Promise.all([
-    supabase.from("projects").select("id, name").in("id", projectIds),
-    supabase.from("profiles").select("id, display_name").in("id", recipientIds),
+    supabaseTimed.from("projects").select("id, name").in("id", projectIds),
+    supabaseTimed.from("profiles").select("id, display_name").in("id", recipientIds),
   ]);
 
   const projMap = {};
@@ -677,7 +848,7 @@ export async function pullMySharedSongs() {
   const userId = await getUserId();
   if (!userId) return [];
 
-  const { data: shares, error } = await supabase
+  const { data: shares, error } = await supabaseTimed
     .from("song_shares")
     .select("song_id, user_id, role")
     .eq("invited_by", userId);
@@ -688,8 +859,8 @@ export async function pullMySharedSongs() {
   const recipientIds = [...new Set(shares.map(s => s.user_id))];
 
   const [{ data: dbSongs }, { data: profiles }] = await Promise.all([
-    supabase.from("songs").select("id, title, project_id").in("id", songIds),
-    supabase.from("profiles").select("id, display_name").in("id", recipientIds),
+    supabaseTimed.rpc("fetch_songs_by_ids", { song_ids: songIds }),
+    supabaseTimed.from("profiles").select("id, display_name").in("id", recipientIds),
   ]);
 
   const songMap = {};
@@ -701,7 +872,7 @@ export async function pullMySharedSongs() {
   const projectIds = [...new Set((dbSongs || []).map(s => s.project_id).filter(Boolean))];
   const projMap = {};
   if (projectIds.length) {
-    const { data: projects } = await supabase.from("projects").select("id, name").in("id", projectIds);
+    const { data: projects } = await supabaseTimed.from("projects").select("id, name").in("id", projectIds);
     for (const p of (projects || [])) projMap[p.id] = p.name;
   }
 
@@ -723,7 +894,7 @@ export async function listMyInvites() {
   const userId = await getUserId();
   if (!userId) return [];
 
-  const { data, error } = await supabase
+  const { data, error } = await supabaseTimed
     .from("share_invites")
     .select("id, token, role, accepted, created_at, expires_at, project_id, song_id")
     .eq("from_user", userId)
@@ -737,12 +908,12 @@ export async function listMyInvites() {
 
   const projMap = {};
   if (projectIds.length) {
-    const { data: projs } = await supabase.from("projects").select("id, name").in("id", projectIds);
+    const { data: projs } = await supabaseTimed.from("projects").select("id, name").in("id", projectIds);
     for (const p of (projs || [])) projMap[p.id] = p.name;
   }
   const songMap = {};
   if (songIds.length) {
-    const { data: songs } = await supabase.from("songs").select("id, title").in("id", songIds);
+    const { data: songs } = await supabaseTimed.rpc("fetch_songs_by_ids", { song_ids: songIds });
     for (const s of (songs || [])) songMap[s.id] = s.title;
   }
 
@@ -947,14 +1118,15 @@ export async function getPendingFriendCount() {
 // Get shared songs between current user and a specific friend
 // Returns { sharedWithMe: [...], myShared: [...] }
 export async function getSharedSongsBetween(friendUserId) {
+  try {
   const userId = await getUserId();
   if (!userId || !friendUserId) return { sharedWithMe: [], myShared: [] };
 
-  // Songs friend shared with me, and songs I shared with friend
-  const [{ data: theirShares }, { data: myShares }] = await Promise.all([
-    supabase.from("song_shares").select("song_id, role").eq("user_id", userId).eq("invited_by", friendUserId),
-    supabase.from("song_shares").select("song_id, role").eq("user_id", friendUserId).eq("invited_by", userId),
-  ]);
+  // Songs friend shared with me, and songs I shared with friend (sequential to save connections)
+  const { data: theirShares } = await supabaseTimed
+    .from("song_shares").select("song_id, role").eq("user_id", userId).eq("invited_by", friendUserId);
+  const { data: myShares } = await supabaseTimed
+    .from("song_shares").select("song_id, role").eq("user_id", friendUserId).eq("invited_by", userId);
 
   const allSongIds = [
     ...new Set([
@@ -965,17 +1137,19 @@ export async function getSharedSongsBetween(friendUserId) {
 
   if (!allSongIds.length) return { sharedWithMe: [], myShared: [] };
 
-  const { data: dbSongs } = await supabase
-    .from("songs")
-    .select("*, versions(*), project_id")
-    .in("id", allSongIds);
+  // Use RPC to bypass songs RLS for shared data (sequential)
+  const { data: rpcSongs } = await supabaseTimed.rpc("fetch_songs_by_ids", { song_ids: allSongIds });
+  const { data: rpcVersions } = await supabaseTimed.rpc("fetch_versions_by_song_ids", { s_ids: allSongIds });
+  const versionsBySong = {};
+  for (const v of (rpcVersions || [])) (versionsBySong[v.song_id] ||= []).push(v);
+  const dbSongs = (rpcSongs || []).map(s => ({ ...s, versions: versionsBySong[s.id] || [] }));
 
   if (!dbSongs?.length) return { sharedWithMe: [], myShared: [] };
 
   const projectIds = [...new Set(dbSongs.map(s => s.project_id).filter(Boolean))];
   const projMap = {};
   if (projectIds.length) {
-    const { data: projects } = await supabase.from("projects").select("id, name").in("id", projectIds);
+    const { data: projects } = await supabaseTimed.from("projects").select("id, name").in("id", projectIds);
     for (const p of (projects || [])) projMap[p.id] = p.name;
   }
 
@@ -1014,6 +1188,7 @@ export async function getSharedSongsBetween(friendUserId) {
     .filter(Boolean);
 
   return { sharedWithMe, myShared };
+  } catch (e) { console.warn("[getSharedSongsBetween] failed:", e.message); return { sharedWithMe: [], myShared: [] }; }
 }
 
 // ── Direct Messages ──────────────────────────────
