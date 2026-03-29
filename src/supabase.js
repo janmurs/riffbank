@@ -121,6 +121,9 @@ export function supabaseSyncStateSoon(state) {
   }, 15000);
 }
 
+// Yield to the main thread so the audio pipeline doesn't starve during push
+const _yieldToMain = () => new Promise(r => setTimeout(r, 0));
+
 export async function supabasePushState(state) {
   if (_pushRunning) { console.warn("[Supabase] Push: already running, skipping"); return false; }
   _pushRunning = true;
@@ -140,6 +143,7 @@ export async function supabasePushState(state) {
     console.time("[Push] ensureProjects");
     for (const name of projectNames) {
       projectMap[name] = await ensureProject(name, userId);
+      await _yieldToMain();
     }
     console.timeEnd("[Push] ensureProjects");
     console.log("[Supabase] Push: projects resolved", projectMap);
@@ -184,6 +188,7 @@ export async function supabasePushState(state) {
 
     if (dedupedSongRows.length) {
       console.log("[Supabase] Push: upserting songs", dedupedSongRows.length);
+      await _yieldToMain();
       console.time("[Push] upsert_my_songs");
       const { error } = await supabase.rpc("upsert_my_songs", { rows: dedupedSongRows });
       console.timeEnd("[Push] upsert_my_songs");
@@ -191,6 +196,7 @@ export async function supabasePushState(state) {
       console.log("[Supabase] Push: songs upsert OK");
     }
 
+    await _yieldToMain();
     // 3. Upsert versions (only for songs we own)
     const ownSongIds = new Set(dedupedSongRows.map(r => r.id));
     const versionRows = [];
@@ -225,6 +231,7 @@ export async function supabasePushState(state) {
     });
 
     if (dedupedVersionRows.length) {
+      await _yieldToMain();
       console.time("[Push] upsert_my_versions");
       const { error } = await supabase.rpc("upsert_my_versions", { rows: dedupedVersionRows });
       console.timeEnd("[Push] upsert_my_versions");
@@ -349,9 +356,30 @@ export async function supabaseCountUserSongs() {
 
 // ── Audio storage ─────────────────────────────────────
 
+// Supabase Storage file size limit (bytes). Free plan = 50MB, Pro = 5GB.
+// Adjust this if you've changed it in your Supabase dashboard (Storage → Settings).
+const SUPABASE_UPLOAD_LIMIT_MB = 250;
+const SUPABASE_UPLOAD_LIMIT = SUPABASE_UPLOAD_LIMIT_MB * 1024 * 1024;
+
+function _formatFileSize(bytes) {
+  if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  if (bytes >= 1024) return (bytes / 1024).toFixed(0) + " KB";
+  return bytes + " B";
+}
+
 export async function supabaseUploadAudio({ blob, songId, versionId }) {
   const userId = await getUserId();
   if (!userId) return { success: false, error: "Not authenticated" };
+
+  if (!blob?.size) return { success: false, error: "Empty audio blob — nothing to upload" };
+
+  // Pre-check file size against Supabase limit
+  if (blob.size > SUPABASE_UPLOAD_LIMIT) {
+    return {
+      success: false,
+      error: `File too large (${_formatFileSize(blob.size)}) — limit is ${SUPABASE_UPLOAD_LIMIT_MB} MB`,
+    };
+  }
 
   // Always use "audio" as filename — prevents duplicate blobs from varying filenames
   const path = `${userId}/${songId}/${versionId}/audio`;
@@ -360,7 +388,10 @@ export async function supabaseUploadAudio({ blob, songId, versionId }) {
     .from("audio")
     .upload(path, blob, { upsert: true, contentType: blob.type || "audio/*" });
 
-  if (error) return { success: false, error: error.message };
+  if (error) {
+    const sizeNote = blob.size > 10 * 1024 * 1024 ? ` (${_formatFileSize(blob.size)})` : "";
+    return { success: false, error: error.message + sizeNote };
+  }
   return { success: true, audioPath: path };
 }
 
@@ -549,6 +580,85 @@ export async function acceptShareInvite(token) {
   }, { onConflict: "id" });
 
   return { role: invite.role, projectId: invite.project_id, songId: invite.song_id };
+}
+
+// ── Loaded Invites (bundled multi-item invites) ──────────────────
+
+// Create a loaded invite with multiple projects/songs
+export async function createLoadedInvite({ projectIds = [], songIds = [], role = "viewer" }) {
+  const userId = await getUserId();
+  if (!userId) throw new Error("Not authenticated");
+
+  const { data, error } = await supabase
+    .from("loaded_invites")
+    .insert({
+      from_user: userId,
+      role,
+      project_ids: projectIds,
+      song_ids: songIds,
+    })
+    .select("token, role, expires_at, project_ids, song_ids, created_at")
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+// Fetch all unclaimed loaded invites created by the current user
+export async function getMyLoadedInvites() {
+  const userId = await getUserId();
+  if (!userId) return [];
+
+  const { data, error } = await supabase
+    .from("loaded_invites")
+    .select("id, token, role, project_ids, song_ids, claimed, claimed_by, claimed_at, created_at, expires_at")
+    .eq("from_user", userId)
+    .order("created_at", { ascending: false });
+
+  if (error) { console.warn("[getMyLoadedInvites]", error.message); return []; }
+  return data || [];
+}
+
+// Update an unclaimed loaded invite (edit items or role)
+export async function updateLoadedInvite(id, { projectIds, songIds, role }) {
+  const updates = {};
+  if (projectIds !== undefined) updates.project_ids = projectIds;
+  if (songIds !== undefined) updates.song_ids = songIds;
+  if (role !== undefined) updates.role = role;
+
+  const { data, error } = await supabase
+    .from("loaded_invites")
+    .update(updates)
+    .eq("id", id)
+    .eq("claimed", false)
+    .select("id, token, role, project_ids, song_ids, expires_at")
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+// Delete an unclaimed loaded invite
+export async function deleteLoadedInvite(id) {
+  const { error } = await supabase
+    .from("loaded_invites")
+    .delete()
+    .eq("id", id);
+  if (error) throw error;
+}
+
+// Preview a loaded invite (no auth required — calls SECURITY DEFINER RPC)
+export async function getLoadedInvitePreview(token) {
+  const { data, error } = await supabase.rpc("get_loaded_invite_preview", { p_token: token });
+  if (error) throw error;
+  return data;
+}
+
+// Claim a loaded invite (creates friendship + shares all items)
+export async function claimLoadedInvite(token) {
+  const { data, error } = await supabase.rpc("claim_loaded_invite", { p_token: token });
+  if (error) throw error;
+  return data;
 }
 
 // ── Single RPC for ALL shared data (bypasses RLS, single connection) ──
@@ -941,6 +1051,52 @@ export async function removeProjectMember(projectId, userId) {
   if (error) throw error;
 }
 
+// Get all users a song is shared with (for sharing management screen)
+export async function getSongShares(songId) {
+  const userId = await getUserId();
+  if (!userId || !songId) return [];
+  const { data, error } = await supabase
+    .from("song_shares")
+    .select("song_id, user_id, role")
+    .eq("song_id", songId)
+    .eq("invited_by", userId);
+  if (error || !data?.length) return [];
+
+  const userIds = data.map(s => s.user_id);
+  const { data: profiles } = await supabase
+    .from("profiles")
+    .select("id, display_name, avatar_url, instrument, genre, location")
+    .in("id", userIds);
+  const profileMap = {};
+  for (const p of (profiles || [])) profileMap[p.id] = p;
+
+  return data.map(s => ({
+    userId: s.user_id,
+    role: s.role,
+    profile: profileMap[s.user_id] || { id: s.user_id, display_name: "Unknown" },
+  }));
+}
+
+// Revoke a song share (remove user's access)
+export async function revokeSongShare(songId, targetUserId) {
+  const { error } = await supabase
+    .from("song_shares")
+    .delete()
+    .eq("song_id", songId)
+    .eq("user_id", targetUserId);
+  if (error) throw error;
+}
+
+// Update a song share's role
+export async function updateSongShareRole(songId, targetUserId, newRole) {
+  const { error } = await supabase
+    .from("song_shares")
+    .update({ role: newRole })
+    .eq("song_id", songId)
+    .eq("user_id", targetUserId);
+  if (error) throw error;
+}
+
 // Ensure user profile exists with display name (+ optional extra fields)
 export async function upsertProfile({ displayName, location, instrument, genre, bio, avatarUrl } = {}) {
   const userId = await getUserId();
@@ -1288,4 +1444,87 @@ export async function getUnreadMessageCount() {
     .is("read_at", null);
   if (error) return 0;
   return count || 0;
+}
+
+// Quick profile lookup by user ID (for Realtime notifications)
+export async function getProfileById(userId) {
+  if (!userId) return null;
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("id, display_name, avatar_url")
+    .eq("id", userId)
+    .single();
+  if (error) return null;
+  return data;
+}
+
+// ── Realtime subscriptions for instant notifications ──
+// Subscribe to changes that affect the current user (new shares, messages, friend requests).
+// Returns an unsubscribe function.
+export function subscribeToRealtimeNotifications({ onNewShare, onNewMessage, onNewFriendRequest, onOwnSongChange }) {
+  let channel = null;
+
+  (async () => {
+    const userId = await getUserId();
+    if (!userId) return;
+
+    channel = supabase.channel("user-notifications")
+      // Own songs changed (inserted, updated, or deleted by me on another device)
+      .on("postgres_changes", {
+        event: "*",
+        schema: "public",
+        table: "songs",
+        filter: `owner_id=eq.${userId}`,
+      }, (payload) => {
+        console.log("[Realtime] Own song change:", payload.eventType, payload);
+        if (onOwnSongChange) onOwnSongChange(payload);
+      })
+      // New song shared with me
+      .on("postgres_changes", {
+        event: "INSERT",
+        schema: "public",
+        table: "song_shares",
+        filter: `user_id=eq.${userId}`,
+      }, (payload) => {
+        console.log("[Realtime] New song share:", payload);
+        if (onNewShare) onNewShare(payload.new);
+      })
+      // New project member (shared project)
+      .on("postgres_changes", {
+        event: "INSERT",
+        schema: "public",
+        table: "project_members",
+        filter: `user_id=eq.${userId}`,
+      }, (payload) => {
+        console.log("[Realtime] New project share:", payload);
+        if (onNewShare) onNewShare(payload.new);
+      })
+      // New message to me
+      .on("postgres_changes", {
+        event: "INSERT",
+        schema: "public",
+        table: "messages",
+        filter: `recipient_id=eq.${userId}`,
+      }, (payload) => {
+        console.log("[Realtime] New message:", payload);
+        if (onNewMessage) onNewMessage(payload.new);
+      })
+      // New friend request to me
+      .on("postgres_changes", {
+        event: "INSERT",
+        schema: "public",
+        table: "friendships",
+        filter: `addressee_id=eq.${userId}`,
+      }, (payload) => {
+        console.log("[Realtime] New friend request:", payload);
+        if (onNewFriendRequest) onNewFriendRequest(payload.new);
+      })
+      .subscribe((status) => {
+        console.log("[Realtime] Subscription status:", status);
+      });
+  })();
+
+  return () => {
+    if (channel) supabase.removeChannel(channel);
+  };
 }

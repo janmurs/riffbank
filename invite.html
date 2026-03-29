@@ -103,6 +103,7 @@
       text-decoration: none; text-align: center;
     }
     .inviteBtn:active { opacity: .8; }
+    .inviteBtn.hidden { display: none; }
 
     .inviteNote {
       font-size: 12px; color: var(--muted);
@@ -199,6 +200,52 @@
     }
     .acceptStatus.success { color: #22c55e; display: block; }
     .acceptStatus.error { color: #ef4444; display: block; }
+
+    /* Loaded invite preview */
+    .liPreviewGrid {
+      display: flex; flex-direction: column; gap: 10px;
+      max-width: 360px; width: 100%; margin-bottom: 24px;
+    }
+    .liSectionLabel {
+      font-weight: 800; font-size: 12px; text-transform: uppercase;
+      letter-spacing: .5px; color: var(--muted); text-align: left;
+      margin: 4px 0 0;
+    }
+    .liCard {
+      display: flex; align-items: center; gap: 14px;
+      background: var(--panel2); border-radius: 14px;
+      padding: 14px 16px; text-align: left;
+    }
+    .liCardIcon {
+      width: 44px; height: 44px; border-radius: 10px;
+      background: linear-gradient(135deg, rgba(167,139,250,.25), rgba(244,114,182,.25));
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+    .liCardIcon svg { color: #a78bfa; }
+    .liCardBody { flex: 1; min-width: 0; }
+    .liCardTitle {
+      font-weight: 700; font-size: 15px; color: var(--text);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .liCardSub {
+      font-size: 13px; color: var(--muted); margin-top: 2px;
+    }
+    .liSenderRow {
+      display: flex; align-items: center; gap: 12px;
+      margin-bottom: 20px;
+    }
+    .liSenderAvatar {
+      width: 48px; height: 48px; border-radius: 50%;
+      background: var(--panel2);
+      object-fit: cover;
+    }
+    .liSenderName {
+      font-weight: 800; font-size: 18px; color: var(--text);
+    }
+    .liSenderLabel {
+      font-size: 13px; color: var(--muted);
+    }
   </style>
 </head>
 <body>
@@ -238,7 +285,7 @@
 
   <button class="acceptBtn" id="acceptBtn" style="display:none">Accept Invite</button>
 
-  <a class="inviteBtn" href="./" id="openBtn">Open RiffBank</a>
+  <a class="inviteBtn hidden" href="./" id="openBtn">Open RiffBank</a>
 
   <div class="inviteNote" id="inviteNote">
     After installing, open RiffBank and create your account. You'll enter a 6-digit code from your email to verify — no redirect needed.
@@ -335,11 +382,56 @@
 
     // Parse invite params
     const params = new URLSearchParams(window.location.search);
+    const liToken = params.get("li");
     const token = params.get("token");
     const from = params.get("from");
     const project = params.get("project");
 
-    if (token) {
+    if (liToken) {
+      // ── Loaded invite preview ──
+      (async () => {
+        try {
+          const { createClient } = await import("https://esm.sh/@supabase/supabase-js@2");
+          const sb = createClient(
+            "https://hbgaoejdslftbwuhggtv.supabase.co",
+            "sb_publishable_txkI4NbwclNsBW_geDj_bw_xQNL4vqO"
+          );
+
+          const { data, error } = await sb.rpc("get_loaded_invite_preview", { p_token: liToken });
+          if (error || !data || data.error) {
+            const errMsg = data?.error || "not_found";
+            const msgs = {
+              not_found: "This invite link is invalid.",
+              already_claimed: "This invite has already been claimed.",
+              expired: "This invite has expired.",
+            };
+            document.getElementById("inviteSub").textContent = msgs[errMsg] || "This invite link is invalid.";
+            return;
+          }
+
+          const sender = data.sender || {};
+          const senderName = sender.display_name || "Someone";
+
+          // Update subtitle with sender name
+          const sub = document.getElementById("inviteSub");
+          sub.innerHTML = `<strong>${senderName}</strong> invited you to join <strong>RiffBank</strong> — install the app and create your account to get started.`;
+
+          // Store token for auto-claim after signup
+          // Use both localStorage AND a cookie — localStorage doesn't carry over
+          // from Safari to the installed PWA, but same-origin cookies do.
+          localStorage.setItem("pendingLoadedInvite", liToken);
+          document.cookie = `pendingLoadedInvite=${encodeURIComponent(liToken)};path=/;max-age=86400;SameSite=Lax`;
+
+          // Update note
+          document.getElementById("inviteNote").innerHTML =
+            "After you sign up, everything they shared will appear automatically.";
+
+        } catch (e) {
+          console.error("Loaded invite error:", e);
+          document.getElementById("inviteSub").textContent = "Something went wrong loading this invite.";
+        }
+      })();
+    } else if (token) {
       // ── New token-based invite ──
       (async () => {
         try {
