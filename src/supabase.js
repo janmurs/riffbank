@@ -356,11 +356,30 @@ export async function supabaseCountUserSongs() {
 
 // ── Audio storage ─────────────────────────────────────
 
+// Supabase Storage file size limit (bytes). Free plan = 50MB, Pro = 5GB.
+// Adjust this if you've changed it in your Supabase dashboard (Storage → Settings).
+const SUPABASE_UPLOAD_LIMIT_MB = 250;
+const SUPABASE_UPLOAD_LIMIT = SUPABASE_UPLOAD_LIMIT_MB * 1024 * 1024;
+
+function _formatFileSize(bytes) {
+  if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  if (bytes >= 1024) return (bytes / 1024).toFixed(0) + " KB";
+  return bytes + " B";
+}
+
 export async function supabaseUploadAudio({ blob, songId, versionId }) {
   const userId = await getUserId();
   if (!userId) return { success: false, error: "Not authenticated" };
 
   if (!blob?.size) return { success: false, error: "Empty audio blob — nothing to upload" };
+
+  // Pre-check file size against Supabase limit
+  if (blob.size > SUPABASE_UPLOAD_LIMIT) {
+    return {
+      success: false,
+      error: `File too large (${_formatFileSize(blob.size)}) — limit is ${SUPABASE_UPLOAD_LIMIT_MB} MB`,
+    };
+  }
 
   // Always use "audio" as filename — prevents duplicate blobs from varying filenames
   const path = `${userId}/${songId}/${versionId}/audio`;
@@ -369,7 +388,10 @@ export async function supabaseUploadAudio({ blob, songId, versionId }) {
     .from("audio")
     .upload(path, blob, { upsert: true, contentType: blob.type || "audio/*" });
 
-  if (error) return { success: false, error: error.message };
+  if (error) {
+    const sizeNote = blob.size > 10 * 1024 * 1024 ? ` (${_formatFileSize(blob.size)})` : "";
+    return { success: false, error: error.message + sizeNote };
+  }
   return { success: true, audioPath: path };
 }
 

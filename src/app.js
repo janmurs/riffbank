@@ -65,30 +65,132 @@ function _timeAgo(ts) {
 function _renderImportQueueDOM() {
   const container = document.getElementById("importQueueContainer");
   if (!container) return;
-  const active = importQueue.filter(q => q.status !== "done" && q.status !== "failed");
-  const finished = importQueue.filter(q => q.status === "done" || q.status === "failed");
   if (!importQueue.length) { container.innerHTML = ""; return; }
 
+  const failedItems = importQueue.filter(q => q.status === "failed");
+  const retryAllBtn = failedItems.length >= 2
+    ? `<button class="iqRetryAllBtn" id="iqRetryAll">Retry all ${failedItems.length} failed</button>`
+    : "";
+
   container.innerHTML = `
-    <div class="alertSectionLabel">Import Queue</div>
-    ${importQueue.map(q => {
+    <div class="alertSectionLabel" style="display:flex;align-items:center;justify-content:space-between;">Import Queue${retryAllBtn}</div>
+    ${[...importQueue].sort((a, b) => (b.ts || 0) - (a.ts || 0)).map(q => {
       const isDone = q.status === "done";
       const isFailed = q.status === "failed";
       const isActive = !isDone && !isFailed;
       const barColor = isDone ? "#4ade80" : isFailed ? "#f87171" : "#4ecdc4";
       const statusText = q.statusText || (isDone ? "Imported" : isFailed ? "Failed" : q.status === "uploading" ? "Uploading…" : "Waiting…");
+      const clickAttr = isDone && q.songId ? `data-iq-song="${q.songId}"` : "";
+      const retryBtn = isFailed ? `<button class="iqRetryBtn" data-iq-retry="${q.id}">Retry</button>` : "";
       return `
-      <div class="alertRow">
+      <div class="alertRow${isDone ? " alertRowClickable" : ""}" ${clickAttr}>
         <div class="alertIcon" style="color:${barColor}">${isDone ? "●" : isFailed ? "●" : "◌"}</div>
         <div class="alertBody">
-          <div class="alertTitle">${escapeHtml(q.title)}</div>
-          <div class="alertMsg">${statusText}</div>
+          <div class="alertTitle">${escapeHtml(q.title)}${q.fileSize ? `<span style="color:rgba(255,255,255,.25);font-weight:400;font-size:12px;margin-left:6px">${q.fileSize >= 1048576 ? (q.fileSize / 1048576).toFixed(1) + " MB" : Math.round(q.fileSize / 1024) + " KB"}</span>` : ""}</div>
+          <div class="alertMsg">${isFailed ? `<span style="color:#f87171">${escapeHtml(statusText)}</span>` : statusText}</div>
           ${isActive ? `<div class="alertProgress"><div class="alertProgressFill" style="width:${q.progress || 0}%;background:${barColor}"></div></div>` : ""}
+          ${retryBtn}
         </div>
         ${!isActive && q.ts ? `<div class="alertTime">${_timeAgo(q.ts)}</div>` : ""}
       </div>`;
     }).join("")}
   `;
+
+  // Wire click-to-navigate for successful imports
+  container.querySelectorAll("[data-iq-song]").forEach(row => {
+    row.addEventListener("click", (e) => {
+      if (e.target.closest("[data-iq-retry]")) return;
+      const songId = row.getAttribute("data-iq-song");
+      if (!songId) return;
+      navigateForward(() => {
+        drawerView = null;
+        currentTab = "songs";
+        songsView = "list";
+        selectedSongId = songId;
+        selectedVersionId = null;
+      });
+    });
+  });
+
+  // Wire individual retry buttons
+  container.querySelectorAll("[data-iq-retry]").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const qId = btn.getAttribute("data-iq-retry");
+      _retryImportItem(qId);
+    });
+  });
+
+  // Wire retry-all button
+  const retryAllEl = container.querySelector("#iqRetryAll");
+  if (retryAllEl) {
+    retryAllEl.addEventListener("click", (e) => {
+      e.stopPropagation();
+      _retryAllFailedImports();
+    });
+  }
+}
+
+async function _retryImportItem(queueId) {
+  const qItem = importQueue.find(q => q.id === queueId);
+  if (!qItem || qItem.status !== "failed") return;
+
+  _updateImportQueueItem(qItem.id, { status: "uploading", progress: 5, statusText: "Retrying…" });
+
+  try {
+    // Find the song and version that were created during the original attempt
+    const song = state.songs.find(s => s.id === (qItem.songId || qItem.id));
+    if (!song) { _updateImportQueueItem(qItem.id, { status: "failed", progress: 0, statusText: "Song not found in library" }); return; }
+
+    const v = qItem.versionId
+      ? (song.versions || []).find(ver => ver.id === qItem.versionId)
+      : (song.versions || [])[0];
+    if (!v) { _updateImportQueueItem(qItem.id, { status: "failed", progress: 0, statusText: "Version not found" }); return; }
+
+    // Retrieve blob: try version fileId first, then import IDB key
+    let blob = null;
+    if (v.fileId) {
+      try { const rec = await audioGet(v.fileId); blob = rec?.blob; } catch {}
+    }
+    if (!blob && qItem.idbKey) {
+      try { const rec = await audioGet(qItem.idbKey); blob = rec?.blob; } catch {}
+    }
+    if (!blob) { _updateImportQueueItem(qItem.id, { status: "failed", progress: 0, statusText: "Audio file missing — please re-import" }); return; }
+
+    _updateImportQueueItem(qItem.id, { progress: 40, statusText: "Uploading to cloud…" });
+
+    const result = await supabaseUploadAudio({
+      blob: new File([blob], qItem.fileName || "audio", { type: qItem.fileType || "audio/*" }),
+      songId: song.id, versionId: v.id, fileName: qItem.fileName || "audio",
+    });
+
+    if (result.success) {
+      v.audioPath = result.audioPath;
+      saveState();
+      await supabasePushState(state).catch(console.warn);
+
+      // Clean up import blob
+      if (qItem.idbKey) {
+        try { const db = await openAudioDb(); const tx = db.transaction(AUDIO_STORE, "readwrite"); tx.objectStore(AUDIO_STORE).delete(qItem.idbKey); db.close(); } catch {}
+      }
+
+      _updateImportQueueItem(qItem.id, { status: "done", progress: 100, statusText: "Imported", songId: song.id });
+      toast(`"${qItem.title}" uploaded successfully`);
+    } else {
+      _updateImportQueueItem(qItem.id, { status: "failed", progress: 0, statusText: result.error || "Upload failed" });
+    }
+  } catch (e) {
+    _updateImportQueueItem(qItem.id, { status: "failed", progress: 0, statusText: e.message || "Retry failed" });
+  }
+}
+
+async function _retryAllFailedImports() {
+  const failedItems = importQueue.filter(q => q.status === "failed");
+  if (!failedItems.length) return;
+  toast(`Retrying ${failedItems.length} failed upload${failedItems.length !== 1 ? "s" : ""}…`);
+  for (const qItem of failedItems) {
+    await _retryImportItem(qItem.id);
+  }
 }
 
 // ── Activity log (alerts bell) ──
@@ -536,8 +638,6 @@ class Nav {
     const clone = this._cloneDeep(appEl);
 
     // Strip non-visible content to reduce memory
-    clone.querySelector("#drawer")?.remove();
-    clone.querySelector("#drawerOverlay")?.remove();
     clone.querySelectorAll(".screen").forEach(s => {
       if (!s.classList.contains("is-active") && !s.querySelector(".homeWrap")) {
         s.innerHTML = "";
@@ -2074,8 +2174,12 @@ function ensureProjectInState(name) {
 
 function saveState() {
   localStorage.setItem(LS_KEY, JSON.stringify(state));
-  // Auto-sync to Supabase (debounced — pushes 5s after last save)
-  supabaseSyncStateSoon(state);
+  // Auto-sync to Supabase (debounced) — skip during bulk import to avoid
+  // partial pushes that can trigger realtime sync and delete un-pushed songs.
+  // The import loop does its own explicit push at the end.
+  if (!_importQueueRunning) {
+    supabaseSyncStateSoon(state);
+  }
 }
 
 // ---------------------
@@ -3021,6 +3125,7 @@ function openBulkImport() {
       project: defaultProject,
       existingSongId: null,
       existingSongTitle: null,
+      _reviewed: false,
     }));
 
     // Check for file-name duplicates across all picked files
@@ -3064,9 +3169,7 @@ function renderBulkImport() {
     return;
   }
 
-  // Card layout — same span logic as Songs grid
-  const cardHtml = (item, span) => {
-    const spanStyle = span > 1 ? ` style="grid-column:span ${span}"` : "";
+  const cardHtml = (item) => {
     const fakeSong = { id: item.id, title: item.title, project: item.project, genre: "" };
     const sizeMB = (item.file.size / 1024 / 1024).toFixed(1);
     const ext = (item.file.name.match(/\.([^.]+)$/) || [, ""])[1].toUpperCase();
@@ -3082,7 +3185,7 @@ function renderBulkImport() {
     const warningBorder = hasWarning ? ` style="border:1px solid rgba(251,191,36,.3);border-radius:14px;"` : "";
 
     return `
-      <div class="songCard biCard" data-bi="${item.id}"${spanStyle}>
+      <div class="songCard biCard" data-bi="${item.id}">
         <div class="songCardStack"${warningBorder}>
           <div class="songCardLayer songCardLayer2"></div>
           <div class="songCardLayer songCardLayer1"></div>
@@ -3101,29 +3204,27 @@ function renderBulkImport() {
     `;
   };
 
-  const layoutCards = (items) => {
-    const count = items.length;
-    if (count === 1) return cardHtml(items[0], 3);
-    if (count === 2) return cardHtml(items[0], 2) + cardHtml(items[1], 1);
-    const remainder = count % 3;
-    if (remainder === 0) return items.map(i => cardHtml(i, 1)).join("");
-    const fullCount = count - (remainder === 1 ? 4 : remainder);
-    let html = items.slice(0, fullCount).map(i => cardHtml(i, 1)).join("");
-    const tail = items.slice(fullCount);
-    if (remainder === 2) {
-      html += cardHtml(tail[0], 2) + cardHtml(tail[1], 1);
-    } else {
-      html += cardHtml(tail[0], 2) + cardHtml(tail[1], 1);
-      html += cardHtml(tail[2], 1) + cardHtml(tail[3], 2);
-    }
-    return html;
+  const readyItems = bulkStagingFiles.filter(f => f._reviewed);
+  const reviewItems = bulkStagingFiles.filter(f => !f._reviewed);
+
+  const sectionHtml = (label, count, items, extraClass) => {
+    if (!items.length) return "";
+    return `
+      <div class="biSection ${extraClass || ""}">
+        <div class="biSectionHeader">
+          <span class="biSectionLabel">${label}</span>
+          <span class="biSectionCount">${count}</span>
+        </div>
+        <div class="songsList">${items.map(f => cardHtml(f)).join("")}</div>
+      </div>`;
   };
 
   activeScreenEl.innerHTML = `
     <div class="setPage" style="padding-bottom:140px;">
       <div class="setPageTitle">Import (${bulkStagingFiles.length})</div>
       <div style="font-size:13px;color:rgba(255,255,255,.4);padding:0 2px 16px;">Tap a card to edit title, project, or add as a version to an existing song.</div>
-      <div class="songsList">${layoutCards(bulkStagingFiles)}</div>
+      ${sectionHtml("Review", reviewItems.length, reviewItems, "biSectionReview")}
+      ${sectionHtml("Ready", readyItems.length, readyItems, "biSectionReady")}
     </div>
     <div class="biFooter">
       <button class="biImportBtn" id="biStartImport">Import ${bulkStagingFiles.length} Song${bulkStagingFiles.length !== 1 ? "s" : ""}</button>
@@ -3199,6 +3300,9 @@ function openBulkEditSheet(item) {
   document.getElementById("biEditModal")?.remove();
   document.getElementById("biEditBackdrop")?.remove();
 
+  const curIdx = bulkStagingFiles.indexOf(item);
+  const hasNext = curIdx >= 0 && curIdx < bulkStagingFiles.length - 1;
+
   const { real: realProjects, ephemeral: ephemeralProjects } = _biEphemeralProjects();
   const allProjects = [...realProjects, ...ephemeralProjects];
 
@@ -3211,7 +3315,7 @@ function openBulkEditSheet(item) {
       : state.songs.filter(s => (s.project || "").trim() === p).length;
     const countLabel = isEphemeral ? `${songCount} staged` : `${songCount} song${songCount !== 1 ? "s" : ""}`;
     return `
-      <button class="coProjCard${isSelected ? " selected" : ""}" data-biproj="${escapeHtml(p)}">
+      <button class="coProjCard${isSelected ? " biProjSelected" : ""}" data-biproj="${escapeHtml(p)}">
         <div class="coProjArt">${isEphemeral
           ? `<div style="width:100%;height:100%;background:rgba(78,205,196,.1);border-radius:inherit;display:flex;align-items:center;justify-content:center;color:#4ecdc4;font-size:11px;font-weight:700;">NEW</div>`
           : getProjectCoverArt(p)}</div>
@@ -3245,7 +3349,7 @@ function openBulkEditSheet(item) {
   modal.innerHTML = `
     <div class="biModalHeader">
       <div class="biModalTitle">${escapeHtml(item.file.name)}</div>
-      <div class="biModalSub">${ext} · ${sizeMB} MB</div>
+      <div class="biModalSub">${ext} · ${sizeMB} MB${curIdx >= 0 ? ` · ${curIdx + 1} of ${bulkStagingFiles.length}` : ""}</div>
     </div>
     ${fileDupHTML}
 
@@ -3266,9 +3370,6 @@ function openBulkEditSheet(item) {
             <div class="coProjCount">Create new</div>
           </button>
         </div>
-        <div id="biNewProjWrap" style="display:none;margin-top:8px;">
-          <input class="setInput" id="biNewProject" type="text" placeholder="New project name" />
-        </div>
       </div>
 
       <div class="biField">
@@ -3287,6 +3388,7 @@ function openBulkEditSheet(item) {
 
     <div class="biModalActions">
       <button class="biModalBtn biModalRemove" id="biRemoveFile">Remove</button>
+      ${hasNext ? `<button class="biModalBtn biModalNext" id="biNextFile">Next</button>` : ""}
       <button class="biModalBtn biModalDone" id="biSaveEdit">Done</button>
     </div>
   `;
@@ -3303,13 +3405,32 @@ function openBulkEditSheet(item) {
     modal.classList.add("open");
   });
 
+  // Save current edits into the item
+  const _saveCurrentEdits = () => {
+    item.title = (modal.querySelector("#biEditTitle")?.value || "").trim() || item.title;
+    if (newProjectMode) {
+      item.project = (modal.querySelector("#biNewProject")?.value || "").trim();
+    } else {
+      item.project = selectedProject;
+    }
+    item._reviewed = true;
+  };
+
+  // Lock body scroll while modal is open (prevents keyboard-triggered page scroll)
+  document.body.style.overflow = "hidden";
+  document.body.style.position = "fixed";
+  document.body.style.width = "100%";
+
   const closeModal = () => {
+    document.body.style.overflow = "";
+    document.body.style.position = "";
+    document.body.style.width = "";
     backdrop.classList.remove("open");
     modal.classList.remove("open");
     setTimeout(() => { backdrop.remove(); modal.remove(); }, 250);
   };
 
-  backdrop.addEventListener("click", closeModal);
+  backdrop.addEventListener("click", () => { _saveCurrentEdits(); closeModal(); renderBulkImport(); });
 
   // ── Live duplicate song-name validation ──
   const _checkBiDupName = () => {
@@ -3338,10 +3459,8 @@ function openBulkEditSheet(item) {
       doneBtn.disabled = true;
       warnEl.querySelector("#biDupAddVersion")?.addEventListener("click", (e) => {
         e.preventDefault();
-        // Auto-assign as version of that existing song
         item.existingSongId = dup.id;
         item.existingSongTitle = dup.title;
-        // Update picker display
         const pickerEl = modal.querySelector("#biSongPicker");
         if (pickerEl) {
           pickerEl.innerHTML = `
@@ -3358,7 +3477,7 @@ function openBulkEditSheet(item) {
             _checkBiDupName();
           });
         }
-        _checkBiDupName(); // re-check — now it's a version, so warning clears
+        _checkBiDupName();
       });
     } else {
       warnEl.innerHTML = "";
@@ -3394,29 +3513,35 @@ function openBulkEditSheet(item) {
     card.addEventListener("click", () => {
       const val = card.dataset.biproj;
       if (val === "__new__") {
-        newProjectMode = true;
-        modal.querySelector("#biNewProjWrap").style.display = "";
-        setTimeout(() => modal.querySelector("#biNewProject")?.focus(), 50);
+        _openNewProjectDialog(modal, (newName) => {
+          if (!newName) return;
+          selectedProject = newName;
+          newProjectMode = false;
+          // Re-render project cards with new project included
+          // (it will show up as ephemeral on next openBulkEditSheet)
+          // For now, just update item and visually mark
+          item.project = newName;
+          _saveCurrentEdits();
+          closeModal();
+          renderBulkImport();
+          // Re-open to show updated project list
+          requestAnimationFrame(() => openBulkEditSheet(item));
+        });
       } else {
         newProjectMode = false;
-        modal.querySelector("#biNewProjWrap").style.display = "none";
         selectedProject = val;
       }
       // Update selected state visually
-      modal.querySelectorAll("[data-biproj]").forEach(c => c.classList.remove("selected"));
-      card.classList.add("selected");
-      _checkBiDupName(); // re-validate after project change
+      modal.querySelectorAll("[data-biproj]").forEach(c => c.classList.remove("biProjSelected"));
+      if (val !== "__new__") card.classList.add("biProjSelected");
+      _checkBiDupName();
     });
   });
-
-  // Re-validate when new project name changes
-  modal.querySelector("#biNewProject")?.addEventListener("input", _checkBiDupName);
 
   // Song picker — opens a sub-popup with filterable list
   const openSongPickerPopup = () => {
     document.getElementById("biSongListPopup")?.remove();
 
-    // Combine real songs + ephemeral songs from other staged files
     const ephemeralSongs = _biEphemeralSongs().filter(s => s.id !== item.id);
     const allSongs = [
       ...ephemeralSongs.map(s => ({ ...s, _label: "staged" })),
@@ -3457,7 +3582,6 @@ function openBulkEditSheet(item) {
           if (picked) {
             item.existingSongId = picked.id;
             item.existingSongTitle = picked.title;
-            // Update the picker display
             const pickerEl = modal.querySelector("#biSongPicker");
             if (pickerEl) {
               pickerEl.innerHTML = `
@@ -3499,7 +3623,7 @@ function openBulkEditSheet(item) {
       pickerEl.innerHTML = `<button class="biPickSongBtn" id="biOpenSongPicker">Select a song…</button>`;
       pickerEl.querySelector("#biOpenSongPicker")?.addEventListener("click", openSongPickerPopup);
     }
-    _checkBiDupName(); // re-validate after clearing version assignment
+    _checkBiDupName();
   });
 
   // Remove file
@@ -3513,16 +3637,80 @@ function openBulkEditSheet(item) {
     }
   });
 
-  // Save
+  // Next — save edits and open the next item
+  modal.querySelector("#biNextFile")?.addEventListener("click", () => {
+    _saveCurrentEdits();
+    const nextItem = bulkStagingFiles[curIdx + 1];
+    // Restore body scroll (openBulkEditSheet will re-lock it)
+    document.body.style.overflow = "";
+    document.body.style.position = "";
+    document.body.style.width = "";
+    backdrop.remove();
+    modal.remove();
+    renderBulkImport();
+    if (nextItem) openBulkEditSheet(nextItem);
+  });
+
+  // Save / Done
   modal.querySelector("#biSaveEdit")?.addEventListener("click", () => {
-    item.title = (modal.querySelector("#biEditTitle")?.value || "").trim() || item.title;
-    if (newProjectMode) {
-      item.project = (modal.querySelector("#biNewProject")?.value || "").trim();
-    } else {
-      item.project = selectedProject;
-    }
+    _saveCurrentEdits();
     closeModal();
     renderBulkImport();
+  });
+}
+
+// ── New Project mini dialog (iOS-style center alert) ──
+function _openNewProjectDialog(parentModal, onDone) {
+  document.getElementById("biNewProjDialog")?.remove();
+  document.getElementById("biNewProjDialogBg")?.remove();
+
+  const bg = document.createElement("div");
+  bg.id = "biNewProjDialogBg";
+  bg.style.cssText = "position:fixed;inset:0;z-index:99995;background:rgba(0,0,0,.45);opacity:0;transition:opacity .15s ease;";
+
+  const dlg = document.createElement("div");
+  dlg.id = "biNewProjDialog";
+  dlg.style.cssText = "position:fixed;z-index:99996;left:50%;top:50%;transform:translate(-50%,-50%) scale(.92);width:270px;background:#2a2a2e;border-radius:16px;padding:20px;opacity:0;transition:opacity .15s ease, transform .2s ease;";
+  dlg.innerHTML = `
+    <div style="font-size:16px;font-weight:700;color:#fff;text-align:center;margin-bottom:4px;">New Project</div>
+    <div style="font-size:13px;color:rgba(255,255,255,.4);text-align:center;margin-bottom:14px;">Enter a name for your project</div>
+    <input class="setInput" id="biNewProjInput" type="text" placeholder="Project name" style="margin-bottom:16px;" />
+    <div style="display:flex;gap:10px;">
+      <button id="biNewProjCancel" style="flex:1;padding:12px;border:none;border-radius:10px;background:rgba(255,255,255,.08);color:rgba(255,255,255,.5);font-size:15px;font-weight:600;cursor:pointer;">Cancel</button>
+      <button id="biNewProjDone" style="flex:1;padding:12px;border:none;border-radius:10px;background:rgba(78,205,196,.15);color:#4ecdc4;font-size:15px;font-weight:600;cursor:pointer;">Done</button>
+    </div>
+  `;
+
+  document.body.appendChild(bg);
+  document.body.appendChild(dlg);
+
+  requestAnimationFrame(() => {
+    bg.style.opacity = "1";
+    dlg.style.opacity = "1";
+    dlg.style.transform = "translate(-50%,-50%) scale(1)";
+  });
+  setTimeout(() => dlg.querySelector("#biNewProjInput")?.focus(), 100);
+
+  const closeDlg = () => {
+    bg.style.opacity = "0";
+    dlg.style.opacity = "0";
+    dlg.style.transform = "translate(-50%,-50%) scale(.92)";
+    setTimeout(() => { bg.remove(); dlg.remove(); }, 200);
+  };
+
+  bg.addEventListener("click", closeDlg);
+  dlg.querySelector("#biNewProjCancel")?.addEventListener("click", closeDlg);
+  dlg.querySelector("#biNewProjDone")?.addEventListener("click", () => {
+    const name = (dlg.querySelector("#biNewProjInput")?.value || "").trim();
+    closeDlg();
+    if (name) onDone(name);
+  });
+  // Enter key submits
+  dlg.querySelector("#biNewProjInput")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      dlg.querySelector("#biNewProjDone")?.click();
+    }
   });
 }
 
@@ -3786,7 +3974,7 @@ async function _processImportQueue() {
         console.warn(`[BulkImport] Local save failed for "${qItem.title}" (quota?) — cloud upload continues:`, e);
       }
       saveState();
-      render();
+      if (drawerView !== "alerts") render();
 
       _updateImportQueueItem(qItem.id, { progress: 40, statusText: "Uploading to cloud…" });
 
@@ -3799,24 +3987,25 @@ async function _processImportQueue() {
       if (result.success) {
         v.audioPath = result.audioPath;
         saveState();
+
+        _updateImportQueueItem(qItem.id, { progress: 85, statusText: "Cleaning up…" });
+
+        // Clean up import blob from IDB (real audio is under version fileId now)
+        try { const db = await openAudioDb(); const tx = db.transaction(AUDIO_STORE, "readwrite"); tx.objectStore(AUDIO_STORE).delete(qItem.idbKey); db.close(); } catch {}
+
+        imported++;
+        _updateImportQueueItem(qItem.id, { status: "done", progress: 100, statusText: "Imported", songId: song.id });
       } else {
         console.warn(`[BulkImport] Upload failed for "${qItem.title}":`, result.error);
+        // Keep import blob in IDB so retry can use it
+        failed++;
+        _updateImportQueueItem(qItem.id, { status: "failed", progress: 0, statusText: result.error || "Upload failed", songId: song.id, versionId: v.id });
       }
 
-      _updateImportQueueItem(qItem.id, { progress: 85, statusText: "Cleaning up…" });
-
-      // Clean up import blob from IDB (real audio is under version fileId now)
-      try { const db = await openAudioDb(); const tx = db.transaction(AUDIO_STORE, "readwrite"); tx.objectStore(AUDIO_STORE).delete(qItem.idbKey); db.close(); } catch {}
-
-      // Art generation runs concurrently via _bulkGenerateArt (started above)
-
-      imported++;
-      _updateImportQueueItem(qItem.id, { status: "done", progress: 100, statusText: "Imported" });
-
-      render();
+      if (drawerView !== "alerts") render();
     } catch (e) {
       console.warn(`[BulkImport] Failed for "${qItem.title}":`, e);
-      _updateImportQueueItem(qItem.id, { status: "failed", progress: 0, statusText: "Failed" });
+      _updateImportQueueItem(qItem.id, { status: "failed", progress: 0, statusText: e.message || "Failed" });
       failed++;
     }
   }
@@ -4419,7 +4608,6 @@ let projectsOwnerFilter = "all"; // "all" | "mine" | "shared"
 let songsFromCollab = false; // true when Songs opened from Collab screen
 let drawerView = null;
 let songsBackTarget = null; // e.g. "projects" | "collabs"
-let drawerOpen = false;
 let overlayView = null;
 let friendProfileId = null; // user ID for public profile view
 let settingsView = null; // "account" | "cloud" | "library" | "art" | "debug" | "danger" | null
@@ -4429,23 +4617,9 @@ let collabPill = "projects"; // "projects" | "friends" | "messages"
 // ---------------------
 // Drawer open/close
 // ---------------------
-function openDrawer() {
-  drawerOpen = true;
-  document.body.classList.add("drawerOpen");
-  $("#drawer")?.setAttribute("aria-hidden", "false");
-  $("#drawerOverlay")?.setAttribute("aria-hidden", "false");
-}
-
-function closeDrawer() {
-  drawerOpen = false;
-  document.body.classList.remove("drawerOpen");
-  $("#drawer")?.setAttribute("aria-hidden", "true");
-  $("#drawerOverlay")?.setAttribute("aria-hidden", "true");
-}
 
 function setDrawerView(v) {
   drawerView = v;
-  closeDrawer();
   selectedSongId = null;
   render();
 }
@@ -4643,14 +4817,6 @@ function badgeForStatus(status) {
   return `<span class="badge">🎧 ${escapeHtml(status || "Idea")}</span>`;
 }
 
-// Drawer controls
-$("#drawerCloseBtn")?.addEventListener("click", closeDrawer);
-$("#drawerOverlay")?.addEventListener("click", closeDrawer);
-
-// Drawer menu items
-document.querySelectorAll(".drawerItem").forEach((btn) => {
-  btn.addEventListener("click", () => setDrawerView(btn.dataset.drawer));
-});
 
 // Create button in bottom nav
 document.querySelector(".createNavBtn")?.addEventListener("click", () => openCreateOverlay());
@@ -4929,7 +5095,7 @@ document.addEventListener("visibilitychange", () => {
     // Re-pull from Supabase when app comes to foreground (cross-device sync).
     // Throttle to at most once per 30 seconds to avoid hammering the DB.
     const now = Date.now();
-    if (now - _lastForegroundSync > 30_000) {
+    if (now - _lastForegroundSync > 30_000 && !_importQueueRunning) {
       _lastForegroundSync = now;
       incrementalSyncFromSupabase().catch(console.warn);
     }
@@ -5019,7 +5185,7 @@ let _ptrBusy = false;
   }
 
   // Screens where pull-to-refresh is allowed (root list views only)
-  const PTR_SCREENS = new Set(["screen-home", "screen-songs", "screen-player", "screen-collab", "screen-settings", "screen-drawer"]);
+  const PTR_SCREENS = new Set(["screen-songs", "screen-collab", "screen-drawer"]);
 
   document.addEventListener("touchstart", (e) => {
     if (_ptrRefreshing) return;
@@ -5554,8 +5720,6 @@ function goBack({ animate = false } = {}) {
   // Prevent double-back while a View Transition is still in flight
   if (nav._transitionActive) return;
   const doRender = () => {
-    if (drawerOpen) { closeDrawer(); return; }
-
     // Resolve the state to restore: animated backs already popped in slideTransition/nav.back()
     // (pendingBackState), non-animated backs pop here.
     let restoreState = animate ? nav.consumePendingState() : nav.popStacks();
@@ -5645,16 +5809,15 @@ document.addEventListener("touchstart", (e) => {
   const t = e.changedTouches?.[0];
   if (!t) return;
 
-// Left-edge gesture
-if (!drawerOpen && t.clientX <= 24) {
+// Left-edge gesture — swipe back
+if (t.clientX <= 24) {
   // Player has nothing to go back to; bare home/collab root has nothing to go back to
   if (currentTab === "player") return;
   if (currentTab === "collab" && !projectDetailScreen && !selectedSongId && !overlayView) return;
   if (currentTab === "home" && !drawerView && !overlayView) return;
 
   touchTracking = true;
-  const onHomeRoot = (currentTab === "home" && !drawerView && !overlayView);
-  touchMode = onHomeRoot ? "open" : "back";
+  touchMode = "back";
   touchStartX = t.clientX;
   touchStartY = t.clientY;
   if (touchMode === "back") {
@@ -5763,13 +5926,6 @@ if (!drawerOpen && t.clientX <= 24) {
   return;
 }
 
-  // Drawer close gesture
-  if (drawerOpen) {
-    touchTracking = true;
-    touchMode = "close";
-    touchStartX = t.clientX;
-    touchStartY = t.clientY;
-  }
 }, { passive: true });
 
 document.addEventListener("touchmove", (e) => {
@@ -5785,12 +5941,6 @@ document.addEventListener("touchmove", (e) => {
 
   if (Math.abs(dx) <= 10 || Math.abs(dx) <= Math.abs(dy)) return;
 
-  if (touchMode === "open" && dx >= 60) {
-    openDrawer();
-    touchTracking = false;
-    touchMode = null;
-  }
-
   if (touchMode === "back") {
     const clamp = Math.max(0, dx);
     const ratio = Math.min(clamp / window.innerWidth, 1);
@@ -5803,11 +5953,6 @@ document.addEventListener("touchmove", (e) => {
     return;
   }
 
-  if (touchMode === "close" && dx <= -60) {
-    closeDrawer();
-    touchTracking = false;
-    touchMode = null;
-  }
 }, { passive: true });
 
 function cleanupSwipe() {
@@ -8303,18 +8448,18 @@ function showAuthScreen() {
       const errorEl = el.querySelector("#authError");
 
       // Auto-focus first input
-      digits[0].focus();
+      digits[0].focus({ preventScroll: true });
 
       // Auto-advance on input, support paste
       digits.forEach((input, i) => {
         input.addEventListener("input", () => {
           const val = input.value.replace(/\D/g, "");
           input.value = val.slice(0, 1);
-          if (val && i < digits.length - 1) digits[i + 1].focus();
+          if (val && i < digits.length - 1) digits[i + 1].focus({ preventScroll: true });
         });
         input.addEventListener("keydown", (e) => {
           if (e.key === "Backspace" && !input.value && i > 0) {
-            digits[i - 1].focus();
+            digits[i - 1].focus({ preventScroll: true });
           }
         });
         input.addEventListener("paste", (e) => {
@@ -8323,7 +8468,7 @@ function showAuthScreen() {
           pasted.split("").forEach((ch, j) => {
             if (digits[j]) digits[j].value = ch;
           });
-          if (pasted.length > 0) digits[Math.min(pasted.length, digits.length) - 1].focus();
+          if (pasted.length > 0) digits[Math.min(pasted.length, digits.length) - 1].focus({ preventScroll: true });
         });
       });
 
@@ -8360,7 +8505,7 @@ function showAuthScreen() {
           errorEl.textContent = "New code sent!";
           // Clear old digits
           digits.forEach(d => { d.value = ""; });
-          digits[0].focus();
+          digits[0].focus({ preventScroll: true });
         } catch (err) {
           errorEl.style.color = "";
           errorEl.textContent = err.message || "Couldn't resend — try again";
@@ -9151,7 +9296,6 @@ function showProfileSetup() {
           </div>
 
           <button class="profileSetupBtn" id="psNext1">Continue</button>
-          <button class="profileSetupSkip" id="psSkip">Skip for now</button>
         </div>
       `;
 
@@ -9205,7 +9349,6 @@ function showProfileSetup() {
         renderStep2();
       });
 
-      $("#psSkip")?.addEventListener("click", () => finishSetup(true));
     }
 
     // ── Step 2: Username ──
@@ -9578,10 +9721,19 @@ async function init() {
   // Profile setup — show once after signup if no profile exists
   await showProfileSetupIfNeeded();
 
-  // ── Claim loaded invite if pending (from invite.html?li=TOKEN) ──
-  const _pendingLI = localStorage.getItem("pendingLoadedInvite");
+  // ── Claim loaded invite if pending (from invite.html?li=TOKEN, URL ?li= param, or cookie) ──
+  const _urlLI = new URLSearchParams(window.location.search).get("li");
+  const _cookieLI = document.cookie.match(/(?:^|;\s*)pendingLoadedInvite=([^;]*)/)?.[1];
+  const _pendingLI = _urlLI || localStorage.getItem("pendingLoadedInvite") || (_cookieLI ? decodeURIComponent(_cookieLI) : null);
+  if (_urlLI) {
+    // Clean the li param from the URL so it doesn't fire again on refresh
+    const _cleanUrl = new URL(window.location);
+    _cleanUrl.searchParams.delete("li");
+    history.replaceState(null, "", _cleanUrl.pathname + (_cleanUrl.search || "") + _cleanUrl.hash);
+  }
   if (_pendingLI) {
     localStorage.removeItem("pendingLoadedInvite");
+    document.cookie = "pendingLoadedInvite=;path=/;max-age=0"; // clear cookie
     try {
       const claimResult = await claimLoadedInvite(_pendingLI);
       if (claimResult?.success) {
@@ -9858,23 +10010,19 @@ async function init() {
   })();
 
   // Final render with all data in place, then fade out
+  // Show loaded invite welcome screen BEFORE render — go directly from splash to welcome
+  const _hasInviteWelcome = !!window._loadedInviteClaimResult;
+  if (_hasInviteWelcome) {
+    const r = window._loadedInviteClaimResult;
+    delete window._loadedInviteClaimResult;
+    _showLoadedInviteWelcome(r);
+  }
+
   render();
   syncMiniPlayerUI();
 
   bootOverlay.classList.add("hide");
   bootOverlay.addEventListener("transitionend", () => bootOverlay.remove());
-
-  // Show loaded invite claim toast after boot
-  if (window._loadedInviteClaimResult) {
-    const r = window._loadedInviteClaimResult;
-    const parts = [];
-    if (r.project_count) parts.push(`${r.project_count} project${r.project_count > 1 ? "s" : ""}`);
-    if (r.song_count) parts.push(`${r.song_count} song${r.song_count > 1 ? "s" : ""}`);
-    toast(`Connected with ${r.sender_name}! ${parts.join(" and ")} shared with you.`);
-    delete window._loadedInviteClaimResult;
-    // Refresh shared data so Collab tab shows the new content
-    refreshSharedData().then(() => { if (currentTab === "collab") render(); }).catch(() => {});
-  }
 
   // Sync unread message badges — seed notifications for any pending friend requests not yet in inbox
   getPendingFriendRequests().then(requests => {
@@ -9914,6 +10062,11 @@ async function init() {
   let _ownSongDebounce = null;
   subscribeToRealtimeNotifications({
     onOwnSongChange: () => {
+      // Skip during bulk import — partial cloud state would delete un-pushed songs
+      if (_importQueueRunning) {
+        console.log("[Realtime] Ignoring own-song change — bulk import running");
+        return;
+      }
       // Skip if audio is actively playing — sync can disrupt playback
       if (globalAudio && !globalAudio.paused) {
         console.log("[Realtime] Ignoring own-song change — audio playing");
@@ -9976,14 +10129,30 @@ async function init() {
     refreshSharedData().then(() => {
       if (currentTab === "player" || currentTab === "collab" || currentTab === "songs" || drawerView) render();
     }).catch(() => {});
-    incrementalSyncFromSupabase().catch(console.warn);
+    // Skip sync while bulk import is running — partial cloud state would delete un-pushed songs
+    if (!_importQueueRunning) {
+      incrementalSyncFromSupabase().catch(console.warn);
+    }
   }, 60000);
 }
 
 // Incremental sync: pull Supabase state and merge only new/changed songs
 async function incrementalSyncFromSupabase() {
+  // Never sync while bulk import is running — cloud has partial/stale data
+  // and merging it would delete or overwrite the songs being imported.
+  if (_importQueueRunning) {
+    console.log("[Sync] Skipping — bulk import in progress");
+    return;
+  }
+
   const cloudState = await supabasePullStateSilent();
   if (!cloudState) return; // network failure — don't touch local state
+
+  // Re-check after async pull — import may have started while pull was in-flight
+  if (_importQueueRunning) {
+    console.log("[Sync] Skipping merge — bulk import started during pull");
+    return;
+  }
 
   const localHasSongs = state.songs && state.songs.length > 0;
   const cloudHasSongs = cloudState.songs && cloudState.songs.length > 0;
@@ -11334,7 +11503,7 @@ function renderHome() {
         navigateForward(() => {
           projectsOwnerFilter = "all";
           drawerView = "projects";
-          closeDrawer();
+
           selectedSongId = null;
         });
         return;
@@ -11342,7 +11511,7 @@ function renderHome() {
       if (target === "releases") {
         navigateForward(() => {
           drawerView = "releases";
-          closeDrawer();
+
           selectedSongId = null;
         });
         return;
@@ -14685,7 +14854,7 @@ function renderProfileContent(profile) {
         </div>
         <div class="profHeroInfo">
           <div class="profHeroName">${escapeHtml(displayName)}</div>
-          <div class="profHeroStats">${songCount} song${songCount !== 1 ? "s" : ""} · ${projectCount} project${projectCount !== 1 ? "s" : ""}</div>
+          <div class="profHeroStats">${songCount} · Songs · ${projectCount} Projects · ${(sharedData.songs?.length || 0) + (sharedData.mySongs?.length || 0)} Shared</div>
         </div>
       </div>
 
@@ -15233,6 +15402,174 @@ function openLoadedInviteBuilder(editInvite = null) {
   }
 
   renderBuilder();
+
+  // ── Swipe-down-to-dismiss from header ──
+  let _swY0 = 0, _swiping = false;
+  overlay.addEventListener("touchstart", (e) => {
+    const header = overlay.querySelector(".liBuilderHeader");
+    if (!header || !header.contains(e.target)) return;
+    _swY0 = e.touches[0].clientY;
+    _swiping = true;
+    overlay.style.transition = "none";
+  }, { passive: true });
+
+  overlay.addEventListener("touchmove", (e) => {
+    if (!_swiping) return;
+    const dy = e.touches[0].clientY - _swY0;
+    if (dy < 0) { overlay.style.transform = ""; return; }
+    overlay.style.transform = `translateY(${dy}px)`;
+    overlay.style.opacity = String(Math.max(0, 1 - dy / 400));
+  }, { passive: true });
+
+  overlay.addEventListener("touchend", (e) => {
+    if (!_swiping) return;
+    _swiping = false;
+    const dy = (e.changedTouches[0]?.clientY || 0) - _swY0;
+    overlay.style.transition = "";
+    if (dy > 120) {
+      overlay.style.transform = `translateY(${window.innerHeight}px)`;
+      overlay.style.opacity = "0";
+      setTimeout(() => overlay.remove(), 250);
+    } else {
+      overlay.style.transform = "";
+      overlay.style.opacity = "";
+    }
+  }, { passive: true });
+}
+
+// ── Loaded Invite Welcome Screen ──────────────────────────
+function _showLoadedInviteWelcome(claimResult) {
+  const { sender_name, project_count, song_count, role } = claimResult;
+
+  const projIcon = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
+  const songIcon = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>`;
+
+  const roleLabel = role === "collaborator" ? "Collaborator" : "Viewer";
+  const initial = (sender_name || "?")[0].toUpperCase();
+
+  const overlay = document.createElement("div");
+  overlay.className = "liWelcomeOverlay";
+
+  // Summary counts for initial render
+  const countParts = [];
+  if (project_count) countParts.push(`${project_count} project${project_count > 1 ? "s" : ""}`);
+  if (song_count) countParts.push(`${song_count} song${song_count > 1 ? "s" : ""}`);
+
+  overlay.innerHTML = `
+    <div class="liWelcomeInner">
+      <div class="liWelcomeSal">
+        <img src="./sal.svg" alt="Sal" width="90">
+      </div>
+
+      <div class="liWelcomeTitle">Welcome to RiffBank!</div>
+      <div class="liWelcomeSub">
+        <strong>${escapeHtml(sender_name)}</strong> already shared ${countParts.join(" and ")} with you — you're all set!
+      </div>
+
+      <div class="liWelcomeSender">
+        <div class="liWelcomeSenderAvatar">
+          <div class="liWelcomeSenderAvatarFallback">${initial}</div>
+        </div>
+        <div class="liWelcomeSenderInfo">
+          <div class="liWelcomeSenderName">${escapeHtml(sender_name)}</div>
+          <div class="liWelcomeSenderRole">${roleLabel} access</div>
+        </div>
+      </div>
+
+      <div class="liWelcomeItems" id="liWelcomeItems">
+        <div style="text-align:center;padding:16px 0;color:rgba(255,255,255,.35);font-size:13px">Loading shared items...</div>
+      </div>
+
+      <button class="liWelcomeBtn" id="liWelcomeGo">Let's Go!</button>
+    </div>
+  `;
+
+  document.body.appendChild(overlay);
+  requestAnimationFrame(() => overlay.classList.add("open"));
+
+  function dismiss() {
+    overlay.classList.remove("open");
+    setTimeout(() => overlay.remove(), 350);
+  }
+
+  overlay.querySelector("#liWelcomeGo").addEventListener("click", () => {
+    dismiss();
+    // Navigate to Collab tab to see shared content
+    currentTab = "collab";
+    collabPill = "projects";
+    render();
+  });
+
+  // Fetch shared data, then enrich the items list
+  refreshSharedData().then(() => {
+    if (currentTab === "collab") render();
+    const itemsEl = overlay.querySelector("#liWelcomeItems");
+    if (!itemsEl) return;
+
+    const { projects, songs } = sharedData;
+    if (!projects.length && !songs.length) {
+      itemsEl.innerHTML = `
+        <div class="liWelcomeItem">
+          <div class="liWelcomeItemIcon">${projIcon}</div>
+          <div class="liWelcomeItemBody">
+            <div class="liWelcomeItemTitle">${countParts.join(" & ")}</div>
+            <div class="liWelcomeItemSub">Shared by ${escapeHtml(sender_name)}</div>
+          </div>
+        </div>`;
+      return;
+    }
+
+    let html = "";
+
+    if (projects.length) {
+      html += `<div class="liWelcomeItemLabel">Projects</div>`;
+      for (const p of projects) {
+        const name = p.projectName || "Untitled";
+        const songCount = (p.songs || []).length;
+        html += `
+          <div class="liWelcomeItem">
+            <div class="liWelcomeItemIcon">${projIcon}</div>
+            <div class="liWelcomeItemBody">
+              <div class="liWelcomeItemTitle">${escapeHtml(name)}</div>
+              <div class="liWelcomeItemSub">${songCount} song${songCount !== 1 ? "s" : ""}</div>
+            </div>
+          </div>`;
+      }
+    }
+
+    if (songs.length) {
+      html += `<div class="liWelcomeItemLabel">Songs</div>`;
+      for (const s of songs.slice(0, 10)) {
+        const title = s.song?.title || "Untitled";
+        const proj = s.song?.project || "";
+        html += `
+          <div class="liWelcomeItem">
+            <div class="liWelcomeItemIcon">${songIcon}</div>
+            <div class="liWelcomeItemBody">
+              <div class="liWelcomeItemTitle">${escapeHtml(title)}</div>
+              ${proj ? `<div class="liWelcomeItemSub">${escapeHtml(proj)}</div>` : ""}
+            </div>
+          </div>`;
+      }
+      if (songs.length > 10) {
+        html += `<div class="liWelcomeItemSub" style="text-align:center;padding:4px 0">+${songs.length - 10} more</div>`;
+      }
+    }
+
+    itemsEl.innerHTML = html;
+  }).catch(() => {
+    const itemsEl = overlay.querySelector("#liWelcomeItems");
+    if (itemsEl) {
+      itemsEl.innerHTML = `
+        <div class="liWelcomeItem">
+          <div class="liWelcomeItemIcon">${projIcon}</div>
+          <div class="liWelcomeItemBody">
+            <div class="liWelcomeItemTitle">${countParts.join(" & ")}</div>
+            <div class="liWelcomeItemSub">Shared by ${escapeHtml(sender_name)}</div>
+          </div>
+        </div>`;
+    }
+  });
 }
 
 // Re-share an existing loaded invite link
@@ -19277,6 +19614,16 @@ function renderSettingsDanger() {
         </div>
 
         <div class="setSection">
+          <div class="setSectionLabel">Clear Songs Only</div>
+          <div class="setGroup" style="padding:16px">
+            <div style="font-size:13px; opacity:.5; margin-bottom:14px">
+              Permanently delete <b>all songs, versions, and audio</b> but keep your projects. This cannot be undone.
+            </div>
+            <button class="setBtn setBtnRed" id="clearSongsOnly">Clear Songs</button>
+          </div>
+        </div>
+
+        <div class="setSection">
           <div class="setSectionLabel">Local Data</div>
           <div class="setGroup" style="padding:16px">
             <div style="font-size:13px; opacity:.5; margin-bottom:14px">
@@ -19366,6 +19713,76 @@ function renderSettingsDanger() {
       render();
     } catch (e) {
       console.error("[ClearLib] failed:", e);
+      if (statusEl) { statusEl.textContent = "Failed — check console"; statusEl.style.color = "#f87171"; }
+      setTimeout(() => overlay.remove(), 3000);
+    }
+  });
+
+  // Clear Songs Only — delete songs/versions/audio but keep projects
+  $("#clearSongsOnly")?.addEventListener("click", async () => {
+    if (!confirm("Delete ALL songs, versions, and audio? Projects will be kept. This cannot be undone.")) return;
+    if (!confirm("Are you absolutely sure? This will permanently erase all songs from your account.")) return;
+
+    const overlay = document.createElement("div");
+    overlay.id = "clearLibOverlay";
+    overlay.style.cssText = "position:fixed;inset:0;z-index:999999;background:var(--bg,#0d0d0f);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;padding:32px;";
+    overlay.innerHTML = `
+      <div style="font-size:24px;font-weight:700;color:#fff;letter-spacing:-0.3px;">Clearing Songs</div>
+      <div id="clearLibStatus" style="font-size:15px;color:rgba(255,255,255,.5);text-align:center;">Preparing…</div>
+      <div style="width:240px;height:4px;background:rgba(255,255,255,.08);border-radius:2px;overflow:hidden;">
+        <div id="clearLibBar" style="height:100%;width:0%;background:#f87171;border-radius:2px;transition:width .3s ease;"></div>
+      </div>
+      <div id="clearLibCount" style="font-size:13px;color:rgba(255,255,255,.3);font-variant-numeric:tabular-nums;">0 / 0</div>
+    `;
+    document.body.appendChild(overlay);
+
+    const statusEl = overlay.querySelector("#clearLibStatus");
+    const barEl = overlay.querySelector("#clearLibBar");
+    const countEl = overlay.querySelector("#clearLibCount");
+
+    const updateProgress = (i, total, label) => {
+      const pct = total > 0 ? Math.round(((i + 1) / total) * 100) : 0;
+      if (statusEl) statusEl.textContent = label;
+      if (barEl) barEl.style.width = pct + "%";
+      if (countEl) countEl.textContent = `${i + 1} / ${total}`;
+    };
+
+    try {
+      const songsToDelete = [...(state.songs || [])];
+      const total = songsToDelete.length;
+
+      for (let i = 0; i < total; i++) {
+        updateProgress(i, total, `Deleting "${songsToDelete[i].title || "Untitled"}"…`);
+        await deleteSongEverywhere(songsToDelete[i]);
+      }
+
+      // Clear songs from local state but keep projects
+      if (statusEl) statusEl.textContent = "Clearing local data…";
+      state.songs = [];
+      state.releases = [];
+      normalizeState();
+      saveState();
+
+      // Clear IndexedDB audio
+      audioUrlCache.clear();
+      try {
+        const db = await openAudioDB();
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(AUDIO_STORE, "readwrite");
+          tx.objectStore(AUDIO_STORE).clear();
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
+      } catch (e) { console.warn("[ClearSongs] IDB clear failed:", e); }
+
+      if (barEl) barEl.style.width = "100%";
+      if (statusEl) { statusEl.textContent = "Songs cleared"; statusEl.style.color = "#4ade80"; }
+      await new Promise(r => setTimeout(r, 800));
+      overlay.remove();
+      settingsView = null;
+      render();
+    } catch (e) {
+      console.error("[ClearSongs] failed:", e);
       if (statusEl) { statusEl.textContent = "Failed — check console"; statusEl.style.color = "#f87171"; }
       setTimeout(() => overlay.remove(), 3000);
     }

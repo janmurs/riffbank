@@ -1007,80 +1007,6 @@ textarea{ min-height:100px; resize:vertical; }
    ========================= */
 .iconbtn { padding: 10px 12px; min-height: 44px; border-radius: 14px; }
 
-.drawerOverlay{
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,.45);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity .2s ease;
-  z-index: 570;
-}
-
-.drawer{
-  position: fixed;
-  top: 0;
-  left: 0;
-  height: 100vh;
-  width: min(320px, 86vw);
-  background: rgba(12,12,18,.92);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  border-right: 1px solid rgba(255,255,255,.10);
-  transform: translateX(-105%);
-  transition: transform .22s ease;
-  z-index: 571;
-  padding: env(safe-area-inset-top) 14px 14px;
-  display:flex;
-  flex-direction:column;
-  gap: 14px;
-}
-
-.drawerHeader{
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  gap:12px;
-  padding: 8px 4px;
-}
-
-.drawerTitle{
-  font-weight: 800;
-  letter-spacing: -.3px;
-  font-size: 16px;
-}
-
-.drawerSection{
-  padding: 10px;
-  border: 1px solid rgba(255,255,255,.08);
-  background: rgba(255,255,255,.04);
-  border-radius: 16px;
-  display:flex;
-  flex-direction:column;
-  gap: 8px;
-}
-
-.drawerLabel{
-  color: var(--muted);
-  font-size: 12px;
-  margin-bottom: 2px;
-}
-
-.drawerItem{
-  width:100%;
-  text-align:left;
-  border: 1px solid rgba(255,255,255,.10);
-  background: rgba(0,0,0,.20);
-  color: var(--text);
-  padding: 12px 12px;
-  border-radius: 14px;
-  cursor:pointer;
-}
-.drawerItem:hover{ filter: brightness(1.07); }
-
-.drawerOpen .drawer{ transform: translateX(0); }
-.drawerOpen .drawerOverlay{ opacity: 1; pointer-events: auto; }
-.drawerOpen .screen.is-active{ overflow: hidden; }
 
 /* =========================
    Create sheet
@@ -1103,6 +1029,9 @@ textarea{ min-height:100px; resize:vertical; }
   z-index: 581;
 
   width: min(var(--app-maxw), 100vw);
+  max-height: calc(100dvh - env(safe-area-inset-top) - 40px);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   background: #121212;
 
   border-top-left-radius: 22px;
@@ -1601,6 +1530,11 @@ textarea{ min-height:100px; resize:vertical; }
 .alertBatchChild{padding:10px 0}
 .alertBatchChild .alertTitle{font-size:14px}
 .alertBatchChild .alertMsg{font-size:12px}
+
+.iqRetryBtn{display:inline-block;margin-top:8px;padding:6px 16px;border:none;border-radius:8px;background:rgba(248,113,113,.15);color:#f87171;font-size:12px;font-weight:600;cursor:pointer;transition:background .15s}
+.iqRetryBtn:active{background:rgba(248,113,113,.25)}
+.iqRetryAllBtn{padding:4px 12px;border:none;border-radius:6px;background:rgba(248,113,113,.12);color:#f87171;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .15s}
+.iqRetryAllBtn:active{background:rgba(248,113,113,.22)}
 
 .friendActionBar{position:sticky;bottom:0;left:0;right:0;display:flex;gap:10px;padding:16px;background:linear-gradient(transparent,rgba(15,15,20,.95) 30%);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);transition:opacity .3s}
 .friendActionAccept{flex:1;padding:14px;border:none;border-radius:12px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);color:#fff;font-size:15px;font-weight:700;cursor:pointer}
@@ -5373,6 +5307,29 @@ body {
   background: linear-gradient(transparent, var(--bg, #0d0d0f) 30%);
   z-index: 50;
 }
+/* Import queue sections */
+.biSection { margin-bottom: 20px; }
+.biSectionHeader {
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 2px 10px;
+}
+.biSectionLabel {
+  font-size: 14px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.biSectionCount {
+  font-size: 12px; font-weight: 600;
+  padding: 2px 8px; border-radius: 10px;
+  line-height: 1.2;
+}
+.biSectionReview .biSectionLabel { color: rgba(255,255,255,.45); }
+.biSectionReview .biSectionCount {
+  background: rgba(255,255,255,.08); color: rgba(255,255,255,.4);
+}
+.biSectionReady .biSectionLabel { color: #4ecdc4; }
+.biSectionReady .biSectionCount {
+  background: rgba(78,205,196,.12); color: #4ecdc4;
+}
 .biImportBtn {
   width: 100%; padding: 16px; border: none; border-radius: 14px;
   background: rgba(78,205,196,.12); color: #4ecdc4;
@@ -5391,7 +5348,9 @@ body {
   position: fixed; z-index: 99991;
   left: 16px; right: 16px;
   top: 50%; transform: translateY(-50%) scale(.92);
-  max-height: 80vh; overflow-y: auto;
+  max-height: 80vh; max-height: 80dvh;
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
   background: #1a1a1e; border-radius: 20px;
   opacity: 0; transition: opacity .2s ease, transform .25s ease;
 }
@@ -5420,8 +5379,14 @@ body {
 }
 .biModalBtn:active { opacity: .7; }
 .biModalRemove { background: rgba(248,113,113,.1); color: #f87171; }
+.biModalNext { background: rgba(255,255,255,.08); color: rgba(255,255,255,.6); }
 .biModalDone { flex: 2; background: rgba(78,205,196,.12); color: #4ecdc4; }
 .biModalDone:disabled { opacity: .35; pointer-events: none; }
+/* Selected project card in bulk import — teal border */
+.coProjCard.biProjSelected {
+  border-color: #4ecdc4;
+  background: rgba(78,205,196,.1);
+}
 /* Duplicate match rows */
 .dupMatchRow {
   padding: 12px 20px; cursor: pointer;
@@ -7981,6 +7946,107 @@ input.shareSearchInput {
   cursor:pointer; transition:opacity .2s;
 }
 .liBuilderDelete:active{ opacity:.7; }
+
+/* ── Loaded Invite Welcome Screen ──────────────────────── */
+
+.liWelcomeOverlay{
+  position:fixed; inset:0; z-index:10000;
+  background:var(--bg, #0d0e12);
+  display:flex; flex-direction:column; align-items:center;
+  opacity:0; transform:translateY(20px);
+  transition:opacity .35s ease, transform .35s ease;
+  padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+  overflow-y:auto; -webkit-overflow-scrolling:touch;
+}
+.liWelcomeOverlay.open{ opacity:1; transform:translateY(0); }
+
+.liWelcomeInner{
+  width:100%; max-width:380px;
+  padding:48px 24px 40px;
+  display:flex; flex-direction:column; align-items:center;
+  text-align:center;
+}
+
+.liWelcomeSal{ margin-bottom:20px; }
+.liWelcomeSal img{ height:auto; filter:drop-shadow(0 4px 20px rgba(167,139,250,.3)); }
+
+.liWelcomeTitle{
+  font-weight:900; font-size:28px;
+  background:linear-gradient(135deg, #a78bfa, #f472b6);
+  -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+  background-clip:text;
+  margin-bottom:6px;
+}
+.liWelcomeSub{
+  font-size:15px; color:rgba(255,255,255,.6); line-height:1.6;
+  margin-bottom:28px;
+}
+.liWelcomeSub strong{ color:rgba(255,255,255,.92); }
+
+.liWelcomeSender{
+  display:flex; align-items:center; gap:14px;
+  background:rgba(255,255,255,.06); border-radius:16px;
+  padding:16px 20px; width:100%; margin-bottom:24px;
+  text-align:left;
+}
+.liWelcomeSenderAvatar{
+  width:48px; height:48px; border-radius:50%;
+  background:linear-gradient(135deg, rgba(167,139,250,.3), rgba(244,114,182,.3));
+  display:flex; align-items:center; justify-content:center;
+  flex-shrink:0; overflow:hidden;
+}
+.liWelcomeSenderAvatar img{
+  width:100%; height:100%; object-fit:cover; border-radius:50%;
+}
+.liWelcomeSenderAvatarFallback{
+  font-weight:800; font-size:20px; color:rgba(255,255,255,.7);
+}
+.liWelcomeSenderInfo{ flex:1; min-width:0; }
+.liWelcomeSenderName{
+  font-weight:800; font-size:17px; color:rgba(255,255,255,.92);
+}
+.liWelcomeSenderRole{
+  font-size:13px; color:rgba(167,139,250,.8); font-weight:600; margin-top:2px;
+}
+
+.liWelcomeItems{
+  width:100%; display:flex; flex-direction:column; gap:8px;
+  margin-bottom:28px;
+}
+.liWelcomeItemLabel{
+  font-weight:800; font-size:11px; text-transform:uppercase;
+  letter-spacing:.5px; color:rgba(255,255,255,.4);
+  text-align:left; margin:6px 0 0;
+}
+.liWelcomeItem{
+  display:flex; align-items:center; gap:14px;
+  background:rgba(255,255,255,.06); border-radius:14px;
+  padding:14px 16px; text-align:left;
+}
+.liWelcomeItemIcon{
+  width:40px; height:40px; border-radius:10px;
+  background:linear-gradient(135deg, rgba(167,139,250,.2), rgba(244,114,182,.2));
+  display:flex; align-items:center; justify-content:center;
+  flex-shrink:0; color:#a78bfa;
+}
+.liWelcomeItemBody{ flex:1; min-width:0; }
+.liWelcomeItemTitle{
+  font-weight:700; font-size:15px; color:rgba(255,255,255,.92);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.liWelcomeItemSub{
+  font-size:13px; color:rgba(255,255,255,.45); margin-top:2px;
+}
+
+.liWelcomeBtn{
+  width:100%; padding:16px 0;
+  background:linear-gradient(135deg, #a78bfa, #f472b6);
+  border:none; border-radius:999px;
+  color:#fff; font-family:inherit;
+  font-weight:800; font-size:16px;
+  cursor:pointer; transition:opacity .2s;
+}
+.liWelcomeBtn:active{ opacity:.8; }
 
 /* ── Loaded Invite Cards (Collab tab) ──────────────────── */
 

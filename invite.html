@@ -103,6 +103,7 @@
       text-decoration: none; text-align: center;
     }
     .inviteBtn:active { opacity: .8; }
+    .inviteBtn.hidden { display: none; }
 
     .inviteNote {
       font-size: 12px; color: var(--muted);
@@ -284,7 +285,7 @@
 
   <button class="acceptBtn" id="acceptBtn" style="display:none">Accept Invite</button>
 
-  <a class="inviteBtn" href="./" id="openBtn">Open RiffBank</a>
+  <a class="inviteBtn hidden" href="./" id="openBtn">Open RiffBank</a>
 
   <div class="inviteNote" id="inviteNote">
     After installing, open RiffBank and create your account. You'll enter a 6-digit code from your email to verify — no redirect needed.
@@ -409,72 +410,21 @@
           }
 
           const sender = data.sender || {};
-          const projects = data.projects || [];
-          const songs = data.songs || [];
-          const role = data.role || "viewer";
-
-          // Update title
-          document.querySelector(".inviteTitle").textContent = "You're Invited!";
-
-          // Sender row
-          const sub = document.getElementById("inviteSub");
           const senderName = sender.display_name || "Someone";
-          sub.innerHTML = `<strong>${senderName}</strong> wants to share their music with you on <strong>RiffBank</strong>.`;
 
-          // Role badge
-          const badgeWrap = document.getElementById("roleBadgeWrap");
-          badgeWrap.innerHTML = `<div class="roleBadge ${role}">${role === "collaborator" ? "Collaborator — Full Edit" : "Viewer — Listen Only"}</div>`;
-
-          // Build preview cards
-          const grid = document.createElement("div");
-          grid.className = "liPreviewGrid";
-
-          const projIcon = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
-          const songIcon = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>`;
-
-          if (projects.length) {
-            grid.innerHTML += `<div class="liSectionLabel">Projects</div>`;
-            for (const p of projects) {
-              grid.innerHTML += `
-                <div class="liCard">
-                  <div class="liCardIcon">${projIcon}</div>
-                  <div class="liCardBody">
-                    <div class="liCardTitle">${p.name}</div>
-                    <div class="liCardSub">${p.song_count} song${p.song_count !== 1 ? "s" : ""}</div>
-                  </div>
-                </div>`;
-            }
-          }
-
-          if (songs.length) {
-            grid.innerHTML += `<div class="liSectionLabel">Songs</div>`;
-            for (const s of songs) {
-              grid.innerHTML += `
-                <div class="liCard">
-                  <div class="liCardIcon">${songIcon}</div>
-                  <div class="liCardBody">
-                    <div class="liCardTitle">${s.title}</div>
-                    ${s.project_name ? `<div class="liCardSub">${s.project_name}</div>` : ""}
-                  </div>
-                </div>`;
-            }
-          }
-
-          // Insert grid before the install card
-          const installCard = document.getElementById("installCard");
-          installCard.parentNode.insertBefore(grid, installCard);
+          // Update subtitle with sender name
+          const sub = document.getElementById("inviteSub");
+          sub.innerHTML = `<strong>${senderName}</strong> invited you to join <strong>RiffBank</strong> — install the app and create your account to get started.`;
 
           // Store token for auto-claim after signup
+          // Use both localStorage AND a cookie — localStorage doesn't carry over
+          // from Safari to the installed PWA, but same-origin cookies do.
           localStorage.setItem("pendingLoadedInvite", liToken);
-
-          // Update open button to pass through
-          const openBtn = document.getElementById("openBtn");
-          openBtn.href = "./";
-          openBtn.textContent = "Open RiffBank";
+          document.cookie = `pendingLoadedInvite=${encodeURIComponent(liToken)};path=/;max-age=86400;SameSite=Lax`;
 
           // Update note
           document.getElementById("inviteNote").innerHTML =
-            "Install RiffBank and create your account — everything above will be shared with you automatically.";
+            "After you sign up, everything they shared will appear automatically.";
 
         } catch (e) {
           console.error("Loaded invite error:", e);
