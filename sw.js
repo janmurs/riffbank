@@ -8,7 +8,7 @@
 
 // Type ./start.sh to start local server
 
-const CACHE_VERSION = "2026-03-24_15"; // <-- bump this when you deploy
+const CACHE_VERSION = "2026-03-29_15"; // <-- bump this when you deploy
 const STATIC_CACHE = `riffbank-static-${CACHE_VERSION}`;
 const RUNTIME_CACHE = `riffbank-runtime-${CACHE_VERSION}`;
 
@@ -17,6 +17,9 @@ const PRECACHE_URLS = [
   "/index.html",
   "/styles.css",
   "/src/app.js",
+  "/src/supabase.js",
+  "/src/ui/dom.js",
+  "/src/splash/splash.js",
   "/manifest.json",
   "/icon-1024.png",
   "/songs-card.jpg",

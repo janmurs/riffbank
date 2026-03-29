@@ -199,6 +199,52 @@
     }
     .acceptStatus.success { color: #22c55e; display: block; }
     .acceptStatus.error { color: #ef4444; display: block; }
+
+    /* Loaded invite preview */
+    .liPreviewGrid {
+      display: flex; flex-direction: column; gap: 10px;
+      max-width: 360px; width: 100%; margin-bottom: 24px;
+    }
+    .liSectionLabel {
+      font-weight: 800; font-size: 12px; text-transform: uppercase;
+      letter-spacing: .5px; color: var(--muted); text-align: left;
+      margin: 4px 0 0;
+    }
+    .liCard {
+      display: flex; align-items: center; gap: 14px;
+      background: var(--panel2); border-radius: 14px;
+      padding: 14px 16px; text-align: left;
+    }
+    .liCardIcon {
+      width: 44px; height: 44px; border-radius: 10px;
+      background: linear-gradient(135deg, rgba(167,139,250,.25), rgba(244,114,182,.25));
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+    .liCardIcon svg { color: #a78bfa; }
+    .liCardBody { flex: 1; min-width: 0; }
+    .liCardTitle {
+      font-weight: 700; font-size: 15px; color: var(--text);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .liCardSub {
+      font-size: 13px; color: var(--muted); margin-top: 2px;
+    }
+    .liSenderRow {
+      display: flex; align-items: center; gap: 12px;
+      margin-bottom: 20px;
+    }
+    .liSenderAvatar {
+      width: 48px; height: 48px; border-radius: 50%;
+      background: var(--panel2);
+      object-fit: cover;
+    }
+    .liSenderName {
+      font-weight: 800; font-size: 18px; color: var(--text);
+    }
+    .liSenderLabel {
+      font-size: 13px; color: var(--muted);
+    }
   </style>
 </head>
 <body>
@@ -335,11 +381,107 @@
 
     // Parse invite params
     const params = new URLSearchParams(window.location.search);
+    const liToken = params.get("li");
     const token = params.get("token");
     const from = params.get("from");
     const project = params.get("project");
 
-    if (token) {
+    if (liToken) {
+      // ── Loaded invite preview ──
+      (async () => {
+        try {
+          const { createClient } = await import("https://esm.sh/@supabase/supabase-js@2");
+          const sb = createClient(
+            "https://hbgaoejdslftbwuhggtv.supabase.co",
+            "sb_publishable_txkI4NbwclNsBW_geDj_bw_xQNL4vqO"
+          );
+
+          const { data, error } = await sb.rpc("get_loaded_invite_preview", { p_token: liToken });
+          if (error || !data || data.error) {
+            const errMsg = data?.error || "not_found";
+            const msgs = {
+              not_found: "This invite link is invalid.",
+              already_claimed: "This invite has already been claimed.",
+              expired: "This invite has expired.",
+            };
+            document.getElementById("inviteSub").textContent = msgs[errMsg] || "This invite link is invalid.";
+            return;
+          }
+
+          const sender = data.sender || {};
+          const projects = data.projects || [];
+          const songs = data.songs || [];
+          const role = data.role || "viewer";
+
+          // Update title
+          document.querySelector(".inviteTitle").textContent = "You're Invited!";
+
+          // Sender row
+          const sub = document.getElementById("inviteSub");
+          const senderName = sender.display_name || "Someone";
+          sub.innerHTML = `<strong>${senderName}</strong> wants to share their music with you on <strong>RiffBank</strong>.`;
+
+          // Role badge
+          const badgeWrap = document.getElementById("roleBadgeWrap");
+          badgeWrap.innerHTML = `<div class="roleBadge ${role}">${role === "collaborator" ? "Collaborator — Full Edit" : "Viewer — Listen Only"}</div>`;
+
+          // Build preview cards
+          const grid = document.createElement("div");
+          grid.className = "liPreviewGrid";
+
+          const projIcon = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
+          const songIcon = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>`;
+
+          if (projects.length) {
+            grid.innerHTML += `<div class="liSectionLabel">Projects</div>`;
+            for (const p of projects) {
+              grid.innerHTML += `
+                <div class="liCard">
+                  <div class="liCardIcon">${projIcon}</div>
+                  <div class="liCardBody">
+                    <div class="liCardTitle">${p.name}</div>
+                    <div class="liCardSub">${p.song_count} song${p.song_count !== 1 ? "s" : ""}</div>
+                  </div>
+                </div>`;
+            }
+          }
+
+          if (songs.length) {
+            grid.innerHTML += `<div class="liSectionLabel">Songs</div>`;
+            for (const s of songs) {
+              grid.innerHTML += `
+                <div class="liCard">
+                  <div class="liCardIcon">${songIcon}</div>
+                  <div class="liCardBody">
+                    <div class="liCardTitle">${s.title}</div>
+                    ${s.project_name ? `<div class="liCardSub">${s.project_name}</div>` : ""}
+                  </div>
+                </div>`;
+            }
+          }
+
+          // Insert grid before the install card
+          const installCard = document.getElementById("installCard");
+          installCard.parentNode.insertBefore(grid, installCard);
+
+          // Store token for auto-claim after signup
+          localStorage.setItem("pendingLoadedInvite", liToken);
+
+          // Update open button to pass through
+          const openBtn = document.getElementById("openBtn");
+          openBtn.href = "./";
+          openBtn.textContent = "Open RiffBank";
+
+          // Update note
+          document.getElementById("inviteNote").innerHTML =
+            "Install RiffBank and create your account — everything above will be shared with you automatically.";
+
+        } catch (e) {
+          console.error("Loaded invite error:", e);
+          document.getElementById("inviteSub").textContent = "Something went wrong loading this invite.";
+        }
+      })();
+    } else if (token) {
       // ── New token-based invite ──
       (async () => {
         try {

@@ -15,9 +15,88 @@ window.onerror = (m, src, line, col) => console.error(`[RiffBank] JS ERROR: ${m}
 // Debug: show cache version badge on every screen (toggle on/off)
 const SHOW_BUILD_BADGE = false;
 
+// ── Import queue (alerts bell, persisted to localStorage for resume) ──
+// Each entry: { id, title, project, status, progress, ts, existingSongId, idbKey, fileName, fileType, fileSize }
+const IMPORT_QUEUE_KEY = "riffbank_import_queue";
+let importQueue = [];
+
+function _loadImportQueue() {
+  try {
+    const raw = localStorage.getItem(IMPORT_QUEUE_KEY);
+    if (raw) importQueue = JSON.parse(raw);
+  } catch { importQueue = []; }
+}
+function _saveImportQueue() {
+  try { localStorage.setItem(IMPORT_QUEUE_KEY, JSON.stringify(importQueue)); } catch {}
+}
+function _clearImportQueue() {
+  importQueue = [];
+  try { localStorage.removeItem(IMPORT_QUEUE_KEY); } catch {}
+}
+// Remove completed/failed items older than 24 hours
+function _pruneImportQueue() {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  const before = importQueue.length;
+  importQueue = importQueue.filter(q => {
+    // Keep anything still active
+    if (q.status === "waiting" || q.status === "uploading") return true;
+    // Keep done/failed items younger than 24h
+    return (q.ts || 0) > cutoff;
+  });
+  if (importQueue.length !== before) _saveImportQueue();
+}
+
+function _updateImportQueueItem(id, updates) {
+  const item = importQueue.find(q => q.id === id);
+  if (item) Object.assign(item, updates, { ts: Date.now() });
+  _saveImportQueue();
+  _updateNotifBadge();
+  if (drawerView === "alerts") _renderImportQueueDOM();
+}
+
+function _timeAgo(ts) {
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
+function _renderImportQueueDOM() {
+  const container = document.getElementById("importQueueContainer");
+  if (!container) return;
+  const active = importQueue.filter(q => q.status !== "done" && q.status !== "failed");
+  const finished = importQueue.filter(q => q.status === "done" || q.status === "failed");
+  if (!importQueue.length) { container.innerHTML = ""; return; }
+
+  container.innerHTML = `
+    <div class="alertSectionLabel">Import Queue</div>
+    ${importQueue.map(q => {
+      const isDone = q.status === "done";
+      const isFailed = q.status === "failed";
+      const isActive = !isDone && !isFailed;
+      const barColor = isDone ? "#4ade80" : isFailed ? "#f87171" : "#4ecdc4";
+      const statusText = q.statusText || (isDone ? "Imported" : isFailed ? "Failed" : q.status === "uploading" ? "Uploading…" : "Waiting…");
+      return `
+      <div class="alertRow">
+        <div class="alertIcon" style="color:${barColor}">${isDone ? "●" : isFailed ? "●" : "◌"}</div>
+        <div class="alertBody">
+          <div class="alertTitle">${escapeHtml(q.title)}</div>
+          <div class="alertMsg">${statusText}</div>
+          ${isActive ? `<div class="alertProgress"><div class="alertProgressFill" style="width:${q.progress || 0}%;background:${barColor}"></div></div>` : ""}
+        </div>
+        ${!isActive && q.ts ? `<div class="alertTime">${_timeAgo(q.ts)}</div>` : ""}
+      </div>`;
+    }).join("")}
+  `;
+}
+
 // ── Activity log (alerts bell) ──
-// Each entry: { id, songTitle, status: "saving"|"compressing"|"uploading"|"syncing"|"done"|"failed", ts, message }
+// Each entry: { id, songTitle, status: "saving"|"compressing"|"uploading"|"syncing"|"done"|"failed", ts, message, progress: 0-100 }
 const activityLog = [];
+
+// Map upload status to progress percentage
+const _uploadProgressMap = { saving: 5, compressing: 20, uploading: 50, syncing: 85, done: 100, failed: 0 };
 
 // ── Persistent notification inbox (survives refresh, 30-day retention) ──
 const NOTIF_STORAGE_KEY = "riffbank_notifications";
@@ -67,7 +146,8 @@ function _updateNotifBadge() {
   const btn = document.querySelector("#htbNotif");
   if (!btn) return;
   let badge = btn.querySelector(".bellBadge");
-  const total = unread + activityLog.filter(a => a.status !== "done" && a.status !== "failed").length;
+  const activeImports = importQueue.filter(q => q.status !== "done" && q.status !== "failed").length;
+  const total = unread + activityLog.filter(a => a.status !== "done" && a.status !== "failed").length + (activeImports > 0 ? 1 : 0);
   if (total > 0) {
     if (!badge) {
       badge = document.createElement("span");
@@ -83,16 +163,24 @@ function _updateNotifBadge() {
   }
 }
 function logActivity(id, songTitle, status, message) {
+  const progress = _uploadProgressMap[status] ?? 0;
   const existing = activityLog.find(a => a.id === id);
   if (existing) {
     existing.status = status;
     existing.message = message;
+    existing.progress = progress;
     existing.ts = Date.now();
   } else {
-    activityLog.unshift({ id, songTitle, status, message, ts: Date.now() });
+    activityLog.unshift({ id, songTitle, status, message, progress, ts: Date.now() });
   }
   // Keep last 50
   if (activityLog.length > 50) activityLog.length = 50;
+
+  // Persist completed uploads as bell notifications (survives refresh)
+  if (status === "done") {
+    addNotification({ title: songTitle, body: "Uploaded to cloud", type: "upload" });
+  }
+
   updateBellBadge();
   // Live-update alerts view if open
   if (drawerView === "alerts") renderAlerts();
@@ -122,10 +210,14 @@ import {
   fetchAllSharedData,
   pullSharedProjects, pullSharedSongs, pullMySharedProjects, pullMySharedSongs,
   listMyInvites, deleteShareInvite,
-  removeProjectMember, upsertProfile, searchUsers, shareWithUser,
+  removeProjectMember, getSongShares, revokeSongShare, updateSongShareRole,
+  upsertProfile, searchUsers, shareWithUser,
   sendFriendRequest, acceptFriendRequest, removeFriendship,
   getMyFriends, getPendingFriendRequests, getPendingFriendCount,
   sendMessage, getMessages, getConversations, markMessagesRead, getUnreadMessageCount,
+  subscribeToRealtimeNotifications, getProfileById,
+  createLoadedInvite, getMyLoadedInvites, updateLoadedInvite, deleteLoadedInvite,
+  getLoadedInvitePreview, claimLoadedInvite,
 } from "./supabase.js";
 
 const LS_KEY = "riffbank_v1";
@@ -1055,7 +1147,8 @@ function navigateForward(mutateFn) {
   const captured = {
     currentTab, drawerView, projectDetailScreen, releaseDetailId,
     selectedSongId, selectedVersionId, songsView, overlayView, friendProfileId,
-    songsBackTarget, lyricsEditSongId, collabMode, songsFromCollab, headerTitle: headerTitle?.textContent ?? "RiffBank"
+    songsBackTarget, lyricsEditSongId, collabMode, songsFromCollab, settingsView, collabPill,
+    headerTitle: headerTitle?.textContent ?? "RiffBank"
   };
   nav.captureState(captured);
   nav.slideTransition({
@@ -1577,6 +1670,12 @@ function isPlayable(v){
   return !!(v?.link || v?.fileId || v?.localAudioId || v?.audioPath);
 }
 
+// Does a song have at least one version with actual audio?
+// Use this to hide songs from UI when the hard rule is "if you see it, you can play it".
+function songHasPlayableAudio(song) {
+  return (song?.versions || []).some(v => isPlayable(v));
+}
+
 async function syncMiniPlayerUI() {
     // ✅ If fullscreen Now Playing is open, mini player must never appear
   if (document.body.classList.contains("fullplayer-open")) {
@@ -1750,7 +1849,7 @@ async function playNowPlaying({ autoplay = true } = {}){
     _autoSkipCount = 0;
     // Keep mini player visible even though audio failed — don't leave user stranded
     hasPlayedThisSession = true;
-    toast("No playable audio 😅");
+    toast("No audio available — upload from another device or re-import");
     await syncMiniPlayerUI();
     return;
   }
@@ -1768,7 +1867,18 @@ async function playNowPlaying({ autoplay = true } = {}){
   });
 
   // If already playing this exact src, don't reset time
-  if (globalAudio.src !== url) globalAudio.src = url;
+  if (globalAudio.src !== url) {
+    // Only reset error/stall guards when the TRACK changes, not just the URL
+    // (same track can get a new blob URL after cache clear — guard must persist)
+    const trackKey = `${now.songId}:${now.versionId}`;
+    if (_stallRetriedTrack && _stallRetriedTrack !== trackKey) _stallRetriedTrack = null;
+    if (_errorSkipTrack && _errorSkipTrack !== trackKey) _errorSkipTrack = null;
+
+    // Blob URLs don't support range requests — tell browser to fully buffer ahead
+    globalAudio.preload = url.startsWith("blob:") ? "auto" : "metadata";
+    globalAudio.src = url;
+    console.log(`[Player] src set: ${url.slice(0, 60)}… preload=${globalAudio.preload}`);
+  }
 
   if (autoplay) {
     try {
@@ -2236,6 +2346,13 @@ async function compressAudioForUpload(blob) {
   // Skip compression for files under 50MB (Supabase free tier limit)
   if (blob.size <= COMPRESS_THRESHOLD) return blob;
 
+  // Skip compression while audio is playing — real-time MediaRecorder encoding
+  // creates a competing AudioContext that causes playback glitches
+  if (!globalAudio.paused) {
+    console.log("[Compress] Skipping — audio is playing, avoiding playback glitches");
+    return blob;
+  }
+
   // Encode to M4A/AAC (stereo, high quality) via MediaRecorder
   // Safari/iOS: audio/mp4 (AAC), Chrome: audio/webm (Opus) — both excellent quality
   try {
@@ -2393,10 +2510,8 @@ async function deleteSongEverywhere(song) {
   if (song.coverPath) {
     supabase.storage.from("covers").remove([song.coverPath]).catch(() => {});
   }
-  // Clean up art_rate_limits entry
-  try {
-    await supabase.from("art_rate_limits").delete().eq("song_id", song.id);
-  } catch (e) { console.warn("[Supabase] delete art_rate_limits:", e); }
+  // Note: art_rate_limits cleanup skipped — RLS blocks direct deletes.
+  // Rows expire naturally or can be cleaned up server-side.
 }
 
 // Recover lost audio refs: scan IndexedDB blobs, match to versions by filename,
@@ -2408,14 +2523,20 @@ async function recoverAndUploadAudio() {
   // Build lookups (skip supa: cached entries)
   const blobByName = new Map();
   const blobById = new Map();
+  const blobByTitleKey = new Map();
   for (const rec of allBlobs) {
     if (rec.id.startsWith("supa:")) continue;
-    if (rec.name) blobByName.set(rec.name, rec);
+    if (rec.name) {
+      blobByName.set(rec.name, rec);
+      const key = rec.name.replace(/\.[^.]+$/, "").toLowerCase().trim();
+      if (key) blobByTitleKey.set(key, rec);
+    }
     blobById.set(rec.id, rec);
   }
 
   let relinked = 0, uploaded = 0, failed = 0;
   const errors = [];
+  const usedIds = new Set();
   toast(`Found ${blobByName.size} local audio blobs — recovering…`);
 
   for (const song of (state.songs || [])) {
@@ -2423,12 +2544,18 @@ async function recoverAndUploadAudio() {
       // Skip if already fully synced (has local audio AND cloud backup)
       if (v.audioPath && (v.fileId || v.localAudioId)) continue;
 
-      // Find the blob: try bulk lookup first, then direct IndexedDB fetch by fileId
-      let rec = blobById.get(v.fileId) || blobByName.get(v.fileName);
+      // Find the blob: try exact match first, then fuzzy by song title
+      let rec = blobById.get(v.fileId) || blobById.get(v.localAudioId)
+             || blobByName.get(v.fileName) || blobByName.get(v.originalFileName);
+      if (!rec) {
+        const titleKey = (song.title || "").toLowerCase().trim();
+        if (titleKey) rec = blobByTitleKey.get(titleKey);
+      }
       if (!rec && v.fileId) {
         try { rec = await audioGet(v.fileId); } catch {}
       }
-      if (!rec?.blob) continue;
+      if (!rec?.blob || usedIds.has(rec.id)) continue;
+      usedIds.add(rec.id);
 
       // Re-link fileId if missing
       if (!v.fileId) {
@@ -2436,6 +2563,11 @@ async function recoverAndUploadAudio() {
         v.fileType = v.fileType || rec.type || "";
         v.fileSize = v.fileSize || rec.size || 0;
         relinked++;
+      }
+
+      // Backfill fileName if it was lost (e.g. cloud sync returned null)
+      if (!v.fileName && rec.name) {
+        v.fileName = rec.name;
       }
 
       // Upload to Supabase Storage if not already backed up
@@ -2567,6 +2699,1168 @@ function pickAudioFile() {
   });
 }
 
+// Pick multiple audio files at once
+function pickAudioFiles() {
+  return new Promise((resolve) => {
+    let input = document.getElementById("_audioPickerMulti");
+    if (!input) {
+      input = document.createElement("input");
+      input.id = "_audioPickerMulti";
+      input.type = "file";
+      input.multiple = true;
+      input.style.cssText = "position:fixed;left:-9999px;top:-9999px;opacity:0;pointer-events:none;";
+      document.body.appendChild(input);
+    }
+    input.value = "";
+    input.accept = ".wav,.mp3,.m4a,.aac,.aiff,.flac,.ogg,.caf";
+    const handler = () => {
+      input.removeEventListener("change", handler);
+      const files = Array.from(input.files || []).filter(f => {
+        const okExt = /\.(wav|mp3|m4a|aac|aiff|flac|ogg|caf)$/i.test(f.name || "");
+        const okMime = (f.type || "").startsWith("audio/");
+        return okExt || okMime;
+      });
+      resolve(files);
+    };
+    input.addEventListener("change", handler);
+    setTimeout(() => input.click(), 50);
+  });
+}
+
+// ── Duplicate detection helpers (shared by single create + bulk import) ──
+
+/** Find existing versions whose fileName matches (case-insensitive).
+ *  Also matches stem (without extension) so "song.wav" matches "song.m4a".
+ *  Returns [{song, version}] — one hit per song max. */
+function _findFileNameDuplicates(fileName) {
+  if (!fileName) return [];
+  const lower = fileName.toLowerCase();
+  const stem = lower.replace(/\.[^.]+$/, "");
+  const hits = [];
+  const seenSongs = new Set();
+  for (const song of state.songs) {
+    if (seenSongs.has(song.id)) continue;
+    for (const v of (song.versions || [])) {
+      const vName = (v.fileName || "").toLowerCase();
+      const vOriginal = (v.originalFileName || "").toLowerCase();
+      // Exact match
+      if (vName === lower || vOriginal === lower) {
+        seenSongs.add(song.id);
+        hits.push({ song, version: v });
+        break;
+      }
+      // Stem match (without extension)
+      const vStem = vName.replace(/\.[^.]+$/, "");
+      const vOrigStem = vOriginal.replace(/\.[^.]+$/, "");
+      if (stem && vStem && (vStem === stem || vOrigStem === stem)) {
+        seenSongs.add(song.id);
+        hits.push({ song, version: v });
+        break;
+      }
+    }
+  }
+  return hits;
+}
+
+/** Find an existing song with the same title in the same project. Returns song or null */
+function _findSongNameDuplicate(title, project) {
+  if (!title || !project) return null;
+  const tLower = title.trim().toLowerCase();
+  const pLower = project.trim().toLowerCase();
+  return state.songs.find(s =>
+    (s.title || "").trim().toLowerCase() === tLower &&
+    (s.project || "").trim().toLowerCase() === pLower
+  ) || null;
+}
+
+/** Show a duplicate-file dialog. onContinue = proceed anyway, onGoToSong = navigate to the match */
+function _showDuplicateFileDialog(fileName, hits, { onContinue, onDismiss }) {
+  document.getElementById("dupFileDialog")?.remove();
+  document.getElementById("dupFileBackdrop")?.remove();
+
+  const backdrop = document.createElement("div");
+  backdrop.id = "dupFileBackdrop";
+  backdrop.className = "biModalBackdrop";
+
+  const dialog = document.createElement("div");
+  dialog.id = "dupFileDialog";
+  dialog.className = "biModal";
+  dialog.style.maxHeight = "70vh";
+
+  const matchRows = hits.map(h => {
+    const vLabel = h.version?.label || "song";
+    const verId = h.version?.id || "";
+    return `<div class="dupMatchRow" data-song-id="${h.song.id}" data-version-id="${verId}">
+      <div class="dupMatchTitle">${escapeHtml(h.song.title)}</div>
+      <div class="dupMatchSub">${escapeHtml(h.song.project || "")} · ${escapeHtml(vLabel)}</div>
+    </div>`;
+  }).join("");
+
+  dialog.innerHTML = `
+    <div class="biModalHeader">
+      <div class="biModalTitle">Possible Duplicate</div>
+      <div class="biModalSub">A file named <b>${escapeHtml(fileName)}</b> already exists:</div>
+    </div>
+    <div class="biModalBody" style="padding:8px 0;">
+      ${matchRows}
+    </div>
+    <div class="biModalActions">
+      <button class="biModalBtn biModalRemove" id="dupCancel">Cancel</button>
+      <button class="biModalBtn biModalDone" id="dupContinue">Import Anyway</button>
+    </div>
+  `;
+
+  document.body.appendChild(backdrop);
+  document.body.appendChild(dialog);
+
+  requestAnimationFrame(() => {
+    backdrop.classList.add("open");
+    dialog.classList.add("open");
+  });
+
+  const close = () => {
+    backdrop.classList.remove("open");
+    dialog.classList.remove("open");
+    setTimeout(() => { backdrop.remove(); dialog.remove(); }, 250);
+  };
+
+  backdrop.addEventListener("click", () => { close(); onDismiss?.(); });
+  dialog.querySelector("#dupCancel")?.addEventListener("click", () => { close(); onDismiss?.(); });
+
+  dialog.querySelector("#dupContinue")?.addEventListener("click", () => {
+    close();
+    onContinue?.();
+  });
+
+  dialog.querySelectorAll(".dupMatchRow").forEach(row => {
+    row.addEventListener("click", () => {
+      const songId = row.dataset.songId;
+      const versionId = row.dataset.versionId;
+      close();
+      onDismiss?.();
+      // Navigate to the matching song/version detail
+      navigateForward(() => {
+        currentTab = "songs";
+        songsView = "list";
+        selectedSongId = songId;
+        selectedVersionId = versionId || null;
+        setHeader("Song");
+        syncTabs();
+      });
+    });
+  });
+}
+
+/** Show a combined duplicate-file dialog for bulk import (multiple files may match).
+ *  allDups = [{ fileName, hits: [{song, version}] }]
+ */
+function _showBulkDuplicateFileDialog(allDups, { onContinue, onDismiss }) {
+  document.getElementById("dupFileDialog")?.remove();
+  document.getElementById("dupFileBackdrop")?.remove();
+
+  const backdrop = document.createElement("div");
+  backdrop.id = "dupFileBackdrop";
+  backdrop.className = "biModalBackdrop";
+
+  const dialog = document.createElement("div");
+  dialog.id = "dupFileDialog";
+  dialog.className = "biModal";
+  dialog.style.maxHeight = "70vh";
+
+  const matchSections = allDups.map(d => {
+    const rows = d.hits.map(h => {
+      const vLabel = h.version?.label || "song";
+      const verId = h.version?.id || "";
+      return `<div class="dupMatchRow" data-song-id="${h.song.id}" data-version-id="${verId}">
+        <div class="dupMatchTitle">${escapeHtml(h.song.title)}</div>
+        <div class="dupMatchSub">${escapeHtml(h.song.project || "")} · ${escapeHtml(vLabel)}</div>
+      </div>`;
+    }).join("");
+    return `<div style="padding:6px 20px 2px;font-size:12px;color:rgba(255,255,255,.35);font-weight:600;">${escapeHtml(d.fileName)}</div>${rows}`;
+  }).join("");
+
+  const fileWord = allDups.length === 1 ? "file" : "files";
+
+  dialog.innerHTML = `
+    <div class="biModalHeader">
+      <div class="biModalTitle">Possible Duplicates</div>
+      <div class="biModalSub">${allDups.length} ${fileWord} already uploaded. Tap a match to view it:</div>
+    </div>
+    <div class="biModalBody" style="padding:0 0 8px;max-height:40vh;overflow-y:auto;">
+      ${matchSections}
+    </div>
+    <div class="biModalActions">
+      <button class="biModalBtn biModalRemove" id="dupCancel">Cancel</button>
+      <button class="biModalBtn biModalDone" id="dupContinue">Import Anyway</button>
+    </div>
+  `;
+
+  document.body.appendChild(backdrop);
+  document.body.appendChild(dialog);
+
+  requestAnimationFrame(() => {
+    backdrop.classList.add("open");
+    dialog.classList.add("open");
+  });
+
+  const close = () => {
+    backdrop.classList.remove("open");
+    dialog.classList.remove("open");
+    setTimeout(() => { backdrop.remove(); dialog.remove(); }, 250);
+  };
+
+  backdrop.addEventListener("click", () => { close(); onDismiss?.(); });
+  dialog.querySelector("#dupCancel")?.addEventListener("click", () => { close(); onDismiss?.(); });
+
+  dialog.querySelector("#dupContinue")?.addEventListener("click", () => {
+    close();
+    onContinue?.();
+  });
+
+  dialog.querySelectorAll(".dupMatchRow").forEach(row => {
+    row.addEventListener("click", () => {
+      const songId = row.dataset.songId;
+      const versionId = row.dataset.versionId;
+      close();
+      onDismiss?.();
+      closeCreateOverlay();
+      navigateForward(() => {
+        currentTab = "songs";
+        songsView = "list";
+        selectedSongId = songId;
+        selectedVersionId = versionId || null;
+        setHeader("Song");
+        syncTabs();
+      });
+    });
+  });
+}
+
+/** Show a dialog when song name already exists in the project.
+ *  fromCreate=true: single create overlay (offer to go to the song to add a version)
+ */
+function _showDuplicateSongDialog(existingSong, { fromCreate } = {}) {
+  document.getElementById("dupSongDialog")?.remove();
+  document.getElementById("dupSongBackdrop")?.remove();
+
+  const backdrop = document.createElement("div");
+  backdrop.id = "dupSongBackdrop";
+  backdrop.className = "biModalBackdrop";
+
+  const dialog = document.createElement("div");
+  dialog.id = "dupSongDialog";
+  dialog.className = "biModal";
+
+  const vCount = (existingSong.versions || []).length;
+  const vLabel = `${vCount} version${vCount !== 1 ? "s" : ""}`;
+
+  dialog.innerHTML = `
+    <div class="biModalHeader">
+      <div class="biModalTitle">Song Already Exists</div>
+      <div class="biModalSub">
+        <b>${escapeHtml(existingSong.title)}</b> already exists in <b>${escapeHtml(existingSong.project || "")}</b> with ${vLabel}.
+      </div>
+    </div>
+    <div class="biModalBody" style="padding:12px 20px;">
+      <div class="dupWarnBanner">Maybe you want to add a new version instead?<br>Tap below to go to the song and add a version from there.</div>
+    </div>
+    <div style="padding:0 20px;">
+      <div class="dupMatchRow" id="dupGoToSong" style="border-radius:10px;background:rgba(255,255,255,.03);">
+        <div class="dupMatchTitle">${escapeHtml(existingSong.title)}</div>
+        <div class="dupMatchSub">${escapeHtml(existingSong.project || "")} · ${vLabel}</div>
+      </div>
+    </div>
+    <div class="biModalActions">
+      <button class="biModalBtn biModalRemove" id="dupSongCancel">Cancel</button>
+    </div>
+  `;
+
+  document.body.appendChild(backdrop);
+  document.body.appendChild(dialog);
+
+  requestAnimationFrame(() => {
+    backdrop.classList.add("open");
+    dialog.classList.add("open");
+  });
+
+  const close = () => {
+    backdrop.classList.remove("open");
+    dialog.classList.remove("open");
+    setTimeout(() => { backdrop.remove(); dialog.remove(); }, 250);
+  };
+
+  backdrop.addEventListener("click", close);
+  dialog.querySelector("#dupSongCancel")?.addEventListener("click", close);
+
+  dialog.querySelector("#dupGoToSong")?.addEventListener("click", () => {
+    close();
+    if (fromCreate) closeCreateOverlay();
+    navigateForward(() => {
+      currentTab = "songs";
+      songsView = "list";
+      selectedSongId = existingSong.id;
+      selectedVersionId = null;
+      setHeader("Song");
+      syncTabs();
+    });
+  });
+}
+
+// ── Bulk Import staging state ──
+// Each item: { id, file, title, project, existingSongId, existingSongTitle }
+let bulkStagingFiles = [];
+
+function openBulkImport() {
+  pickAudioFiles().then(files => {
+    if (!files.length) return;
+    const defaultProject = state.settings?.defaultProject || "";
+    bulkStagingFiles = files.map(f => ({
+      id: uid(),
+      file: f,
+      title: f.name.replace(/\.[^.]+$/, "").trim(),
+      project: defaultProject,
+      existingSongId: null,
+      existingSongTitle: null,
+    }));
+
+    // Check for file-name duplicates across all picked files
+    const allDups = [];
+    for (const f of files) {
+      const hits = _findFileNameDuplicates(f.name);
+      if (hits.length) allDups.push({ fileName: f.name, hits });
+    }
+
+    const proceedToStaging = () => {
+      closeCreateOverlay();
+      navigateForward(() => {
+        overlayView = "bulkImport";
+        setHeader(`Import (${bulkStagingFiles.length})`);
+        syncTabs();
+      });
+    };
+
+    if (allDups.length) {
+      // Show a combined duplicate dialog for all flagged files
+      _showBulkDuplicateFileDialog(allDups, {
+        onContinue: proceedToStaging,
+        onDismiss: () => { bulkStagingFiles = []; },
+      });
+    } else {
+      proceedToStaging();
+    }
+  });
+}
+
+function renderBulkImport() {
+  setHeader(`Import (${bulkStagingFiles.length})`);
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("collapseTitle");
+  const h1 = appEl?.querySelector(".titleblock h1");
+  if (h1) h1.style.opacity = "0";
+
+  if (!bulkStagingFiles.length) {
+    activeScreenEl.innerHTML = `<div class="setPage"><div class="setPageTitle">Import</div><div style="padding:24px 4px;opacity:.5;font-size:15px;">No files staged. Go back and pick files.</div></div>`;
+    _setBulkCollapseTitle();
+    return;
+  }
+
+  // Card layout — same span logic as Songs grid
+  const cardHtml = (item, span) => {
+    const spanStyle = span > 1 ? ` style="grid-column:span ${span}"` : "";
+    const fakeSong = { id: item.id, title: item.title, project: item.project, genre: "" };
+    const sizeMB = (item.file.size / 1024 / 1024).toFixed(1);
+    const ext = (item.file.name.match(/\.([^.]+)$/) || [, ""])[1].toUpperCase();
+    const versionOf = item.existingSongId
+      ? `+ version of ${escapeHtml(item.existingSongTitle || "song")}`
+      : "";
+    const artistLabel = item.project ? escapeHtml(item.project) : "No artist";
+
+    // Check for warnings
+    const fileDups = _findFileNameDuplicates(item.file.name);
+    const nameDup = !item.existingSongId ? _findSongNameDuplicate(item.title, item.project) : null;
+    const hasWarning = fileDups.length > 0 || nameDup;
+    const warningBorder = hasWarning ? ` style="border:1px solid rgba(251,191,36,.3);border-radius:14px;"` : "";
+
+    return `
+      <div class="songCard biCard" data-bi="${item.id}"${spanStyle}>
+        <div class="songCardStack"${warningBorder}>
+          <div class="songCardLayer songCardLayer2"></div>
+          <div class="songCardLayer songCardLayer1"></div>
+          <div class="songCardFront">
+            <div class="songCardArt">${coverSvg(fakeSong, { lite: true })}</div>
+          </div>
+        </div>
+        <div class="songCardInfo">
+          <div class="songCardTitleRow"><div class="songCardTitle">${escapeHtml(item.title)}</div></div>
+          <div class="songCardSub">${artistLabel}</div>
+          <div class="songCardSub" style="opacity:.4;font-size:11px;margin-top:1px;">${escapeHtml(item.file.name)} · ${ext} · ${sizeMB} MB</div>
+          ${versionOf ? `<div class="songCardSub" style="color:#4ecdc4;font-size:11px;margin-top:1px;">${versionOf}</div>` : ""}
+          ${hasWarning ? `<div class="songCardSub" style="color:#fbbf24;font-size:11px;margin-top:2px;">Possible duplicate</div>` : ""}
+        </div>
+      </div>
+    `;
+  };
+
+  const layoutCards = (items) => {
+    const count = items.length;
+    if (count === 1) return cardHtml(items[0], 3);
+    if (count === 2) return cardHtml(items[0], 2) + cardHtml(items[1], 1);
+    const remainder = count % 3;
+    if (remainder === 0) return items.map(i => cardHtml(i, 1)).join("");
+    const fullCount = count - (remainder === 1 ? 4 : remainder);
+    let html = items.slice(0, fullCount).map(i => cardHtml(i, 1)).join("");
+    const tail = items.slice(fullCount);
+    if (remainder === 2) {
+      html += cardHtml(tail[0], 2) + cardHtml(tail[1], 1);
+    } else {
+      html += cardHtml(tail[0], 2) + cardHtml(tail[1], 1);
+      html += cardHtml(tail[2], 1) + cardHtml(tail[3], 2);
+    }
+    return html;
+  };
+
+  activeScreenEl.innerHTML = `
+    <div class="setPage" style="padding-bottom:140px;">
+      <div class="setPageTitle">Import (${bulkStagingFiles.length})</div>
+      <div style="font-size:13px;color:rgba(255,255,255,.4);padding:0 2px 16px;">Tap a card to edit title, project, or add as a version to an existing song.</div>
+      <div class="songsList">${layoutCards(bulkStagingFiles)}</div>
+    </div>
+    <div class="biFooter">
+      <button class="biImportBtn" id="biStartImport">Import ${bulkStagingFiles.length} Song${bulkStagingFiles.length !== 1 ? "s" : ""}</button>
+    </div>
+  `;
+
+  // Wire card taps
+  activeScreenEl.querySelectorAll(".biCard[data-bi]").forEach(el => {
+    el.addEventListener("click", () => {
+      const id = el.dataset.bi;
+      const item = bulkStagingFiles.find(f => f.id === id);
+      if (item) openBulkEditSheet(item);
+    });
+  });
+
+  // Wire import button
+  $("#biStartImport")?.addEventListener("click", () => startBulkImport());
+
+  _setBulkCollapseTitle();
+}
+
+function _setBulkCollapseTitle() {
+  if (activeScreenEl._collapseTitleScroll) {
+    activeScreenEl.removeEventListener("scroll", activeScreenEl._collapseTitleScroll);
+    activeScreenEl._collapseTitleScroll = null;
+  }
+  const _screen = activeScreenEl;
+  const _sm = document.querySelector(".app.collapseTitle .titleblock h1");
+  if (!_sm) return;
+  requestAnimationFrame(() => {
+    const bt = _screen.querySelector(".setPageTitle");
+    if (!bt) return;
+    const topbarEl = document.querySelector(".topbar");
+    const screenTop = _screen.getBoundingClientRect().top;
+    const topbarBottom = topbarEl ? topbarEl.getBoundingClientRect().bottom : 80;
+    const fadeStart = bt.offsetTop - (topbarBottom - screenTop);
+    const fadeEnd = fadeStart + (bt.offsetHeight || 40);
+    const range = fadeEnd - fadeStart;
+    const onScroll = () => {
+      const progress = Math.min(1, Math.max(0, (_screen.scrollTop - fadeStart) / range));
+      _sm.style.opacity = progress;
+    };
+    _screen._collapseTitleScroll = onScroll;
+    _screen.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+  });
+}
+
+// ── Bulk edit bottom sheet ──
+// Collect ephemeral projects created during this staging session
+function _biEphemeralProjects() {
+  const real = new Set([
+    ...(state.settings?.defaultProject ? [state.settings.defaultProject.trim()] : []),
+    ...(state.projects || []).map(p => p.trim()).filter(Boolean),
+    ...state.songs.map(s => (s.project || "").trim()).filter(Boolean),
+  ]);
+  const ephemeral = new Set();
+  for (const f of bulkStagingFiles) {
+    if (f.project && !real.has(f.project)) ephemeral.add(f.project);
+  }
+  return { real: [...real].sort(), ephemeral: [...ephemeral].sort() };
+}
+
+// Collect ephemeral songs created during this staging session
+function _biEphemeralSongs() {
+  // "Songs" from other staged files that will become new songs (not versions)
+  return bulkStagingFiles
+    .filter(f => !f.existingSongId && f.title)
+    .map(f => ({ id: f.id, title: f.title, project: f.project || "", _staged: true }));
+}
+
+function openBulkEditSheet(item) {
+  document.getElementById("biEditModal")?.remove();
+  document.getElementById("biEditBackdrop")?.remove();
+
+  const { real: realProjects, ephemeral: ephemeralProjects } = _biEphemeralProjects();
+  const allProjects = [...realProjects, ...ephemeralProjects];
+
+  // Project cards HTML (same style as Create overlay)
+  const projCardsHTML = allProjects.map(p => {
+    const isSelected = item.project === p;
+    const isEphemeral = ephemeralProjects.includes(p);
+    const songCount = isEphemeral
+      ? bulkStagingFiles.filter(f => f.project === p).length
+      : state.songs.filter(s => (s.project || "").trim() === p).length;
+    const countLabel = isEphemeral ? `${songCount} staged` : `${songCount} song${songCount !== 1 ? "s" : ""}`;
+    return `
+      <button class="coProjCard${isSelected ? " selected" : ""}" data-biproj="${escapeHtml(p)}">
+        <div class="coProjArt">${isEphemeral
+          ? `<div style="width:100%;height:100%;background:rgba(78,205,196,.1);border-radius:inherit;display:flex;align-items:center;justify-content:center;color:#4ecdc4;font-size:11px;font-weight:700;">NEW</div>`
+          : getProjectCoverArt(p)}</div>
+        <div class="coProjName">${escapeHtml(p)}</div>
+        <div class="coProjCount">${countLabel}</div>
+      </button>`;
+  }).join("");
+
+  const sizeMB = (item.file.size / 1024 / 1024).toFixed(1);
+  const ext = (item.file.name.match(/\.([^.]+)$/) || [, ""])[1].toUpperCase();
+
+  // Pre-check for file-name duplicates
+  const fileDups = _findFileNameDuplicates(item.file.name);
+  const fileDupHTML = fileDups.length
+    ? `<div class="dupWarnBanner" style="margin:8px 20px 0;">
+        This file name already exists. Tap to view:
+        ${fileDups.map(h => `<div class="dupMatchRow" data-dup-song="${h.song.id}" data-dup-ver="${h.version?.id || ""}" style="padding:6px 0;border:none;">
+          <span class="dupMatchTitle" style="font-size:13px;">${escapeHtml(h.song.title)}</span>
+          <span class="dupMatchSub" style="font-size:11px;margin-left:4px;">${escapeHtml(h.version?.label || "")}</span>
+        </div>`).join("")}
+      </div>`
+    : "";
+
+  const backdrop = document.createElement("div");
+  backdrop.id = "biEditBackdrop";
+  backdrop.className = "biModalBackdrop";
+
+  const modal = document.createElement("div");
+  modal.id = "biEditModal";
+  modal.className = "biModal";
+  modal.innerHTML = `
+    <div class="biModalHeader">
+      <div class="biModalTitle">${escapeHtml(item.file.name)}</div>
+      <div class="biModalSub">${ext} · ${sizeMB} MB</div>
+    </div>
+    ${fileDupHTML}
+
+    <div class="biModalBody">
+      <div class="biField">
+        <div class="biFieldLabel">Title</div>
+        <input class="setInput" id="biEditTitle" type="text" value="${escapeHtml(item.title)}" />
+        <div id="biDupWarn"></div>
+      </div>
+
+      <div class="biField">
+        <div class="biFieldLabel">Project</div>
+        <div class="coProjScroll" style="margin-top:6px;">
+          ${projCardsHTML}
+          <button class="coProjCard coProjNew" data-biproj="__new__">
+            <div class="coProjArt"><div style="width:100%;height:100%;background:rgba(255,255,255,.06);border-radius:inherit;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.4);font-size:24px;font-weight:300">+</div></div>
+            <div class="coProjName">New Project</div>
+            <div class="coProjCount">Create new</div>
+          </button>
+        </div>
+        <div id="biNewProjWrap" style="display:none;margin-top:8px;">
+          <input class="setInput" id="biNewProject" type="text" placeholder="New project name" />
+        </div>
+      </div>
+
+      <div class="biField">
+        <div class="biFieldLabel">Add as version to existing song</div>
+        <div class="biSongPicker" id="biSongPicker">
+          ${item.existingSongId
+            ? `<div class="biPickedSong">
+                <span>${escapeHtml(item.existingSongTitle || "Song")}</span>
+                <button class="biPickedClear" id="biClearSong">&times;</button>
+              </div>`
+            : `<button class="biPickSongBtn" id="biOpenSongPicker">Select a song…</button>`
+          }
+        </div>
+      </div>
+    </div>
+
+    <div class="biModalActions">
+      <button class="biModalBtn biModalRemove" id="biRemoveFile">Remove</button>
+      <button class="biModalBtn biModalDone" id="biSaveEdit">Done</button>
+    </div>
+  `;
+
+  document.body.appendChild(backdrop);
+  document.body.appendChild(modal);
+
+  // Track selected project within modal
+  let selectedProject = item.project || "";
+  let newProjectMode = false;
+
+  requestAnimationFrame(() => {
+    backdrop.classList.add("open");
+    modal.classList.add("open");
+  });
+
+  const closeModal = () => {
+    backdrop.classList.remove("open");
+    modal.classList.remove("open");
+    setTimeout(() => { backdrop.remove(); modal.remove(); }, 250);
+  };
+
+  backdrop.addEventListener("click", closeModal);
+
+  // ── Live duplicate song-name validation ──
+  const _checkBiDupName = () => {
+    const title = (modal.querySelector("#biEditTitle")?.value || "").trim();
+    const proj = newProjectMode
+      ? (modal.querySelector("#biNewProject")?.value || "").trim()
+      : selectedProject;
+    const warnEl = modal.querySelector("#biDupWarn");
+    const doneBtn = modal.querySelector("#biSaveEdit");
+    if (!warnEl || !doneBtn) return;
+
+    // Skip check if this item is set as a version of an existing song
+    if (item.existingSongId) {
+      warnEl.innerHTML = "";
+      doneBtn.disabled = false;
+      return;
+    }
+
+    const dup = _findSongNameDuplicate(title, proj);
+    if (dup) {
+      const vCount = (dup.versions || []).length;
+      warnEl.innerHTML = `<div class="dupWarnBanner">
+        A song named <b>${escapeHtml(dup.title)}</b> already exists in <b>${escapeHtml(dup.project || "")}</b> (${vCount} version${vCount !== 1 ? "s" : ""}).
+        <br>Consider adding this as a <a id="biDupAddVersion">new version</a> of that song instead.
+      </div>`;
+      doneBtn.disabled = true;
+      warnEl.querySelector("#biDupAddVersion")?.addEventListener("click", (e) => {
+        e.preventDefault();
+        // Auto-assign as version of that existing song
+        item.existingSongId = dup.id;
+        item.existingSongTitle = dup.title;
+        // Update picker display
+        const pickerEl = modal.querySelector("#biSongPicker");
+        if (pickerEl) {
+          pickerEl.innerHTML = `
+            <div class="biPickedSong">
+              <span>${escapeHtml(dup.title)}</span>
+              <button class="biPickedClear" id="biClearSong">&times;</button>
+            </div>`;
+          pickerEl.querySelector("#biClearSong")?.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            item.existingSongId = null;
+            item.existingSongTitle = null;
+            pickerEl.innerHTML = `<button class="biPickSongBtn" id="biOpenSongPicker">Select a song…</button>`;
+            pickerEl.querySelector("#biOpenSongPicker")?.addEventListener("click", openSongPickerPopup);
+            _checkBiDupName();
+          });
+        }
+        _checkBiDupName(); // re-check — now it's a version, so warning clears
+      });
+    } else {
+      warnEl.innerHTML = "";
+      doneBtn.disabled = false;
+    }
+  };
+
+  // Run initial check
+  requestAnimationFrame(_checkBiDupName);
+
+  // Watch title input
+  modal.querySelector("#biEditTitle")?.addEventListener("input", _checkBiDupName);
+
+  // Wire file-dup links to navigate to song/version
+  modal.querySelectorAll("[data-dup-song]").forEach(row => {
+    row.addEventListener("click", () => {
+      const songId = row.dataset.dupSong;
+      const verId = row.dataset.dupVer;
+      closeModal();
+      navigateForward(() => {
+        currentTab = "songs";
+        songsView = "list";
+        selectedSongId = songId;
+        selectedVersionId = verId || null;
+        setHeader("Song");
+        syncTabs();
+      });
+    });
+  });
+
+  // Project card selection
+  modal.querySelectorAll("[data-biproj]").forEach(card => {
+    card.addEventListener("click", () => {
+      const val = card.dataset.biproj;
+      if (val === "__new__") {
+        newProjectMode = true;
+        modal.querySelector("#biNewProjWrap").style.display = "";
+        setTimeout(() => modal.querySelector("#biNewProject")?.focus(), 50);
+      } else {
+        newProjectMode = false;
+        modal.querySelector("#biNewProjWrap").style.display = "none";
+        selectedProject = val;
+      }
+      // Update selected state visually
+      modal.querySelectorAll("[data-biproj]").forEach(c => c.classList.remove("selected"));
+      card.classList.add("selected");
+      _checkBiDupName(); // re-validate after project change
+    });
+  });
+
+  // Re-validate when new project name changes
+  modal.querySelector("#biNewProject")?.addEventListener("input", _checkBiDupName);
+
+  // Song picker — opens a sub-popup with filterable list
+  const openSongPickerPopup = () => {
+    document.getElementById("biSongListPopup")?.remove();
+
+    // Combine real songs + ephemeral songs from other staged files
+    const ephemeralSongs = _biEphemeralSongs().filter(s => s.id !== item.id);
+    const allSongs = [
+      ...ephemeralSongs.map(s => ({ ...s, _label: "staged" })),
+      ...state.songs.map(s => ({ id: s.id, title: s.title, project: s.project || "", _label: "" })),
+    ];
+
+    const popup = document.createElement("div");
+    popup.id = "biSongListPopup";
+    popup.className = "biSongPopup";
+    popup.innerHTML = `
+      <div class="biSongPopupHeader">
+        <input class="setInput" id="biSongFilter" type="text" placeholder="Search songs…" />
+      </div>
+      <div class="biSongPopupList" id="biSongPopupList"></div>
+      <button class="biSongPopupCancel" id="biSongPopupCancel">Cancel</button>
+    `;
+    modal.appendChild(popup);
+
+    const listEl = popup.querySelector("#biSongPopupList");
+    const filterInput = popup.querySelector("#biSongFilter");
+
+    const renderList = (q) => {
+      const lower = (q || "").toLowerCase();
+      const filtered = lower
+        ? allSongs.filter(s => (s.title || "").toLowerCase().includes(lower))
+        : allSongs;
+      listEl.innerHTML = filtered.slice(0, 30).map(s => `
+        <div class="biSongPopupRow" data-spid="${s.id}">
+          <div class="biSongPopupTitle">${escapeHtml(s.title)}</div>
+          <div class="biSongPopupMeta">${escapeHtml(s.project)}${s._label ? ` · <span style="color:#4ecdc4">${s._label}</span>` : ""}</div>
+        </div>
+      `).join("") || `<div style="padding:16px;text-align:center;opacity:.4;font-size:13px;">No matches</div>`;
+
+      listEl.querySelectorAll(".biSongPopupRow").forEach(row => {
+        row.addEventListener("click", () => {
+          const sid = row.dataset.spid;
+          const picked = allSongs.find(s => s.id === sid);
+          if (picked) {
+            item.existingSongId = picked.id;
+            item.existingSongTitle = picked.title;
+            // Update the picker display
+            const pickerEl = modal.querySelector("#biSongPicker");
+            if (pickerEl) {
+              pickerEl.innerHTML = `
+                <div class="biPickedSong">
+                  <span>${escapeHtml(picked.title)}${picked._label ? ` <span style="color:#4ecdc4;font-size:11px;">(${picked._label})</span>` : ""}</span>
+                  <button class="biPickedClear" id="biClearSong">&times;</button>
+                </div>
+              `;
+              pickerEl.querySelector("#biClearSong")?.addEventListener("click", (e) => {
+                e.stopPropagation();
+                item.existingSongId = null;
+                item.existingSongTitle = null;
+                pickerEl.innerHTML = `<button class="biPickSongBtn" id="biOpenSongPicker">Select a song…</button>`;
+                pickerEl.querySelector("#biOpenSongPicker")?.addEventListener("click", openSongPickerPopup);
+              });
+            }
+          }
+          popup.remove();
+        });
+      });
+    };
+
+    filterInput?.addEventListener("input", (e) => renderList(e.target.value));
+    renderList("");
+    setTimeout(() => filterInput?.focus(), 100);
+
+    popup.querySelector("#biSongPopupCancel")?.addEventListener("click", () => popup.remove());
+  };
+
+  modal.querySelector("#biOpenSongPicker")?.addEventListener("click", openSongPickerPopup);
+
+  // Clear song selection
+  modal.querySelector("#biClearSong")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    item.existingSongId = null;
+    item.existingSongTitle = null;
+    const pickerEl = modal.querySelector("#biSongPicker");
+    if (pickerEl) {
+      pickerEl.innerHTML = `<button class="biPickSongBtn" id="biOpenSongPicker">Select a song…</button>`;
+      pickerEl.querySelector("#biOpenSongPicker")?.addEventListener("click", openSongPickerPopup);
+    }
+    _checkBiDupName(); // re-validate after clearing version assignment
+  });
+
+  // Remove file
+  modal.querySelector("#biRemoveFile")?.addEventListener("click", () => {
+    bulkStagingFiles = bulkStagingFiles.filter(f => f.id !== item.id);
+    closeModal();
+    if (!bulkStagingFiles.length) {
+      goBack({ animate: true });
+    } else {
+      renderBulkImport();
+    }
+  });
+
+  // Save
+  modal.querySelector("#biSaveEdit")?.addEventListener("click", () => {
+    item.title = (modal.querySelector("#biEditTitle")?.value || "").trim() || item.title;
+    if (newProjectMode) {
+      item.project = (modal.querySelector("#biNewProject")?.value || "").trim();
+    } else {
+      item.project = selectedProject;
+    }
+    closeModal();
+    renderBulkImport();
+  });
+}
+
+// ── Bulk import execution ──
+async function startBulkImport() {
+  if (!bulkStagingFiles.length) return;
+
+  const items = [...bulkStagingFiles];
+  const total = items.length;
+  bulkStagingFiles = [];
+
+  // Phase 1: Save all blobs to IndexedDB — show a blocking overlay
+  const saveOverlay = document.createElement("div");
+  saveOverlay.id = "biSaveOverlay";
+  saveOverlay.style.cssText = "position:fixed;inset:0;z-index:999999;background:var(--bg,#0d0d0f);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:32px;";
+  saveOverlay.innerHTML = `
+    <div style="font-size:22px;font-weight:700;color:#fff;">Preparing Import</div>
+    <div id="biSaveStatus" style="font-size:14px;color:rgba(255,255,255,.45);text-align:center;">Saving files locally… 0/${total}</div>
+    <div style="width:200px;height:3px;background:rgba(255,255,255,.08);border-radius:2px;overflow:hidden;">
+      <div id="biSaveBar" style="height:100%;width:0%;background:#4ecdc4;border-radius:2px;transition:width .2s ease;"></div>
+    </div>
+    <div style="font-size:12px;color:rgba(255,255,255,.25);margin-top:4px;">Please keep the app open</div>
+  `;
+  document.body.appendChild(saveOverlay);
+
+  const saveStatusEl = saveOverlay.querySelector("#biSaveStatus");
+  const saveBarEl = saveOverlay.querySelector("#biSaveBar");
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const idbKey = `import:${item.id}`;
+    const pct = Math.round(((i + 1) / total) * 100);
+    if (saveStatusEl) saveStatusEl.textContent = `Saving files locally… ${i + 1}/${total}`;
+    if (saveBarEl) saveBarEl.style.width = pct + "%";
+
+    try {
+      await audioPut({
+        id: idbKey,
+        name: item.file.name || "audio",
+        type: item.file.type || "audio/*",
+        size: item.file.size || 0,
+        blob: item.file,
+        createdAt: nowStamp(),
+      });
+    } catch (e) {
+      console.warn(`[BulkImport] Failed to save "${item.title}" locally:`, e);
+    }
+    // Build the queue entry — keep File ref for direct upload (won't survive restart,
+    // but IDB fallback handles that case)
+    importQueue.push({
+      id: item.id,
+      title: item.title,
+      project: item.project || "Project",
+      existingSongId: item.existingSongId || null,
+      idbKey,
+      _file: item.file,  // in-memory only — direct upload, no IDB round-trip
+      fileName: item.file.name || "audio",
+      fileType: item.file.type || "audio/*",
+      fileSize: item.file.size || 0,
+      status: "waiting",
+      progress: 0,
+      ts: Date.now(),
+    });
+  }
+  _saveImportQueue();
+  _updateNotifBadge();
+
+  // Dismiss overlay
+  saveOverlay.remove();
+
+  // Navigate to Songs list
+  overlayView = null;
+  currentTab = "songs";
+  songsView = "list";
+  setHeader("Songs");
+  syncTabs();
+  render();
+
+  // Phase 2: Upload from IndexedDB (resumable)
+  await _processImportQueue();
+}
+
+// ── Staggered art generation for bulk imports ──
+// Limits concurrent API calls and adds delays to avoid rate limiting.
+async function _bulkGenerateArt(songIds) {
+  const MAX_CONCURRENT = 1;
+  const DELAY_MS = 12000; // 12s between starting each art request (6 req/min limit)
+  const queue = [...songIds];
+  let active = 0;
+  const results = { success: 0, failed: 0 };
+
+  return new Promise((resolve) => {
+    function next() {
+      if (!queue.length && active === 0) return resolve(results);
+      while (queue.length && active < MAX_CONCURRENT) {
+        const songId = queue.shift();
+        const song = state.songs.find(s => s.id === songId);
+        if (!song || song.coverImageUrl || song.coverPath) {
+          results.success++;
+          next();
+          continue;
+        }
+        active++;
+        generatingArtSongs.add(songId);
+        coverCache.clear();
+        render();
+        generateArtForSong(song)
+          .then(() => { coverCache.clear(); saveState(); results.success++; })
+          .catch(e => { console.warn(`[BulkArt] Failed for "${song.title}":`, e); results.failed++; })
+          .finally(() => {
+            active--;
+            generatingArtSongs.delete(songId);
+            coverCache.clear();
+            render();
+            // Stagger the next request
+            setTimeout(next, DELAY_MS);
+          });
+        // Don't start the next one immediately — wait for the delay
+        return;
+      }
+    }
+    next();
+  });
+}
+
+// ── Post-import health check ──
+// Verifies audio, sync, and cover art for all recently imported songs.
+// Retries missing art generation for any songs that failed.
+async function _postImportHealthCheck(songIds) {
+  const issues = [];
+  const missingArt = [];
+
+  for (const id of songIds) {
+    const song = state.songs.find(s => s.id === id);
+    if (!song) continue;
+
+    // Check audio
+    const hasAudio = (song.versions || []).some(v => v.audioPath);
+    if (!hasAudio) issues.push(`"${song.title}": no cloud audio`);
+
+    // Check cover art
+    if (!song.coverImageUrl && !song.coverPath) {
+      missingArt.push(id);
+    }
+  }
+
+  // Retry missing art with staggered queue
+  if (missingArt.length) {
+    console.log(`[PostImport] ${missingArt.length} song(s) missing art — retrying`);
+    await _bulkGenerateArt(missingArt);
+  }
+
+  if (issues.length) {
+    console.warn("[PostImport] Issues found:", issues);
+  }
+  console.log(`[PostImport] Health check complete: ${songIds.length} songs checked, ${issues.length} issues, ${missingArt.length} art retries`);
+}
+
+// Process any pending import queue items — called on startup and after staging.
+// Lean path: upload blob directly to Supabase Storage (no compression),
+// save locally under version fileId, one supabasePushState at the end.
+let _importQueueRunning = false;
+async function _processImportQueue() {
+  if (_importQueueRunning) return;
+  _importQueueRunning = true;
+
+  const pending = importQueue.filter(q => q.status === "waiting" || q.status === "uploading");
+  let imported = 0, failed = 0;
+
+  // Pre-create song objects in state so art gen can find them immediately.
+  // The upload loop will reuse these (it checks state.songs.find first).
+  const newSongIds = [];
+  for (const qItem of pending) {
+    if (qItem.existingSongId) continue;
+    if (state.songs.find(s => s.id === qItem.id)) { newSongIds.push(qItem.id); continue; }
+    const song = {
+      id: qItem.id, title: qItem.title, project: qItem.project,
+      genre: "", sprint: state.settings?.defaultSprint || "Unsorted",
+      instrumentation: "", collaborators: "", status: "Idea", stuckState: "Active",
+      nextAction: "", vibes: "", lyrics: "", notes: "", versions: [],
+      createdAt: nowStamp(), updatedAt: nowStamp(),
+    };
+    ensureProjectInState(song.project);
+    state.songs.unshift(song);
+    newSongIds.push(qItem.id);
+  }
+  if (newSongIds.length) saveState();
+
+  // Start art generation concurrently with uploads (staggered, 12s apart).
+  // Songs exist in state now, so _bulkGenerateArt can find them.
+  const artPromise = newSongIds.length
+    ? _bulkGenerateArt(newSongIds)
+    : Promise.resolve({ success: 0, failed: 0 });
+
+  for (const qItem of pending) {
+    _updateImportQueueItem(qItem.id, { status: "uploading", progress: 5, statusText: "Reading file…" });
+
+    // Prefer in-memory File ref (direct from phone) — fall back to IDB on resume
+    let blob = qItem._file || null;
+    if (!blob) {
+      try {
+        const rec = await audioGet(qItem.idbKey);
+        blob = rec?.blob;
+      } catch {}
+    }
+
+    if (!blob) {
+      console.warn(`[BulkImport] No blob for "${qItem.title}" (no File ref, no IDB entry)`);
+      _updateImportQueueItem(qItem.id, { status: "failed", progress: 0, statusText: "File not found" });
+      failed++;
+      continue;
+    }
+
+    _updateImportQueueItem(qItem.id, { progress: 15, statusText: "Creating song…" });
+
+    try {
+      let song, v;
+
+      if (qItem.existingSongId) {
+        song = getSong(qItem.existingSongId) || state.songs.find(s => s.id === qItem.existingSongId);
+        if (!song) { _updateImportQueueItem(qItem.id, { status: "failed", progress: 0, statusText: "Song not found" }); failed++; continue; }
+        v = createVersion(song);
+      } else {
+        song = state.songs.find(s => s.id === qItem.id);
+        if (!song) {
+          song = {
+            id: qItem.id, title: qItem.title, project: qItem.project,
+            genre: "", sprint: state.settings?.defaultSprint || "Unsorted",
+            instrumentation: "", collaborators: "", status: "Idea", stuckState: "Active",
+            nextAction: "", vibes: "", lyrics: "", notes: "", versions: [],
+            createdAt: nowStamp(), updatedAt: nowStamp(),
+          };
+          ensureProjectInState(song.project);
+          state.songs.unshift(song);
+        }
+        if ((song.versions || []).some(ver => ver.audioPath)) {
+          imported++;
+          _updateImportQueueItem(qItem.id, { status: "done", progress: 100, statusText: "Imported" });
+          continue;
+        }
+        v = song.versions.length ? song.versions[0] : createVersion(song);
+      }
+
+      _updateImportQueueItem(qItem.id, { progress: 25, statusText: "Saving locally…" });
+
+      // Set version metadata
+      const audioId = uid();
+      v.fileId = audioId;
+      v.fileName = qItem.fileName;
+      v.fileType = qItem.fileType;
+      v.fileSize = qItem.fileSize;
+      song.updatedAt = nowStamp();
+
+      // Save blob locally under the version's fileId (for local playback) — best-effort
+      try {
+        await audioPut({
+          id: audioId, name: qItem.fileName, type: qItem.fileType,
+          size: qItem.fileSize, blob, createdAt: nowStamp(),
+        });
+      } catch (e) {
+        console.warn(`[BulkImport] Local save failed for "${qItem.title}" (quota?) — cloud upload continues:`, e);
+      }
+      saveState();
+      render();
+
+      _updateImportQueueItem(qItem.id, { progress: 40, statusText: "Uploading to cloud…" });
+
+      // Upload directly to Supabase Storage from File ref — no IDB round-trip needed
+      const result = await supabaseUploadAudio({
+        blob: new File([blob], qItem.fileName, { type: qItem.fileType || "audio/*" }),
+        songId: song.id, versionId: v.id, fileName: qItem.fileName,
+      });
+
+      if (result.success) {
+        v.audioPath = result.audioPath;
+        saveState();
+      } else {
+        console.warn(`[BulkImport] Upload failed for "${qItem.title}":`, result.error);
+      }
+
+      _updateImportQueueItem(qItem.id, { progress: 85, statusText: "Cleaning up…" });
+
+      // Clean up import blob from IDB (real audio is under version fileId now)
+      try { const db = await openAudioDb(); const tx = db.transaction(AUDIO_STORE, "readwrite"); tx.objectStore(AUDIO_STORE).delete(qItem.idbKey); db.close(); } catch {}
+
+      // Art generation runs concurrently via _bulkGenerateArt (started above)
+
+      imported++;
+      _updateImportQueueItem(qItem.id, { status: "done", progress: 100, statusText: "Imported" });
+
+      render();
+    } catch (e) {
+      console.warn(`[BulkImport] Failed for "${qItem.title}":`, e);
+      _updateImportQueueItem(qItem.id, { status: "failed", progress: 0, statusText: "Failed" });
+      failed++;
+    }
+  }
+
+  // One push at the end — all songs + versions in a single batch
+  // NOTE: _importQueueRunning stays true until after the final push so that
+  // incrementalSyncFromSupabase() won't delete the newly-created songs
+  // (cloud doesn't have them yet).
+  if (imported) {
+    await supabasePushState(state).catch(console.warn);
+  }
+
+  // Toast summary
+  if (imported || failed) {
+    _updateNotifBadge();
+    toast(failed ? `Imported ${imported}, ${failed} failed` : `${imported} song${imported !== 1 ? "s" : ""} imported`);
+  }
+
+  // Wait for concurrent art generation to finish
+  const artResults = await artPromise;
+  if (artResults.failed) {
+    console.log(`[BulkImport] Art gen: ${artResults.success} OK, ${artResults.failed} failed — running health check`);
+  }
+
+  // Post-import health check — verify audio, sync, and cover art; retry missing art
+  const allImportedIds = pending.filter(q => !q.existingSongId).map(q => q.id);
+  if (allImportedIds.length) {
+    await _postImportHealthCheck(allImportedIds);
+  }
+
+  // Final push to capture any art paths added by health check
+  if (imported) {
+    await supabasePushState(state).catch(console.warn);
+  }
+
+  // All pushes are done — safe to let incremental sync run normally
+  _importQueueRunning = false;
+
+  // Keep all items — they'll be cleaned up after 24h by _pruneImportQueue()
+  _saveImportQueue();
+  _updateNotifBadge();
+  if (drawerView === "alerts") _renderImportQueueDOM();
+}
+
 function normalizeAudioLink(link) {
   if (!link) return link;
 
@@ -2589,59 +3883,74 @@ function normalizeAudioLink(link) {
   return out;
 }
 
+// Set of fileIds whose local blobs are known-bad (truncated/corrupt) — skip to cloud
+const _badLocalBlobs = new Set();
+
 async function getPlayableUrlForVersion(songId, versionId) {
   const song = getSong(songId);
   const v = getVersion(song, versionId);
   if (!song || !v) return null;
 
-  // Priority 1: Local file (fileId in IndexedDB)
-  if (v.fileId) {
-    const cacheKey = `file:${v.fileId}`;
-    if (audioUrlCache.has(cacheKey)) return audioUrlCache.get(cacheKey);
-
-    const rec = await audioGet(v.fileId);
-    if (rec?.blob) {
-      const url = URL.createObjectURL(rec.blob);
-      audioUrlCache.set(cacheKey, url);
-      return url;
-    }
-    // Local file missing — fall through to other sources
-  }
-
-  // Priority 2: Local audio (localAudioId — legacy path)
-  if (v.localAudioId) {
-    const url = await getLocalObjectUrl(v.localAudioId);
-    if (url) return url;
-  }
-
-  // Priority 3a: IndexedDB-cached cloud blob — instant, no network
+  // Priority 1a: Cloud audio — cached locally in IndexedDB (instant, no network)
   if (v.audioPath) {
     const cacheKey = `supa:${v.audioPath}`;
     if (audioUrlCache.has(cacheKey)) return audioUrlCache.get(cacheKey);
 
     const cached = await audioGet(`supa:${v.audioPath}`);
-    if (cached?.blob) {
+    if (cached?.blob?.size) {
       const url = URL.createObjectURL(cached.blob);
       audioUrlCache.set(cacheKey, url);
       return url;
     }
   }
 
-  // Priority 3b: Live fetch from Supabase Storage
+  // Priority 1b: Cloud audio — live fetch from Supabase Storage
   if (v.audioPath) {
     const blob = await supabaseFetchAudioBlob(v.audioPath);
-    if (blob) {
+    if (blob?.size) {
       const url = URL.createObjectURL(blob);
       audioUrlCache.set(`supa:${v.audioPath}`, url);
       putAudioBlob({ id: `supa:${v.audioPath}`, blob, name: v.fileName || v.label || "audio", type: v.fileType || blob.type || "audio/*", size: blob.size }).catch(() => {});
       return url;
     }
+    // Cloud file is missing or empty — clear the bad audioPath so isPlayable() reflects reality
+    console.warn(`[Player] Cloud audio empty/missing for "${song.title}" — clearing audioPath`);
+    supabaseDeleteAudio(v.audioPath).catch(() => {});
+    v.audioPath = null;
+    saveState();
   }
 
-  // Priority 4: Direct URL link
+  // Priority 2: Direct URL link
   if (v.link) {
     return normalizeAudioLink(v.link);
   }
+
+  // Priority 3: Local file (fileId in IndexedDB) — fallback only when cloud audio
+  // hasn't been uploaded yet. This keeps local blobs usable while the background
+  // upload sweep pushes them to the cloud.
+  if (v.fileId && !_badLocalBlobs.has(v.fileId)) {
+    const cacheKey = `file:${v.fileId}`;
+    const cached = audioUrlCache.get(cacheKey);
+    if (cached) return cached;
+
+    const rec = await audioGet(v.fileId);
+    if (rec?.blob) {
+      if (v.fileSize && rec.blob.size < v.fileSize * 0.5) {
+        console.warn(`[Player] Local blob for ${v.fileId} is ${rec.blob.size}B vs expected ${v.fileSize}B — skipping`);
+      } else {
+        const url = URL.createObjectURL(rec.blob);
+        audioUrlCache.set(cacheKey, url);
+        return url;
+      }
+    }
+  }
+
+  // Priority 4: Local audio (localAudioId — legacy path)
+  if (v.localAudioId) {
+    const url = await getLocalObjectUrl(v.localAudioId);
+    if (url) return url;
+  }
+
   return null;
 }
 
@@ -2736,7 +4045,12 @@ async function backupAllAudioToCloud() {
     if (!blob) { failed++; continue; }
 
     try {
+      // Don't upload while audio is playing — causes playback glitches
+      if (!globalAudio.paused) await waitForAudioIdle();
+      await yieldToMain();
       const compressed = await compressAudioForUpload(blob);
+      await yieldToMain();
+      if (!globalAudio.paused) await waitForAudioIdle();
       const fileName = v.fileName || v.label || "audio";
       const result = await supabaseUploadAudio({
         blob: new File([compressed], fileName, { type: compressed.type || v.fileType || "audio/*" }),
@@ -2744,6 +4058,7 @@ async function backupAllAudioToCloud() {
         versionId: v.id,
         fileName,
       });
+      await yieldToMain();
       if (result.success) {
         v.audioPath = result.audioPath;
         uploaded++;
@@ -2767,6 +4082,70 @@ async function backupAllAudioToCloud() {
     : `All ${uploaded} tracks backed up to cloud`;
   toast(msg);
   return { uploaded, failed };
+}
+
+// Auto-sweep: upload any local-only audio to Supabase cloud storage.
+// Runs silently in the background on startup — no toasts unless something fails.
+// This ensures every version with local audio eventually gets an audioPath,
+// so all devices see the same playable songs.
+async function ensureAllAudioInCloud() {
+  const toUpload = [];
+  for (const song of (state.songs || [])) {
+    for (const v of (song.versions || [])) {
+      if (v.audioPath) continue; // already in cloud
+      if (!v.fileId && !v.localAudioId) continue; // no local audio to upload
+      toUpload.push({ song, v });
+    }
+  }
+  if (!toUpload.length) return;
+
+  console.log(`[AutoSync] ${toUpload.length} version(s) missing cloud audio — uploading`);
+  let uploaded = 0, failed = 0;
+
+  for (const { song, v } of toUpload) {
+    // Don't upload while audio is playing
+    if (!globalAudio.paused) await waitForAudioIdle();
+    await yieldToMain();
+
+    let blob = null;
+    for (const id of [v.fileId, v.localAudioId].filter(Boolean)) {
+      try { const rec = await audioGet(id); if (rec?.blob) { blob = rec.blob; break; } } catch {}
+    }
+    if (!blob) { failed++; continue; }
+
+    try {
+      const compressed = await compressAudioForUpload(blob);
+      await yieldToMain();
+      if (!globalAudio.paused) await waitForAudioIdle();
+      const fileName = v.fileName || v.label || "audio";
+      const result = await supabaseUploadAudio({
+        blob: new File([compressed], fileName, { type: compressed.type || v.fileType || "audio/*" }),
+        songId: song.id,
+        versionId: v.id,
+        fileName,
+      });
+      if (result.success) {
+        v.audioPath = result.audioPath;
+        uploaded++;
+      } else {
+        console.warn(`[AutoSync] Upload failed for "${song.title}":`, result.error);
+        failed++;
+      }
+    } catch (e) {
+      console.warn(`[AutoSync] Upload error for "${song.title}":`, e);
+      failed++;
+    }
+    await yieldToMain();
+  }
+
+  if (uploaded) {
+    saveState();
+    await supabasePushState(state).catch(console.warn);
+    console.log(`[AutoSync] Uploaded ${uploaded} track(s) to cloud`);
+  }
+  if (failed) {
+    toast(`${failed} track${failed > 1 ? "s" : ""} failed to sync to cloud`);
+  }
 }
 
 // Sync debug: check each version's audio availability
@@ -2794,11 +4173,49 @@ function getSongSyncColor(song) {
   return best;
 }
 
+// Shared badge icons — purple outbound (I shared), green inbound (shared with me)
+function sharedBadge(song) {
+  if (song._shared) {
+    // Inbound — shared with me (green left arrow)
+    return `<span class="sharedBadge sharedBadgeIn" title="Shared with you"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 5 5 12 12 19"/></svg></span>`;
+  }
+  // Outbound — I shared this song or its project
+  const mySongIds = new Set((sharedData.mySongs || []).map(ms => ms.songId));
+  const myProjNames = new Set((sharedData.myProjects || []).map(mp => mp.projectName));
+  if (mySongIds.has(song.id) || myProjNames.has((song.project || "").trim())) {
+    return `<span class="sharedBadge sharedBadgeOut" title="Shared by you"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></span>`;
+  }
+  return "";
+}
+
+// Project-level shared badge — also checks if any individual songs in this project are shared
+function sharedBadgeProject(projectName) {
+  const myProjNames = new Set((sharedData.myProjects || []).map(mp => mp.projectName));
+  const mySongProjs = new Set((sharedData.mySongs || []).map(ms => ms.projectName).filter(Boolean));
+  const sharedProjNames = new Set((sharedData.projects || []).map(sp => sp.projectName));
+  const sharedSongProjs = new Set([
+    ...(sharedData.songs || []).map(ss => (ss.song?.project || "").trim()).filter(Boolean),
+    ...(sharedData.projects || []).flatMap(sp => (sp.songs || []).map(s => (s.project || "").trim())).filter(Boolean),
+  ]);
+  if (myProjNames.has(projectName) || mySongProjs.has(projectName)) {
+    return `<span class="sharedBadge sharedBadgeOut" title="Shared by you"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></span>`;
+  }
+  if (sharedProjNames.has(projectName) || sharedSongProjs.has(projectName)) {
+    return `<span class="sharedBadge sharedBadgeIn" title="Shared with you"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 5 5 12 12 19"/></svg></span>`;
+  }
+  return "";
+}
+
 // Returns an HTML dot string for debug overlay (empty string if debug off)
 function syncDot(song) {
-  if (!window.RIFFBANK_DEBUG_SYNC) return "";
   const color = getSongSyncColor(song);
-  const label = color === "green" ? "Synced" : color === "yellow" ? "Local only" : "No audio";
+  // Always show red dot for songs with no audio — users need to know
+  if (color === "red") {
+    return `<span class="syncDot syncDot--red" title="No audio"></span>`;
+  }
+  // Debug-only for green/yellow states
+  if (!window.RIFFBANK_DEBUG_SYNC) return "";
+  const label = color === "green" ? "Synced" : "Local only";
   return `<span class="syncDot syncDot--${color}" title="${label}"></span>`;
 }
 
@@ -2875,7 +4292,10 @@ function playerItems(data) {
   for (const s of (data.songs || [])) {
     if (!(s.versions || []).length) continue;
     // One row per song — always the active version (or first as fallback)
-    const vv = s.versions.find(v => v.isActive) || s.versions[0];
+    // Prefer active version, but only if it has audio; otherwise pick first playable
+    const vv = (s.versions.find(v => v.isActive && isPlayable(v))
+             || s.versions.find(v => isPlayable(v))
+             || s.versions[0]);
     const v = ensureVersionFlags(vv);
     items.push({
       songId: s.id,
@@ -3002,7 +4422,9 @@ let songsBackTarget = null; // e.g. "projects" | "collabs"
 let drawerOpen = false;
 let overlayView = null;
 let friendProfileId = null; // user ID for public profile view
+let settingsView = null; // "account" | "cloud" | "library" | "art" | "debug" | "danger" | null
 let collabMode = false; // true when drilling into shared content from Collab tab
+let collabPill = "projects"; // "projects" | "friends" | "messages"
 
 // ---------------------
 // Drawer open/close
@@ -3358,15 +4780,28 @@ let _knownFriendRequestIds = new Set(
   _loadNotifications().filter(n => n.friendshipId).map(n => n.friendshipId)
 );
 
-// Request notification permission (called once on first message interaction)
+// Request notification permission — must be called from a user gesture (tap/click)
+// on iOS PWAs. Calling during boot is silently ignored.
 let _notifPermissionAsked = false;
 async function requestNotificationPermission() {
   if (_notifPermissionAsked) return;
-  _notifPermissionAsked = true;
   if (!("Notification" in window)) return;
-  if (Notification.permission === "default") {
-    await Notification.requestPermission();
-  }
+  if (Notification.permission !== "default") { _notifPermissionAsked = true; return; }
+  _notifPermissionAsked = true;
+  await Notification.requestPermission();
+}
+
+// Attach notification permission request to first user tap anywhere in the app.
+// This satisfies iOS's user-gesture requirement.
+function _attachNotifPermissionToGesture() {
+  if (!("Notification" in window) || Notification.permission !== "default") return;
+  const handler = () => {
+    requestNotificationPermission();
+    document.removeEventListener("click", handler, true);
+    document.removeEventListener("touchend", handler, true);
+  };
+  document.addEventListener("click", handler, true);
+  document.addEventListener("touchend", handler, true);
 }
 
 // Show a local push notification for new messages
@@ -3384,6 +4819,26 @@ function _showMessageNotification(newCount) {
         icon: "/icon-1024.png",
         badge: "/icon-1024.png",
         tag: "riffbank-new-message",
+        renotify: true,
+        data: { url: "/" },
+      });
+    }).catch(() => {});
+  }
+}
+
+// Show an OS-level push notification via ServiceWorker (if permitted)
+// title: notification title (e.g. sender name), body: message text, icon: profile pic URL
+function _showPushNotification(body, tag, { title, icon } = {}) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  if (document.visibilityState === "visible") return; // don't spam if app is open
+  const reg = navigator.serviceWorker?.controller ? navigator.serviceWorker.ready : null;
+  if (reg) {
+    reg.then(r => {
+      r.showNotification(title || "RiffBank", {
+        body,
+        icon: icon || "/icon-1024.png",
+        badge: "/icon-1024.png",
+        tag: tag || "riffbank-notification",
         renotify: true,
         data: { url: "/" },
       });
@@ -3467,12 +4922,413 @@ setInterval(syncMessageBadges, 10000);
 // Shared data polling disabled — fetch on-demand from Collab tab only
 
 // Also check when app comes back to foreground
+let _lastForegroundSync = 0;
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     syncMessageBadges();
-    // refreshSharedData on visibility — disabled to prevent connection issues
+    // Re-pull from Supabase when app comes to foreground (cross-device sync).
+    // Throttle to at most once per 30 seconds to avoid hammering the DB.
+    const now = Date.now();
+    if (now - _lastForegroundSync > 30_000) {
+      _lastForegroundSync = now;
+      incrementalSyncFromSupabase().catch(console.warn);
+    }
   }
 });
+
+// Shared flag: true while PTR has visually displaced content (blocks elastic overscroll)
+let _ptrBusy = false;
+
+// ── Pull-to-refresh ──────────────────────────────────────
+(() => {
+  const THRESHOLD = 40;        // px to pull before triggering refresh
+  const MAX_PULL = 80;         // px visual cap
+  const SPINNER_SIZE = 32;
+  let _ptrActive = false;
+  let _ptrStartY = 0;
+  let _ptrDist = 0;
+  let _ptrRefreshing = false;
+
+  // Create the spinner element
+  const spinner = document.createElement("div");
+  spinner.className = "ptrSpinner";
+  spinner.innerHTML = `<svg viewBox="0 0 24 24" width="${SPINNER_SIZE}" height="${SPINNER_SIZE}"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="50 14"/></svg>`;
+  document.querySelector(".app")?.appendChild(spinner);
+
+  // Elements that stay pinned (not pulled down)
+  const PINNED_SELS = ".songsTitleRow, .songsHead, .songsBar, .sdFab, .homeTopbar, .homeGreet, .playerHead, .setPageTitle, .songsPageTitle, .collabPillBar";
+  // Subset used to measure where the spinner should appear (top headers only, not FABs etc.)
+  const HEADER_SELS = ".songsTitleRow, .songsHead, .songsBar, .homeTopbar, .homeGreet, .playerHead, .setPageTitle, .songsPageTitle, .collabPillBar";
+
+  // Get only the content elements that should move (skip pinned)
+  function _getContentEls() {
+    if (!activeScreenEl) return [];
+    const els = [];
+    for (const child of activeScreenEl.children) {
+      if (child.matches?.(PINNED_SELS)) continue;
+      els.push(child);
+    }
+    return els;
+  }
+
+  // Get the bottom edge of the lowest header element (for spinner positioning)
+  function _getHeaderBottom() {
+    if (!activeScreenEl) return 0;
+    let bottom = 0;
+    for (const child of activeScreenEl.children) {
+      if (child.matches?.(HEADER_SELS)) {
+        const rect = child.getBoundingClientRect();
+        if (rect.bottom > bottom) bottom = rect.bottom;
+      }
+    }
+    return bottom || activeScreenEl.getBoundingClientRect().top;
+  }
+
+  function _setContentOffset(px) {
+    for (const el of _getContentEls()) {
+      el.style.transform = px ? `translateY(${px}px)` : "";
+    }
+  }
+
+  function _resetContent(animate) {
+    for (const el of _getContentEls()) {
+      if (animate) {
+        el.style.transition = "transform .3s cubic-bezier(.2,.9,.3,1)";
+        el.style.transform = "";
+        const ref = el;
+        const onEnd = () => { ref.style.transition = ""; ref.removeEventListener("transitionend", onEnd); };
+        ref.addEventListener("transitionend", onEnd);
+      } else {
+        el.style.transition = "";
+        el.style.transform = "";
+      }
+    }
+  }
+
+  // Cascading shimmer on song cards after refresh
+  function _shimmerCards() {
+    if (!activeScreenEl) return;
+    const cards = activeScreenEl.querySelectorAll(".songCard, .songsGroup, .hCard, .collabSectionContent > *, .songRow, .pCard");
+    cards.forEach((el, i) => {
+      el.style.animationDelay = `${i * 50}ms`;
+      el.classList.add("ptrShimmer");
+    });
+    setTimeout(() => {
+      cards.forEach(el => { el.classList.remove("ptrShimmer"); el.style.animationDelay = ""; });
+    }, cards.length * 50 + 600);
+  }
+
+  // Screens where pull-to-refresh is allowed (root list views only)
+  const PTR_SCREENS = new Set(["screen-home", "screen-songs", "screen-player", "screen-collab", "screen-settings", "screen-drawer"]);
+
+  document.addEventListener("touchstart", (e) => {
+    if (_ptrRefreshing) return;
+    // Block PTR while full player is open or being dismissed
+    if (isFullPlayerOpen || document.getElementById("fullPlayer")) return;
+    if (!activeScreenEl || activeScreenEl.scrollTop > 1) return;
+    // Only allow PTR on root list screens (not detail views)
+    if (!PTR_SCREENS.has(activeScreenEl.id)) return;
+    // Block on detail views (song detail, version detail, project detail, etc.)
+    if (selectedSongId || selectedVersionId || projectDetailScreen || overlayView) return;
+    if (drawerView && drawerView !== "projects" && drawerView !== "releases") return;
+    const t = e.changedTouches?.[0];
+    if (!t || t.clientX <= 30) return;
+    _ptrStartY = t.clientY;
+    _ptrActive = true;
+    _ptrDist = 0;
+  }, { passive: true });
+
+  let _headerBase = 0; // cached header bottom for spinner positioning
+
+  document.addEventListener("touchmove", (e) => {
+    if (!_ptrActive || _ptrRefreshing) return;
+    const t = e.changedTouches?.[0];
+    if (!t) return;
+    const dy = t.clientY - _ptrStartY;
+    if (dy < 0) {
+      // User reversed direction — cancel PTR for this touch entirely
+      if (_ptrDist > 0) {
+        _resetContent(false);
+        spinner.style.opacity = "0";
+        spinner.style.transform = `translate(-50%, 0) scale(0)`;
+        spinner.classList.remove("ptrReady");
+      }
+      _ptrDist = 0;
+      _ptrActive = false;
+      _ptrBusy = false;
+      return;
+    }
+    // Prevent native overscroll so only our elastic effect moves content
+    e.preventDefault();
+    _ptrBusy = true;
+    // Cache header bottom on first move
+    if (_ptrDist === 0) _headerBase = _getHeaderBottom();
+    // Dampen the pull (sqrt curve for elastic rubbery feel)
+    _ptrDist = Math.min(MAX_PULL, Math.sqrt(dy) * 4);
+    const progress = Math.min(1, _ptrDist / THRESHOLD);
+    // Elastic: push only content down (headers stay pinned)
+    _setContentOffset(_ptrDist);
+    // Spinner grows in the gap below the header
+    const spinnerTop = _headerBase + _ptrDist / 2 - SPINNER_SIZE / 2;
+    const scale = Math.min(1, progress);
+    spinner.style.transform = `translate(-50%, ${spinnerTop}px) scale(${scale})`;
+    spinner.style.opacity = String(progress);
+    spinner.querySelector("svg").style.transform = `rotate(${_ptrDist * 4}deg)`;
+    if (_ptrDist >= THRESHOLD) spinner.classList.add("ptrReady");
+    else spinner.classList.remove("ptrReady");
+  }, { passive: false });
+
+  document.addEventListener("touchend", () => {
+    if (!_ptrActive) return;
+    _ptrActive = false;
+    if (_ptrDist >= THRESHOLD && !_ptrRefreshing) {
+      _ptrRefreshing = true;
+      spinner.classList.add("ptrRefreshing");
+      spinner.classList.remove("ptrReady");
+      // Hold content down at threshold while refreshing
+      _setContentOffset(THRESHOLD);
+      const spinnerTop = _headerBase + THRESHOLD / 2 - SPINNER_SIZE / 2;
+      spinner.style.transition = "transform .2s ease";
+      spinner.style.transform = `translate(-50%, ${spinnerTop}px) scale(1)`;
+      spinner.style.opacity = "1";
+      setTimeout(() => { spinner.style.transition = ""; }, 200);
+      Promise.all([
+        incrementalSyncFromSupabase().catch(console.warn),
+        refreshSharedData().then(() => { _collabFriendsCache = null; _collabConvosCache = null; render(); }).catch(() => {}),
+      ]).finally(() => {
+        _ptrRefreshing = false;
+        _ptrBusy = false;
+        spinner.classList.remove("ptrRefreshing");
+        // Snap spinner away
+        spinner.style.transition = "transform .3s ease, opacity .3s ease";
+        spinner.style.transform = `translate(-50%, 0) scale(0)`;
+        spinner.style.opacity = "0";
+        setTimeout(() => { spinner.style.transition = ""; }, 300);
+        // render() replaced the DOM, so clear transforms on the new elements
+        _resetContent(false);
+        // Ensure scroll stays at top (PTR only fires from top)
+        if (activeScreenEl) activeScreenEl.scrollTop = 0;
+        // Shimmer the cards
+        setTimeout(_shimmerCards, 100);
+      });
+    } else {
+      // Cancel — snap back
+      spinner.style.transition = "transform .3s cubic-bezier(.2,.9,.3,1), opacity .3s ease";
+      spinner.style.transform = `translate(-50%, 0) scale(0)`;
+      spinner.style.opacity = "0";
+      spinner.classList.remove("ptrReady");
+      setTimeout(() => { spinner.style.transition = ""; }, 300);
+      _resetContent(true);
+    }
+    _ptrDist = 0;
+    _ptrBusy = false;
+  }, { passive: true });
+})();
+
+// ── Bottom elastic overscroll (iOS-style rubber band) ────────────────
+(() => {
+  const MAX_BOUNCE = 80;
+  let _ebActive = false;   // true once finger is past the bottom edge
+  let _ebAnchorY = 0;      // clientY where bottom was first hit
+  let _ebDist = 0;
+  let _ebTracking = false;  // true while any eligible touch is down
+  let _ebLastY = 0;
+  let _ebBouncing = false;  // true during momentum bounce animation
+  const EB_SCREENS = new Set(["screen-songs", "screen-player", "screen-collab", "screen-settings", "screen-drawer"]);
+
+  // Velocity tracking for momentum bounce
+  let _ebVSamples = [];     // { t, y } recent touch samples
+
+  function _isAtBottom(el) {
+    return el.scrollTop + el.clientHeight >= el.scrollHeight - 2;
+  }
+
+  const EB_SKIP = ".sdFab";
+  function _getElasticEls() {
+    if (!activeScreenEl) return [];
+    const els = [];
+    for (const child of activeScreenEl.children) {
+      if (child.matches?.(EB_SKIP)) continue;
+      els.push(child);
+    }
+    return els;
+  }
+
+  function _isEligible() {
+    if (_ptrBusy) return false;
+    if (!activeScreenEl || !EB_SCREENS.has(activeScreenEl.id)) return false;
+    if (selectedSongId || selectedVersionId || projectDetailScreen || overlayView) return false;
+    if (drawerView && drawerView !== "projects" && drawerView !== "releases") return false;
+    if (isFullPlayerOpen || document.getElementById("fullPlayer")) return false;
+    return true;
+  }
+
+  function _springBack() {
+    if (_ebDist <= 0) return;
+    for (const el of _getElasticEls()) {
+      el.style.transition = "transform .4s cubic-bezier(.2,1,.3,1)";
+      el.style.transform = "";
+      const ref = el;
+      const onEnd = () => { ref.style.transition = ""; ref.removeEventListener("transitionend", onEnd); };
+      ref.addEventListener("transitionend", onEnd);
+    }
+    _ebDist = 0;
+  }
+
+  // Momentum bounce: triggered when a fast scroll slams into the bottom
+  function _momentumBounce(velocity) {
+    if (_ebBouncing || !_isEligible()) return;
+    // velocity = px/ms (positive = scrolling down toward bottom)
+    // Only bounce if fast enough
+    if (velocity < 0.8) return;
+    _ebBouncing = true;
+    const bouncePx = Math.min(MAX_BOUNCE, Math.sqrt(velocity * 100) * 4);
+    const els = _getElasticEls();
+    // Phase 1: quick stretch
+    for (const el of els) {
+      el.style.transition = `transform .15s cubic-bezier(.1,.6,.3,1)`;
+      el.style.transform = `translateY(${-bouncePx}px)`;
+    }
+    // Phase 2: spring back
+    setTimeout(() => {
+      for (const el of els) {
+        el.style.transition = "transform .45s cubic-bezier(.2,1,.3,1)";
+        el.style.transform = "";
+        const ref = el;
+        const onEnd = () => {
+          ref.style.transition = "";
+          ref.removeEventListener("transitionend", onEnd);
+          _ebBouncing = false;
+        };
+        ref.addEventListener("transitionend", onEnd);
+      }
+      // Safety: clear bouncing flag even if transitionend doesn't fire
+      setTimeout(() => { _ebBouncing = false; }, 500);
+    }, 150);
+  }
+
+  // Detect momentum scroll hitting bottom
+  let _ebPrevScrollTop = 0;
+  let _ebPrevScrollTime = 0;
+  let _ebTouchDown = false;
+
+  document.addEventListener("touchstart", (e) => {
+    _ebTouchDown = true;
+    _ebBouncing = false; // cancel any in-progress bounce if user touches
+    const t = e.changedTouches?.[0];
+    if (!t || t.clientX <= 30) { _ebTracking = false; return; }
+    // Always track the touch — eligibility is checked in touchmove
+    // so elastic can activate mid-touch after PTR releases
+    _ebTracking = true;
+    _ebActive = false;
+    _ebDist = 0;
+    _ebLastY = t.clientY;
+    _ebVSamples = [{ t: Date.now(), y: t.clientY }];
+    // If eligible and already at bottom, activate immediately
+    if (_isEligible() && _isAtBottom(activeScreenEl)) {
+      _ebActive = true;
+      _ebAnchorY = t.clientY;
+    }
+  }, { passive: true });
+
+  document.addEventListener("touchmove", (e) => {
+    if (!_ebTracking) return;
+    // Check eligibility on every move so elastic can activate after PTR releases mid-touch
+    if (!_isEligible()) {
+      if (_ebDist > 0) { _ebDist = 0; for (const el of _getElasticEls()) el.style.transform = ""; }
+      _ebActive = false;
+      return;
+    }
+    const t = e.changedTouches?.[0];
+    if (!t) return;
+    const now = Date.now();
+    _ebLastY = t.clientY;
+
+    // Track velocity samples (keep last 5)
+    _ebVSamples.push({ t: now, y: t.clientY });
+    if (_ebVSamples.length > 5) _ebVSamples.shift();
+
+    // Not yet at bottom — check if we just arrived
+    if (!_ebActive) {
+      if (_isAtBottom(activeScreenEl)) {
+        // Just hit the bottom mid-gesture! Start elastic from here
+        _ebActive = true;
+        _ebAnchorY = t.clientY;
+        _ebDist = 0;
+      }
+      return;
+    }
+
+    // We're in elastic territory
+    const dy = _ebAnchorY - t.clientY; // positive = pulling further past bottom
+    if (dy <= 0) {
+      // User reversed — reset elastic but stay active
+      if (_ebDist > 0) {
+        _ebDist = 0;
+        for (const el of _getElasticEls()) el.style.transform = "";
+      }
+      // Update anchor so elastic restarts smoothly if they reverse again
+      _ebAnchorY = t.clientY;
+      return;
+    }
+    // Verify still at bottom (user might scroll content back up)
+    if (!_isAtBottom(activeScreenEl)) {
+      _ebActive = false;
+      _ebDist = 0;
+      for (const el of _getElasticEls()) el.style.transform = "";
+      return;
+    }
+    e.preventDefault();
+    _ebDist = Math.min(MAX_BOUNCE, Math.sqrt(dy) * 4);
+    for (const el of _getElasticEls()) {
+      el.style.transform = `translateY(${-_ebDist}px)`;
+    }
+  }, { passive: false });
+
+  document.addEventListener("touchend", () => {
+    _ebTouchDown = false;
+    if (!_ebTracking) return;
+    _ebTracking = false;
+    _ebActive = false;
+    _springBack();
+
+    // Compute release velocity for momentum tracking
+    if (_ebVSamples.length >= 2 && activeScreenEl) {
+      const first = _ebVSamples[0];
+      const last = _ebVSamples[_ebVSamples.length - 1];
+      const dt = last.t - first.t;
+      if (dt > 0) {
+        const vel = (first.y - last.y) / dt; // px/ms, positive = scrolling down
+        if (vel > 0.3) {
+          // User was flicking down — set up scroll listener for momentum hit
+          _ebPrevScrollTop = activeScreenEl.scrollTop;
+          _ebPrevScrollTime = Date.now();
+        }
+      }
+    }
+    _ebVSamples = [];
+  }, { passive: true });
+
+  // Listen for scroll events to detect momentum hitting the bottom
+  document.getElementById("appScreens")?.addEventListener("scroll", () => {
+    if (_ebTouchDown || _ebBouncing || !activeScreenEl) return;
+    if (!_isEligible()) return;
+    const now = Date.now();
+    const st = activeScreenEl.scrollTop;
+    const dt = now - _ebPrevScrollTime;
+
+    if (_isAtBottom(activeScreenEl) && dt > 0 && dt < 300) {
+      // Estimate velocity from recent scroll delta
+      const scrollDelta = st - _ebPrevScrollTop;
+      if (scrollDelta > 0) {
+        const vel = scrollDelta / dt; // px/ms
+        _momentumBounce(vel);
+      }
+    }
+    _ebPrevScrollTop = st;
+    _ebPrevScrollTime = now;
+  }, { passive: true, capture: true });
+})();
 
 function openSalSheet() {
   // Remove any existing Sal sheet
@@ -3603,6 +5459,9 @@ document.querySelectorAll(".tab").forEach((btn) => {
     if (targetTab === "player") {
       playerScreen = "list";
     }
+    if (targetTab === "collab") {
+      collabPill = "projects";
+    }
 
     if (targetTab === "home") {
       if (screens.home) screens.home.scrollTop = 0;
@@ -3671,21 +5530,8 @@ audioPickerEl?.addEventListener("change", async (e) => {
     const v = getVersion(song, versionId);
     if (!song || !v) return toast("Couldn’t find that version 😅");
 
-    const id = uid();
-    await putAudioBlob({
-      id,
-      blob: file,
-      name: file.name,
-      type: file.type,
-      size: file.size,
-    });
-
-    v.localAudioId = id;
-    v.originalFileName = file.name || "";
-    song.updatedAt = nowStamp();
-    saveState();
-
-    toast("Imported ✅");
+    toast("Uploading to cloud…");
+    await attachSharedAudio(song, v, file, file.name || "audio", file.type || "audio/*", file.size || 0);
     render(); // refresh UI
   } catch (err) {
     console.error(err);
@@ -3728,6 +5574,8 @@ function goBack({ animate = false } = {}) {
       lyricsEditSongId = restoreState.lyricsEditSongId ?? null;
       collabMode = restoreState.collabMode ?? false;
       songsFromCollab = restoreState.songsFromCollab ?? false;
+      settingsView = restoreState.settingsView ?? null;
+      collabPill = restoreState.collabPill ?? "projects";
       // Going back to home resets songs scroll so next visit starts fresh
       if (restoreState.currentTab === "home" && !restoreState.drawerView) songsListScrollTop = 0;
       setHeader(restoreState.headerTitle);
@@ -3797,17 +5645,11 @@ document.addEventListener("touchstart", (e) => {
   const t = e.changedTouches?.[0];
   if (!t) return;
 
-// Collab sidebar close gesture (sidebar open, touch anywhere)
-if (_collabSidebarOpen && currentTab === "collab" && !projectDetailScreen && !selectedSongId && !overlayView) {
-  _sidebarTouchStart(t);
-  return;
-}
-
 // Left-edge gesture
 if (!drawerOpen && t.clientX <= 24) {
   // Player has nothing to go back to; bare home/collab root has nothing to go back to
   if (currentTab === "player") return;
-  if (currentTab === "collab" && !projectDetailScreen && !selectedSongId && !overlayView) { _sidebarTouchStart(t); return; }
+  if (currentTab === "collab" && !projectDetailScreen && !selectedSongId && !overlayView) return;
   if (currentTab === "home" && !drawerView && !overlayView) return;
 
   touchTracking = true;
@@ -4329,14 +6171,85 @@ function advanceToPrevTrack({ render: doRender = false } = {}) {
   return true;
 }
 
-globalAudio?.addEventListener("ended", () => {
+// Track short-play detection: if a track "ends" suspiciously fast, the local blob
+// may be truncated. Try cloud audio before advancing. Prevents infinite short-play loops.
+let _shortPlayCount = 0;
+let _shortPlayTrack = null;
+globalAudio?.addEventListener("ended", async () => {
+  const now = state.player?.nowPlaying;
+  const dur = globalAudio.duration;
+  const ct = globalAudio.currentTime;
+  const trackKey = now ? `${now.songId}:${now.versionId}` : null;
+  console.log(`[Player] ENDED — dur=${dur?.toFixed(1)}s currentTime=${ct?.toFixed(1)}s track=${trackKey}`);
+
+  // Guard: ignore spurious "ended" events (common with blob URLs on Safari/iOS).
+  // Case 1: known duration and currentTime far from the end
+  if (Number.isFinite(dur) && dur > 10 && Number.isFinite(ct) && ct < dur - 1.5) {
+    console.warn(`[Player] Spurious ended event — currentTime ${ct.toFixed(1)}s far from duration ${dur.toFixed(1)}s, ignoring`);
+    return;
+  }
+  // Case 2: audio is still actively playing (not paused, not truly ended)
+  if (!globalAudio.paused && !globalAudio.ended) {
+    console.warn(`[Player] Spurious ended event — audio still playing (paused=${globalAudio.paused} ended=${globalAudio.ended}), ignoring`);
+    return;
+  }
+
+  // Detect suspiciously short playback (< 10s) — likely truncated local blob
+  if (now && Number.isFinite(dur) && dur < 10) {
+    if (_shortPlayTrack !== trackKey) { _shortPlayCount = 0; _shortPlayTrack = trackKey; }
+    _shortPlayCount++;
+
+    if (_shortPlayCount <= 2) {
+      // Flag local blob as bad so getPlayableUrlForVersion skips it and tries cloud
+      const song = getSong(now.songId);
+      const v = song ? getVersion(song, now.versionId) : null;
+      if (v?.fileId) {
+        _badLocalBlobs.add(v.fileId);
+        audioUrlCache.delete(`file:${v.fileId}`);
+      }
+      console.warn(`[Player] Track ended in ${dur.toFixed(1)}s — possible truncated blob, retrying from cloud...`);
+      _clearAudioCacheForNowPlaying();
+      await playNowPlaying({ autoplay: true });
+      return;
+    }
+    // Gave up — stop looping on this broken track
+    console.warn(`[Player] Track keeps ending early, stopping`);
+    toast("This track may be corrupted — try re-uploading");
+    syncMiniPlayerUI();
+    return;
+  }
+
+  // Normal end — reset short-play counter and advance
+  _shortPlayCount = 0;
+  _shortPlayTrack = null;
   if (!advanceToNextTrack({ render: fullPlayerOpen })) syncMiniPlayerUI();
 });
 
 // Auto-skip on audio load/decode errors so playback doesn't silently stop
+let _errorSkipTrack = null; // guard: don't repeatedly error-skip the same track
 globalAudio?.addEventListener("error", () => {
   const now = state.player?.nowPlaying;
   if (!now) return;
+  const trackKey = `${now.songId}:${now.versionId}`;
+  const errCode = globalAudio.error?.code;
+  const errMsg = globalAudio.error?.message;
+  console.log(`[Player] ERROR — code=${errCode} msg=${errMsg} track=${trackKey}`);
+
+  // Guard: if audio is still actively playing, this is a spurious error
+  // (e.g., secondary resource fetch failed while primary buffer is fine)
+  if (!globalAudio.paused && globalAudio.currentTime > 0) {
+    console.warn(`[Player] Ignoring error — audio still playing at ${globalAudio.currentTime.toFixed(1)}s`);
+    return;
+  }
+
+  if (_errorSkipTrack === trackKey) {
+    // Already tried skipping this track — stop to avoid infinite loop
+    console.warn(`[Player] Repeated error on same track ${trackKey}, stopping`);
+    toast("Can't play this track right now");
+    syncMiniPlayerUI();
+    return;
+  }
+  _errorSkipTrack = trackKey;
   console.warn(`[Player] Audio error for ${now.songId}, skipping...`);
   // Clear the broken cached URL so retry can re-fetch from source
   _clearAudioCacheForNowPlaying();
@@ -4347,17 +6260,27 @@ globalAudio?.addEventListener("error", () => {
 });
 
 // Audio stalled mid-playback (common on iOS when blob URL expires after backgrounding)
-// Retry once by re-fetching the audio from IndexedDB/cloud
-let _stallRetried = false;
-globalAudio?.addEventListener("stalled", () => {
-  if (_stallRetried || !state.player?.nowPlaying) return;
+// Retry once PER TRACK by re-fetching the audio from IndexedDB/cloud
+let _stallRetriedTrack = null; // "songId:versionId" of the track we already retried
+globalAudio?.addEventListener("stalled", async () => {
+  const now = state.player?.nowPlaying;
+  if (!now) return;
   if (globalAudio.paused) return; // don't retry if intentionally paused
+  // Blob URLs have the entire file in memory — they can't truly stall.
+  // Browsers (especially Safari) fire spurious stalled events for blob sources.
+  if (globalAudio.src?.startsWith("blob:")) return;
+  const trackKey = `${now.songId}:${now.versionId}`;
+  if (_stallRetriedTrack === trackKey) return; // already retried this track — don't loop
   console.warn("[Player] Audio stalled — retrying from source...");
-  _stallRetried = true;
+  _stallRetriedTrack = trackKey;
+  const savedTime = globalAudio.currentTime || 0;
   _clearAudioCacheForNowPlaying();
-  playNowPlaying({ autoplay: true });
+  await playNowPlaying({ autoplay: true });
+  // Restore playback position so it doesn't restart from 0
+  if (savedTime > 1 && Number.isFinite(globalAudio.duration) && savedTime < globalAudio.duration) {
+    try { globalAudio.currentTime = savedTime; } catch {}
+  }
 });
-globalAudio?.addEventListener("playing", () => { _stallRetried = false; });
 
 function _clearAudioCacheForNowPlaying() {
   const now = state.player?.nowPlaying;
@@ -4527,29 +6450,9 @@ function renderSheet() {
       // If user picked a file, create v1 with audio attached
       if (_sheetAudioFile) {
         const v = createVersion(song);
-        const audioId = uid();
-        v.fileId = audioId;
-        v.fileName = _sheetAudioFile.name || "audio";
-        v.fileType = _sheetAudioFile.type || "audio/*";
-        v.fileSize = _sheetAudioFile.size || 0;
-        song.updatedAt = nowStamp();
         saveState();
-        toast("Created with audio 🎸");
-
-        // IndexedDB + cloud upload both run in background (non-blocking)
-        audioPut({
-          id: audioId,
-          name: _sheetAudioFile.name || "audio",
-          type: _sheetAudioFile.type || "audio/*",
-          size: _sheetAudioFile.size || 0,
-          blob: _sheetAudioFile,
-          createdAt: nowStamp(),
-        }).then(() => {
-          attachSharedAudioCloud(song, v, _sheetAudioFile, _sheetAudioFile.name || "audio", _sheetAudioFile.type || "audio/*");
-        }).catch(e => {
-          console.warn("[audioPut bg] failed:", e);
-          toast("Local save failed");
-        });
+        toast("Uploading to cloud…");
+        await attachSharedAudio(song, v, _sheetAudioFile, _sheetAudioFile.name || "audio", _sheetAudioFile.type || "audio/*", _sheetAudioFile.size || 0);
       } else {
         saveState();
         toast("Created 🎸");
@@ -4737,10 +6640,6 @@ function renderSheet() {
         </button>
         ${toggleLabel ? `<button class="sheetChoice" id="sdmToggleCover">${escapeHtml(toggleLabel)}</button>` : ""}
         <button class="sheetChoice" id="sdmGenArt" ${canGenArt ? "" : "disabled"}>${escapeHtml(artLabel)}</button>
-        <button class="sheetChoice" id="sdmShare">
-          Share Song
-          <span class="sub">send to a collaborator</span>
-        </button>
         <button class="sheetChoice" id="sdmDelete" style="background: rgba(255,92,119,.12); border-color: rgba(255,92,119,.25);">
           Delete song
           <span class="sub">this can't be undone</span>
@@ -4820,11 +6719,6 @@ function renderSheet() {
       closeSheet();
       render();
       toast(song.coverSource === "user" ? "Using your photo" : "Using AI art");
-    });
-
-    $("#sdmShare")?.addEventListener("click", () => {
-      closeSheet();
-      shareInviteSong(song.id);
     });
 
     $("#sdmDelete")?.addEventListener("click", async () => {
@@ -4921,6 +6815,7 @@ function renderSheet() {
       <div class="sheetForm" style="gap:10px; margin-top:12px">
         <button class="sheetChoice" id="vmPlay" ${playable ? "" : "disabled"}>Play</button>
         <button class="sheetChoice" id="vmQueue" ${playable ? "" : "disabled"}>Add to Queue</button>
+        <button class="sheetChoice" id="vmDetails">View Details</button>
         <button class="sheetChoice" id="vmRename">Rename</button>
         <button class="sheetChoice" id="vmSetActive" ${v.isActive ? "disabled" : ""}>${v.isActive ? "Active ✅" : "Set Active ✅"}</button>
         <button class="sheetChoice" id="vmOpen" ${playable ? "" : "disabled"}>Open link</button>
@@ -4943,6 +6838,14 @@ function renderSheet() {
     $("#vmQueue")?.addEventListener("click", () => {
       addToQueue(song.id, v.id);
       closeSheet();
+    });
+
+    $("#vmDetails")?.addEventListener("click", () => {
+      closeSheet();
+      navigateForward(() => {
+        selectedSongId = song.id;
+        selectedVersionId = v.id;
+      });
     });
 
     $("#vmRename")?.addEventListener("click", () => {
@@ -5398,6 +7301,10 @@ function renderCreateOverlay() {
       </div>
 
       <button class="coCreateBtn" id="coCreateSong">Create Song</button>
+      <button class="coBulkBtn" id="coBulkImport">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        Bulk Import
+      </button>
     `;
   } else {
     contentHTML = `
@@ -5435,6 +7342,23 @@ function renderCreateOverlay() {
       if (e.target.closest("#coFileClear")) return;
       const file = await pickAudioFile();
       if (!file) return;
+
+      // Check for duplicate file name
+      const dupHits = _findFileNameDuplicates(file.name);
+      if (dupHits.length) {
+        _showDuplicateFileDialog(file.name, dupHits, {
+          onContinue: () => {
+            createAudioFile = file;
+            if (!createTitleValue.trim()) {
+              createTitleValue = (file.name || "").replace(/\.[^.]+$/, "").replace(/[-_]/g, " ").trim();
+            }
+            renderCreateOverlay();
+          },
+          onDismiss: () => { /* user cancelled, don't set file */ },
+        });
+        return;
+      }
+
       createAudioFile = file;
       // Auto-populate title if empty
       if (!createTitleValue.trim()) {
@@ -5528,6 +7452,8 @@ function renderCreateOverlay() {
     });
 
     // Create button
+    createOverlayEl.querySelector("#coBulkImport")?.addEventListener("click", () => openBulkImport());
+
     createOverlayEl.querySelector("#coCreateSong")?.addEventListener("click", async () => {
       const title = (createOverlayEl?.querySelector("#coTitle")?.value || "").trim();
       if (!title) return toast("Give it a title");
@@ -5538,6 +7464,13 @@ function renderCreateOverlay() {
         if (!project) return toast("Enter a project name");
       }
       if (!project) return toast("Pick a project");
+
+      // Check for duplicate song name in this project
+      const existingDup = _findSongNameDuplicate(title, project);
+      if (existingDup) {
+        _showDuplicateSongDialog(existingDup, { fromCreate: true });
+        return;
+      }
 
       const song = {
         id: uid(),
@@ -5564,31 +7497,9 @@ function renderCreateOverlay() {
       // If user picked a file, create v1 with audio attached
       if (createAudioFile) {
         const v = createVersion(song);
-        const audioId = uid();
-        v.fileId = audioId;
-        v.fileName = createAudioFile.name || "audio";
-        v.fileType = createAudioFile.type || "audio/*";
-        v.fileSize = createAudioFile.size || 0;
-        song.updatedAt = nowStamp();
         saveState();
-        toast("Created with audio 🎸");
-
-        // IndexedDB + cloud upload in background (don't block navigation)
-        logActivity(v.id, song.title, "saving", "Saving locally…");
-        audioPut({
-          id: audioId,
-          name: createAudioFile.name || "audio",
-          type: createAudioFile.type || "audio/*",
-          size: createAudioFile.size || 0,
-          blob: createAudioFile,
-          createdAt: nowStamp(),
-        }).then(() => {
-          attachSharedAudioCloud(song, v, createAudioFile, createAudioFile.name || "audio", createAudioFile.type || "audio/*");
-        }).catch(e => {
-          console.warn("[audioPut bg] failed:", e);
-          logActivity(v.id, song.title, "failed", "Local save failed");
-          toast("Local save failed");
-        });
+        toast("Uploading to cloud…");
+        await attachSharedAudio(song, v, createAudioFile, createAudioFile.name || "audio", createAudioFile.type || "audio/*", createAudioFile.size || 0);
       } else {
         saveState();
         toast("Created");
@@ -5713,7 +7624,12 @@ function render() {
   if (drawerView === "globalSearch") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderGlobalSearch(); }
   if (drawerView === "alerts") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderAlerts(); }
 
-  // Overlay screens (lyrics, friends, etc.)
+  // Overlay screens (bulk import, lyrics, friends, etc.)
+  if (overlayView === "bulkImport") {
+    setActiveScreen("drawer");
+    if (!_isBack) activeScreenEl.scrollTop = 0;
+    return renderBulkImport();
+  }
   if (overlayView === "lyrics") {
     setActiveScreen("home");
     if (!_isBack) activeScreenEl.scrollTop = 0;
@@ -5810,7 +7726,16 @@ function render() {
     return renderCollab();
   }
   if (currentTab === "profile") { setActiveScreen("collab"); return renderProfile(); }
-  if (currentTab === "settings") { setActiveScreen("settings"); return renderSettings(); }
+  if (currentTab === "settings") {
+    setActiveScreen("settings");
+    if (settingsView === "account") return renderSettingsAccount();
+    if (settingsView === "cloud") return renderSettingsCloud();
+    if (settingsView === "library") return renderSettingsLibrary();
+    if (settingsView === "art") return renderSettingsArt();
+    if (settingsView === "debug") return renderSettingsDebug();
+    if (settingsView === "danger") return renderSettingsDanger();
+    return renderSettings();
+  }
 }
 
 scheduleDockSpaceSync();
@@ -5870,6 +7795,19 @@ async function checkSharedAudioFile() {
 }
 
 function openShareTargetSheet(blob, fileName, fileType, fileSize) {
+  // Check for file-name duplicates before showing options
+  const dupHits = _findFileNameDuplicates(fileName);
+  if (dupHits.length) {
+    _showDuplicateFileDialog(fileName, dupHits, {
+      onContinue: () => _openShareTargetSheetInner(blob, fileName, fileType, fileSize),
+      onDismiss: () => {},
+    });
+    return;
+  }
+  _openShareTargetSheetInner(blob, fileName, fileType, fileSize);
+}
+
+function _openShareTargetSheetInner(blob, fileName, fileType, fileSize) {
   sheetMode = "shareTarget";
   const existingSongs = (state.songs || []).filter(s => s.title);
 
@@ -5983,23 +7921,13 @@ function openShareNewSongSheet(blob, fileName, fileType, fileSize) {
     ensureProjectInState(song.project);
     state.songs.unshift(song);
 
-    // Create version and attach audio — navigate immediately, storage in background
+    // Create version and attach audio — upload to cloud before navigating
     const v = createVersion(song);
-    const audioId = uid();
-    v.fileId = audioId;
-    v.fileName = fileName;
-    v.fileType = fileType;
-    v.fileSize = fileSize;
-    song.updatedAt = nowStamp();
     saveState();
 
     closeSheet();
-    toast("Created with audio 🎸");
-
-    // IndexedDB + cloud both in background (iOS IndexedDB blob writes are slow)
-    audioPut({ id: audioId, name: fileName, type: fileType, size: fileSize, blob, createdAt: nowStamp() })
-      .then(() => attachSharedAudioCloud(song, v, blob, fileName, fileType))
-      .catch(e => { console.warn("[audioPut bg] failed:", e); toast("Local save failed"); });
+    toast("Uploading to cloud…");
+    await attachSharedAudio(song, v, blob, fileName, fileType, fileSize);
 
     currentTab = "songs";
     songsView = "list";
@@ -6068,21 +7996,11 @@ function openShareExistingSongSheet(blob, fileName, fileType, fileSize) {
       if (!song) return toast("Song not found 😅");
 
       const v = createVersion(song);
-      const audioId = uid();
-      v.fileId = audioId;
-      v.fileName = fileName;
-      v.fileType = fileType;
-      v.fileSize = fileSize;
-      song.updatedAt = nowStamp();
       saveState();
 
       closeSheet();
-      toast(`Added v${song.versions.length} to ${song.title} 🎸`);
-
-      // IndexedDB + cloud both in background (iOS IndexedDB blob writes are slow)
-      audioPut({ id: audioId, name: fileName, type: fileType, size: fileSize, blob, createdAt: nowStamp() })
-        .then(() => attachSharedAudioCloud(song, v, blob, fileName, fileType))
-        .catch(e => { console.warn("[audioPut bg] failed:", e); toast("Local save failed"); });
+      toast("Uploading to cloud…");
+      await attachSharedAudio(song, v, blob, fileName, fileType, fileSize);
 
       currentTab = "songs";
       songsView = "list";
@@ -6133,23 +8051,66 @@ async function attachSharedAudio(song, v, blob, fileName, fileType, fileSize) {
       const pushOk = await supabasePushState(state).catch(e => { console.warn("[Push]", e); return false; });
       toast(pushOk ? "Synced to cloud" : "Audio uploaded, but song record failed to sync");
     } else {
-      toast("Local saved, cloud sync failed");
+      toast("Cloud sync failed — will retry on next launch");
     }
   } catch (e) {
     console.warn("[attachSharedAudio] cloud upload failed:", e);
-    toast("Local saved, cloud sync failed");
+    toast("Cloud sync failed — will retry on next launch");
   }
 }
 
+// Yield to the main thread so the audio pipeline doesn't starve
+const yieldToMain = () => new Promise(r => setTimeout(r, 0));
+
+// Wait until audio is NOT actively playing before doing heavy background work.
+// Polls every 2s; if audio pauses or stops, resolves immediately.
+// Timeout after 5 minutes so uploads don't hang forever.
+function waitForAudioIdle() {
+  if (globalAudio.paused) return Promise.resolve();
+  return new Promise(resolve => {
+    const onPause = () => { cleanup(); resolve(); };
+    const onEnded = () => { cleanup(); resolve(); };
+    const timer = setInterval(() => {
+      if (globalAudio.paused) { cleanup(); resolve(); }
+    }, 2000);
+    const timeout = setTimeout(() => { cleanup(); resolve(); }, 5 * 60 * 1000);
+    function cleanup() {
+      globalAudio.removeEventListener("pause", onPause);
+      globalAudio.removeEventListener("ended", onEnded);
+      clearInterval(timer);
+      clearTimeout(timeout);
+    }
+    globalAudio.addEventListener("pause", onPause, { once: true });
+    globalAudio.addEventListener("ended", onEnded, { once: true });
+  });
+}
+
 // Cloud-only portion of attachSharedAudio (fire-and-forget for non-blocking uploads)
+// Waits for audio playback to pause before uploading to avoid glitching playback.
 async function attachSharedAudioCloud(song, v, blob, fileName, fileType) {
   const logId = v.id || uid();
   const title = song.title || fileName;
-  logActivity(logId, title, "saving", "Saving locally…");
+  logActivity(logId, title, "saving", "Waiting to sync…");
+
+  // Don't upload while audio is playing — causes stuttering and glitches
+  if (!globalAudio.paused) {
+    logActivity(logId, title, "saving", "Waiting for playback to pause…");
+    await waitForAudioIdle();
+  }
+
   toast("Syncing to cloud…");
   try {
+    await yieldToMain();
     logActivity(logId, title, "compressing", "Compressing audio…");
     const compressed = await compressAudioForUpload(blob);
+    await yieldToMain();
+
+    // Re-check: if user started playing during compression, wait again
+    if (!globalAudio.paused) {
+      logActivity(logId, title, "uploading", "Waiting for playback to pause…");
+      await waitForAudioIdle();
+    }
+
     logActivity(logId, title, "uploading", "Uploading to cloud…");
     const result = await supabaseUploadAudio({
       blob: new File([compressed], fileName, { type: compressed.type || fileType }),
@@ -6157,21 +8118,24 @@ async function attachSharedAudioCloud(song, v, blob, fileName, fileType) {
       versionId: v.id,
       fileName,
     });
+    await yieldToMain();
     if (result.success) {
       v.audioPath = result.audioPath;
       localStorage.setItem(LS_KEY, JSON.stringify(state));
       logActivity(logId, title, "syncing", "Syncing song record…");
+      await yieldToMain();
       const pushOk = await supabasePushState(state).catch(e => { console.warn("[Push]", e); return false; });
       logActivity(logId, title, "done", pushOk ? "Synced to cloud" : "Audio uploaded, record sync failed");
       toast(pushOk ? "Synced to cloud" : "Audio uploaded, but song record failed to sync");
     } else {
       logActivity(logId, title, "failed", "Cloud upload failed");
-      toast("Local saved, cloud sync failed");
+      console.warn(`[CloudSync] Upload failed for "${title}":`, result.error);
+      toast(`Cloud sync failed for "${title}" — will retry on next launch`);
     }
   } catch (e) {
-    console.warn("[attachSharedAudioCloud] cloud upload failed:", e);
+    console.warn(`[CloudSync] Upload error for "${title}":`, e);
     logActivity(logId, title, "failed", "Cloud upload error");
-    toast("Local saved, cloud sync failed");
+    toast(`Cloud sync failed for "${title}" — will retry on next launch`);
   }
 }
 
@@ -6201,7 +8165,7 @@ function showAuthScreen() {
           </form>
         </div>
       `;
-      // Inject inputs after iOS autofill scan completes
+      // Inject inputs after iOS autofill scan completes, then fade the screen in
       setTimeout(() => {
         const slot = el.querySelector("#authInputs");
         if (!slot) return;
@@ -6216,6 +8180,8 @@ function showAuthScreen() {
           </div>
         `;
         wireForm();
+        // Fade in now that the form is fully built (no partial flash)
+        requestAnimationFrame(() => { el.style.opacity = ""; });
       }, 500);
     }
 
@@ -6406,8 +8372,11 @@ function showAuthScreen() {
       el.querySelector("#otpBack").addEventListener("click", () => renderForm());
     }
 
-    document.body.appendChild(el);
+    // Render form content BEFORE appending to DOM so there's no empty flash.
+    // The card starts hidden and fades in once inputs are injected (500ms iOS autofill workaround).
     renderForm();
+    el.style.opacity = "0";
+    document.body.appendChild(el);
 
     // Prevent iOS from scrolling behind the auth overlay on any input focus
     el.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
@@ -7405,6 +9374,8 @@ function showProfileSetup() {
 
     // ── Save & Close ──
     async function finishSetup(skipped) {
+      let autoAssignedPreset = null;
+
       if (!skipped) {
         const displayName = profile.username || [profile.firstName, profile.lastName].filter(Boolean).join(" ") || "RiffBanker";
 
@@ -7451,6 +9422,12 @@ function showProfileSetup() {
               const presetUrl = `preset:${profile.avatarPreset.id}`;
               await supabase.from("profiles").update({ avatar_url: presetUrl }).eq("id", uid);
               state.settings.profileAvatarUrl = presetUrl;
+            } else {
+              // No avatar chosen — auto-assign a random animal
+              autoAssignedPreset = AVATAR_PRESETS[Math.floor(Math.random() * AVATAR_PRESETS.length)];
+              const presetUrl = `preset:${autoAssignedPreset.id}`;
+              await supabase.from("profiles").update({ avatar_url: presetUrl }).eq("id", uid);
+              state.settings.profileAvatarUrl = presetUrl;
             }
           }
         } catch (e) {
@@ -7459,11 +9436,58 @@ function showProfileSetup() {
 
         state.settings.displayName = displayName;
         saveState();
+      } else {
+        // Skipped setup entirely — still assign a random animal avatar
+        try {
+          const { data: userData } = await supabase.auth.getUser();
+          const uid = userData?.user?.id;
+          if (uid) {
+            autoAssignedPreset = AVATAR_PRESETS[Math.floor(Math.random() * AVATAR_PRESETS.length)];
+            const presetUrl = `preset:${autoAssignedPreset.id}`;
+            await supabase.from("profiles").update({ avatar_url: presetUrl }).eq("id", uid);
+            state.settings.profileAvatarUrl = presetUrl;
+          }
+        } catch (e) {
+          console.warn("[ProfileSetup] Failed to auto-assign avatar:", e);
+        }
+      }
+
+      // Show the salty reveal if we auto-assigned an avatar
+      if (autoAssignedPreset) {
+        await showAutoAvatarReveal(el, autoAssignedPreset);
       }
 
       localStorage.setItem("profileSetupDone", "1");
       el.classList.remove("open");
       setTimeout(() => { el.remove(); resolve(); }, 300);
+    }
+
+    // ── Salty reveal when user didn't pick a profile pic ──
+    function showAutoAvatarReveal(container, preset) {
+      return new Promise((revealResolve) => {
+        const saltyLines = [
+          `No profile pic? Bold move. Say hello to your new face.`,
+          `You had the chance to pick your own pic… so we picked for you.`,
+          `Too cool for a selfie? Fine. You're a ${preset.label} now.`,
+          `We gave you a whole avatar picker and you said "nah." Meet your ${preset.label}.`,
+          `Since you couldn't be bothered… congratulations, you're a ${preset.label}.`,
+          `Profile pic? Never heard of her. Anyway, you're a ${preset.label} now.`,
+        ];
+        const line = saltyLines[Math.floor(Math.random() * saltyLines.length)];
+
+        container.innerHTML = `
+          <div class="profileSetupInner" style="text-align:center">
+            <div class="psAutoAvatar" style="width:120px;height:120px;border-radius:50%;margin:0 auto 24px;overflow:hidden;animation:psAvatarBounceIn 0.5s cubic-bezier(0.34,1.56,0.64,1)">
+              <div style="width:100%;height:100%;background:${preset.bg};display:flex;align-items:center;justify-content:center;font-size:56px;border-radius:inherit">${preset.emoji}</div>
+            </div>
+            <div class="profileSetupTitle" style="font-size:20px;line-height:1.4;max-width:280px;margin:0 auto 24px">${line}</div>
+            <div class="profileSetupSub" style="margin-bottom:24px">You can always change it later in your profile.</div>
+            <button class="profileSetupBtn" id="psAutoAvatarOk">Got it</button>
+          </div>
+        `;
+
+        $("#psAutoAvatarOk")?.addEventListener("click", () => revealResolve());
+      });
     }
 
     // Start at step 1
@@ -7554,6 +9578,23 @@ async function init() {
   // Profile setup — show once after signup if no profile exists
   await showProfileSetupIfNeeded();
 
+  // ── Claim loaded invite if pending (from invite.html?li=TOKEN) ──
+  const _pendingLI = localStorage.getItem("pendingLoadedInvite");
+  if (_pendingLI) {
+    localStorage.removeItem("pendingLoadedInvite");
+    try {
+      const claimResult = await claimLoadedInvite(_pendingLI);
+      if (claimResult?.success) {
+        // Store for post-boot toast
+        window._loadedInviteClaimResult = claimResult;
+      } else if (claimResult?.error) {
+        console.warn("[LoadedInvite] claim error:", claimResult.error);
+      }
+    } catch (e) {
+      console.warn("[LoadedInvite] claim failed:", e);
+    }
+  }
+
   // If local state is empty, pull from Supabase before showing the app
   // (on fresh install / cache wipe, localStorage has no songs yet)
   if (!state.songs.length) {
@@ -7643,6 +9684,22 @@ async function init() {
       : Promise.resolve()),
   ]), 8000).then(() => { syncDone = true; }); // 8s max — don't block the app forever
 
+  // Background sweep: upload any local-only audio to cloud (fire-and-forget)
+  syncTask.then(() => ensureAllAudioInCloud().catch(console.warn));
+
+  // Resume any interrupted bulk imports from a previous session
+  _loadImportQueue();
+  _pruneImportQueue();
+  const pendingImports = importQueue.filter(q => q.status === "waiting" || q.status === "uploading");
+  if (pendingImports.length) {
+    console.log(`[BulkImport] Resuming ${pendingImports.length} interrupted import(s)`);
+    // Reset any "uploading" items back to "waiting" since the upload was interrupted
+    for (const q of pendingImports) { if (q.status === "uploading") q.status = "waiting"; }
+    _saveImportQueue();
+    _updateNotifBadge();
+    syncTask.then(() => _processImportQueue().catch(console.warn));
+  }
+
   // Cycle subtext until sync finishes, then show "Entering RiffBank"
   const lines = ["Indexing your universe", "Syncing sessions"];
   let lineIdx = 0;
@@ -7661,8 +9718,63 @@ async function init() {
   await jumpSwap("Entering RiffBank");
   await _sleep(700);
 
-  // Scan cached audio blobs (non-blocking, doesn't affect rendering)
+  // Scan cached audio blobs + re-link orphaned versions (non-blocking)
   (async () => {
+    // Phase 0: Strip stale local fileId/localAudioId from versions that already have
+    // VALID cloud audio (audioPath with non-zero blob). A previous bug preserved these
+    // during cloud sync, causing the player to use a truncated local blob instead of
+    // the full cloud copy. Only strip if cloud blob is verified non-empty.
+    let stripped = 0;
+    for (const song of (state.songs || [])) {
+      for (const v of (song.versions || [])) {
+        if (v.audioPath && (v.fileId || v.localAudioId)) {
+          const cached = await audioGet(`supa:${v.audioPath}`).catch(() => null);
+          if (cached?.blob?.size) {
+            v.fileId = null;
+            v.localAudioId = null;
+            stripped++;
+          } else {
+            console.warn(`[Boot] Keeping local refs for "${song.title}" — cloud blob missing or empty`);
+          }
+        }
+      }
+    }
+    if (stripped) {
+      console.log(`[Boot] Stripped ${stripped} stale local audio ref(s) — cloud audio verified`);
+      saveState();
+    }
+
+    // Phase 0b: Validate all cloud audioPaths — clear any that point to 0-byte or missing files.
+    // This catches corrupt uploads so songs don't appear playable when they aren't.
+    let cleared = 0;
+    for (const song of (state.songs || [])) {
+      for (const v of (song.versions || [])) {
+        if (!v.audioPath) continue;
+        // Check IDB cache first (free), then live-fetch (one HEAD-like request per version)
+        let valid = false;
+        try {
+          const cached = await audioGet(`supa:${v.audioPath}`);
+          if (cached?.blob?.size) { valid = true; continue; }
+        } catch {}
+        try {
+          const blob = await supabaseFetchAudioBlob(v.audioPath);
+          if (blob?.size) { valid = true; continue; }
+        } catch {}
+        if (!valid) {
+          console.warn(`[Boot] Cloud audio empty/missing for "${song.title}" — clearing audioPath`);
+          supabaseDeleteAudio(v.audioPath).catch(() => {});
+          v.audioPath = null;
+          cleared++;
+        }
+      }
+    }
+    if (cleared) {
+      console.log(`[Boot] Cleared ${cleared} broken cloud audio ref(s)`);
+      saveState();
+      render();
+    }
+
+    // Phase 1: Track which cloud audio is already cached in IndexedDB
     for (const song of (state.songs || [])) {
       for (const v of (song.versions || [])) {
         if (!v.audioPath || v.fileId || v.localAudioId) continue;
@@ -7672,6 +9784,77 @@ async function init() {
         } catch {}
       }
     }
+
+    // Phase 1.5: Backfill missing fileNames from IDB records.
+    // Cloud sync can return file_name=null for versions uploaded before the column was populated.
+    try {
+      let backfilled = 0;
+      for (const song of (state.songs || [])) {
+        for (const v of (song.versions || [])) {
+          if (v.fileName) continue; // already has a name
+          if (!v.fileId) continue;  // no local audio to look up
+          try {
+            const rec = await audioGet(v.fileId);
+            if (rec?.name) {
+              v.fileName = rec.name;
+              backfilled++;
+            }
+          } catch {}
+        }
+      }
+      if (backfilled) {
+        console.log(`[Boot] Backfilled fileName for ${backfilled} version(s)`);
+        saveState();
+      }
+    } catch (e) { console.warn("[Boot] fileName backfill failed:", e); }
+
+    // Phase 2: Re-link versions that lost their fileId during cloud sync.
+    // Scan IndexedDB for orphaned blobs and match by filename.
+    try {
+      const allBlobs = await audioGetAll();
+      if (allBlobs.length) {
+        const blobByName = new Map();
+        const blobById = new Map();
+        for (const rec of allBlobs) {
+          if (rec.id.startsWith("supa:")) continue;
+          if (rec.name) blobByName.set(rec.name, rec);
+          blobById.set(rec.id, rec);
+        }
+        // Also build fuzzy lookup: blob name without extension → blob
+        const blobByTitleKey = new Map();
+        for (const rec of allBlobs) {
+          if (rec.id.startsWith("supa:") || !rec.name) continue;
+          const key = rec.name.replace(/\.[^.]+$/, "").toLowerCase().trim();
+          if (key) blobByTitleKey.set(key, rec);
+        }
+        const usedIds = new Set();
+        let relinked = 0;
+        for (const song of (state.songs || [])) {
+          for (const v of (song.versions || [])) {
+            if (v.fileId || v.localAudioId || v.audioPath) continue; // already has audio
+            let rec = blobByName.get(v.fileName) || blobByName.get(v.originalFileName);
+            // Fuzzy: match blob filename (sans extension) to song title
+            if (!rec) {
+              const titleKey = (song.title || "").toLowerCase().trim();
+              if (titleKey) rec = blobByTitleKey.get(titleKey);
+            }
+            if (rec?.blob && !usedIds.has(rec.id)) {
+              usedIds.add(rec.id);
+              v.fileId = rec.id;
+              v.fileType = v.fileType || rec.type || "";
+              v.fileSize = v.fileSize || rec.size || 0;
+              if (!v.fileName && rec.name) v.fileName = rec.name;
+              relinked++;
+            }
+          }
+        }
+        if (relinked) {
+          console.log(`[Boot] Re-linked ${relinked} orphaned audio ref(s)`);
+          saveState();
+          render();
+        }
+      }
+    } catch (e) { console.warn("[Boot] Audio re-link scan failed:", e); }
   })();
 
   // Final render with all data in place, then fade out
@@ -7680,6 +9863,18 @@ async function init() {
 
   bootOverlay.classList.add("hide");
   bootOverlay.addEventListener("transitionend", () => bootOverlay.remove());
+
+  // Show loaded invite claim toast after boot
+  if (window._loadedInviteClaimResult) {
+    const r = window._loadedInviteClaimResult;
+    const parts = [];
+    if (r.project_count) parts.push(`${r.project_count} project${r.project_count > 1 ? "s" : ""}`);
+    if (r.song_count) parts.push(`${r.song_count} song${r.song_count > 1 ? "s" : ""}`);
+    toast(`Connected with ${r.sender_name}! ${parts.join(" and ")} shared with you.`);
+    delete window._loadedInviteClaimResult;
+    // Refresh shared data so Collab tab shows the new content
+    refreshSharedData().then(() => { if (currentTab === "collab") render(); }).catch(() => {});
+  }
 
   // Sync unread message badges — seed notifications for any pending friend requests not yet in inbox
   getPendingFriendRequests().then(requests => {
@@ -7694,8 +9889,8 @@ async function init() {
   }).catch(() => {});
   syncMessageBadges();
 
-  // Request notification permission early so share notifications work
-  requestNotificationPermission();
+  // Request notification permission on first user tap (iOS requires user gesture)
+  _attachNotifPermissionToGesture();
 
   // Update notification bell badge on startup
   _updateNotifBadge();
@@ -7703,19 +9898,110 @@ async function init() {
   // Check for Web Share Target file
   checkSharedAudioFile();
 
-  // Fetch shared data shortly after boot so shared songs appear quickly
-  setTimeout(() => refreshSharedData().then(() => {
+  // Fetch shared data + loaded invites immediately so collab tab is populated
+  Promise.all([
+    refreshSharedData(),
+    _refreshLoadedInvites(),
+  ]).then(() => {
     // Re-render if user is on a tab that shows shared content
-    if (currentTab === "player" || currentTab === "collab") render();
-  }).catch(console.warn), 3000);
+    if (currentTab === "player" || currentTab === "collab" || currentTab === "songs" || drawerView) render();
+  }).catch(console.warn);
+
+  // Realtime: instant notifications for shares, messages, friend requests, and own song changes
+  // Debounce own-song changes: the realtime subscription fires for our OWN writes too,
+  // which triggers a pull→merge→render loop mid-playback. Only sync if we haven't
+  // pushed recently (i.e., the change came from another device).
+  let _ownSongDebounce = null;
+  subscribeToRealtimeNotifications({
+    onOwnSongChange: () => {
+      // Skip if audio is actively playing — sync can disrupt playback
+      if (globalAudio && !globalAudio.paused) {
+        console.log("[Realtime] Ignoring own-song change — audio playing");
+        return;
+      }
+      // Debounce: wait 3s after last event before syncing (batches rapid-fire events)
+      clearTimeout(_ownSongDebounce);
+      _ownSongDebounce = setTimeout(() => {
+        console.log("[Realtime] Own song changed — syncing from cloud");
+        incrementalSyncFromSupabase().catch(console.warn);
+      }, 3000);
+    },
+    onNewShare: async (row) => {
+      // Look up who shared it
+      const senderId = row?.invited_by || row?.owner_id;
+      const profile = senderId ? await getProfileById(senderId).catch(() => null) : null;
+      const name = profile?.display_name || "Someone";
+      const avatar = profile?.avatar_url || null;
+      const label = row?.song_id ? `${name} shared a song with you` : `${name} shared a project with you`;
+      addNotification({ title: name, body: label, type: "share" });
+      _showPushNotification(label, "riffbank-new-share", { title: name, icon: avatar });
+      toast(label);
+      // Refresh full shared data in background (for UI updates)
+      refreshSharedData().then(() => {
+        if (currentTab === "player" || currentTab === "collab" || currentTab === "songs" || drawerView) render();
+      }).catch(() => {});
+    },
+    onNewMessage: async (row) => {
+      // Look up sender profile for rich notification
+      const profile = row?.sender_id ? await getProfileById(row.sender_id).catch(() => null) : null;
+      const name = profile?.display_name || "Someone";
+      const avatar = profile?.avatar_url || null;
+      const body = row?.body || "Sent you a message";
+      // Truncate long messages for the notification
+      const preview = body.length > 100 ? body.slice(0, 100) + "…" : body;
+      _showPushNotification(preview, "riffbank-msg-" + (row?.sender_id || ""), { title: name, icon: avatar });
+      syncMessageBadges();
+    },
+    onNewFriendRequest: async (row) => {
+      const senderId = row?.requester_id;
+      const profile = senderId ? await getProfileById(senderId).catch(() => null) : null;
+      const name = profile?.display_name || "Someone";
+      const avatar = profile?.avatar_url || null;
+      addNotification({
+        title: "Friend Request",
+        body: `${name} sent you a friend request`,
+        type: "friend_request",
+        friendshipId: row?.id,
+        requesterName: name,
+        requesterId: senderId,
+        avatarUrl: avatar,
+      });
+      _showPushNotification(`${name} sent you a friend request`, "riffbank-friend-request", { title: name, icon: avatar });
+      syncMessageBadges();
+    },
+  });
+
+  // Fallback: poll shared data + own songs every 60s in case Realtime disconnects
+  setInterval(() => {
+    refreshSharedData().then(() => {
+      if (currentTab === "player" || currentTab === "collab" || currentTab === "songs" || drawerView) render();
+    }).catch(() => {});
+    incrementalSyncFromSupabase().catch(console.warn);
+  }, 60000);
 }
 
 // Incremental sync: pull Supabase state and merge only new/changed songs
 async function incrementalSyncFromSupabase() {
   const cloudState = await supabasePullStateSilent();
-  if (!cloudState?.songs?.length) return;
+  if (!cloudState) return; // network failure — don't touch local state
 
   const localHasSongs = state.songs && state.songs.length > 0;
+  const cloudHasSongs = cloudState.songs && cloudState.songs.length > 0;
+
+  // Cloud is empty — adopt that as truth (library was cleared on another device)
+  if (!cloudHasSongs) {
+    if (localHasSongs) {
+      state.songs = [];
+      state.projects = cloudState.projects || [];
+      state.releases = [];
+      normalizeState();
+      saveState();
+      coverCache.clear();
+      render();
+      toast("Library synced from cloud (empty)");
+    }
+    return;
+  }
 
   if (!localHasSongs) {
     // Local is empty — adopt cloud state wholesale
@@ -7729,6 +10015,28 @@ async function incrementalSyncFromSupabase() {
     render();
     toast("Loaded library from cloud");
     return;
+  }
+
+  // Build lookup of cloud songs by ID for deletion detection
+  const cloudSongIds = new Set(cloudState.songs.map(s => s.id));
+
+  // Remove local songs that no longer exist in the cloud.
+  // BUT: skip deletion entirely while a bulk import is running — the import creates
+  // songs locally before pushing them to cloud, so they won't be in cloudSongIds yet.
+  // Also protect any songs that are in the pending import queue (not yet pushed).
+  // Protect songs from any import queue item that isn't old — "done" items
+  // may not have been pushed to cloud yet, so cloud won't know about them.
+  const RECENT_MS = 5 * 60 * 1000; // 5 minutes
+  const importingIds = new Set(importQueue
+    .filter(q => q.status === "waiting" || q.status === "uploading"
+              || (q.status === "done" && q.ts && Date.now() - q.ts < RECENT_MS))
+    .map(q => q.existingSongId || q.id)
+  );
+  const beforeCount = state.songs.length;
+  let removed = 0;
+  if (!_importQueueRunning) {
+    state.songs = state.songs.filter(s => cloudSongIds.has(s.id) || importingIds.has(s.id));
+    removed = beforeCount - state.songs.length;
   }
 
   // Build lookup of local songs by title+project (stable identity)
@@ -7759,6 +10067,22 @@ async function incrementalSyncFromSupabase() {
         if (local.coverImageUrl && !cs.coverImageUrl) cs.coverImageUrl = local.coverImageUrl;
         // Keep user coverSource if local has a user cover
         if (local.coverSource === "user" && local.userCoverPath) cs.coverSource = "user";
+
+        // Preserve local-only audio fields (fileId, localAudioId) that cloud doesn't store.
+        // Cloud pull always returns these as null — merging would wipe out IndexedDB references.
+        // BUT: only preserve if the version doesn't already have cloud audio (audioPath).
+        // If cloud audio exists, it's the authoritative full copy — a stale local fileId
+        // might point to a truncated blob and would wrongly take priority in playback.
+        const localVersionsById = new Map();
+        for (const lv of (local.versions || [])) localVersionsById.set(lv.id, lv);
+        for (const cv of (cs.versions || [])) {
+          const lv = localVersionsById.get(cv.id);
+          if (lv) {
+            if (lv.fileId && !cv.fileId && !cv.audioPath) cv.fileId = lv.fileId;
+            if (lv.localAudioId && !cv.localAudioId && !cv.audioPath) cv.localAudioId = lv.localAudioId;
+          }
+        }
+
         Object.assign(local, cs);
         updated++;
       }
@@ -7769,22 +10093,24 @@ async function incrementalSyncFromSupabase() {
     }
   }
 
-  // Merge cloud project names into local state
+  // Sync project list from cloud (cloud is truth)
   if (cloudState.projects?.length) {
-    for (const p of cloudState.projects) {
-      if (p && !state.projects.includes(p)) state.projects.push(p);
-    }
+    state.projects = [...cloudState.projects];
+  } else {
+    state.projects = [];
   }
 
-  if (added || updated || cloudState.projects?.length) {
+  if (added || updated || removed) {
     normalizeState();
     await restoreCoverUrlsFromCache();
     saveState();
     coverCache.clear();
     render();
-    if (added && updated) toast(`Synced: ${added} new, ${updated} updated`);
-    else if (added) toast(`Synced: ${added} new song${added > 1 ? "s" : ""}`);
-    else toast(`Synced: ${updated} song${updated > 1 ? "s" : ""} updated`);
+    const parts = [];
+    if (added) parts.push(`${added} new`);
+    if (updated) parts.push(`${updated} updated`);
+    if (removed) parts.push(`${removed} removed`);
+    toast(`Synced: ${parts.join(", ")}`);
   }
 }
 
@@ -7805,8 +10131,11 @@ function renderProjects() {
   const h1 = appEl?.querySelector(".titleblock h1");
   if (h1) h1.style.opacity = "0";
 
-  // Shared projects
-  const sharedProjectNames = (sharedData.projects || []).map(sp => sp.projectName).filter(Boolean);
+  // Shared projects — include projects from individually shared songs too
+  const sharedProjectNames = Array.from(new Set([
+    ...(sharedData.projects || []).map(sp => sp.projectName).filter(Boolean),
+    ...(sharedData.songs || []).map(ss => (ss.song?.project || "").trim()).filter(Boolean),
+  ]));
   const _sharedProjSet = new Set(sharedProjectNames);
 
   const pOwner = projectsOwnerFilter || "all";
@@ -7830,10 +10159,15 @@ function renderProjects() {
 
   let projQuery = "";
 
-  // Get shared songs for a project name
+  // Get shared songs for a project name (from shared projects + individually shared songs)
   const _sharedSongsForProj = (projName) => {
-    const sp = (sharedData.projects || []).find(sp => sp.projectName === projName);
-    return sp?.songs || [];
+    const fromProj = (sharedData.projects || []).find(sp => sp.projectName === projName)?.songs || [];
+    const fromSongs = (sharedData.songs || [])
+      .filter(ss => (ss.song?.project || "").trim() === projName)
+      .map(ss => ss.song);
+    // Dedupe by id
+    const seen = new Set(fromProj.map(s => s.id));
+    return [...fromProj, ...fromSongs.filter(s => !seen.has(s.id))];
   };
 
   const buildCards = (q) => projects
@@ -7863,7 +10197,7 @@ function renderProjects() {
               <div class="pShimmer"></div>
             </div>
             <div class="pInfo">
-              <div class="pName">${escapeHtml(p)}</div>
+              <div class="pNameRow"><div class="pName">${escapeHtml(p)}</div>${sharedBadgeProject(p)}</div>
               <div class="pMeta">
                 <span>${count} song${count === 1 ? "" : "s"}</span>
               </div>
@@ -8098,16 +10432,54 @@ function renderProjectSongs(projectName) {
 
   activeScreenEl.style.overflowY = "scroll";
 
-  // In collab mode, pull songs from the shared project data; otherwise use local state
-  const songs = collabMode
-    ? (sharedData.projects.find(sp => sp.projectName === projectName)?.songs || [])
-    : state.songs.filter(s => (s.project || "").trim() === projectName);
+  // In collab mode, merge songs from all shared sources for this project; otherwise use local + shared songs
+  let songs;
+  if (collabMode) {
+    const _seen = new Set();
+    const _merged = [];
+    // Songs from projects shared WITH me
+    for (const sp of (sharedData.projects || [])) {
+      if (sp.projectName === projectName) {
+        for (const s of sp.songs) { if (!_seen.has(s.id)) { _seen.add(s.id); _merged.push({ ...s, _shared: true, _sharedBy: sp.ownerName || "Someone" }); } }
+      }
+    }
+    // Individual songs shared WITH me
+    for (const ss of (sharedData.songs || [])) {
+      if ((ss.song?.project || "").trim() === projectName && !_seen.has(ss.song.id)) {
+        _seen.add(ss.song.id); _merged.push({ ...ss.song, _shared: true, _sharedBy: ss.ownerName || "Someone" });
+      }
+    }
+    // Songs from projects I shared (local songs)
+    for (const mp of (sharedData.myProjects || [])) {
+      if (mp.projectName === projectName) {
+        for (const s of state.songs.filter(x => (x.project || "").trim() === projectName)) {
+          if (!_seen.has(s.id)) { _seen.add(s.id); _merged.push(s); }
+        }
+      }
+    }
+    // Individual songs I shared
+    for (const ms of (sharedData.mySongs || [])) {
+      if ((ms.projectName || "").trim() === projectName) {
+        const s = state.songs.find(x => x.id === ms.songId);
+        if (s && !_seen.has(s.id)) { _seen.add(s.id); _merged.push(s); }
+      }
+    }
+    songs = _merged;
+  } else {
+    const ownSongs = state.songs.filter(s => (s.project || "").trim() === projectName);
+    const ownIds = new Set(ownSongs.map(s => s.id));
+    const sharedSongsForProj = [
+      ...(sharedData.songs || []).filter(ss => (ss.song?.project || "").trim() === projectName).map(ss => ({ ...ss.song, _shared: true, _sharedBy: ss.ownerName || "Someone" })),
+      ...(sharedData.projects || []).filter(sp => sp.projectName === projectName).flatMap(sp => (sp.songs || []).map(s => ({ ...s, _shared: true, _sharedBy: sp.ownerName || "Someone" }))),
+    ].filter(s => !ownIds.has(s.id));
+    songs = [...ownSongs, ...sharedSongsForProj];
+  }
 
   // Ensure shared songs are in the cache so getSong() can find them
-  if (collabMode) {
+  {
     if (!state._sharedSongsCache) state._sharedSongsCache = [];
     for (const s of songs) {
-      if (!state._sharedSongsCache.find(cs => cs.id === s.id)) {
+      if (s._shared && !state._sharedSongsCache.find(cs => cs.id === s.id)) {
         state._sharedSongsCache.push(s);
       }
     }
@@ -8116,7 +10488,9 @@ function renderProjectSongs(projectName) {
   const items = songs
     .filter(s => (s.versions || []).length)
     .map(s => {
-      const vv = s.versions.find(v => v.isActive) || s.versions[0];
+      const vv = s.versions.find(v => v.isActive && isPlayable(v))
+              || s.versions.find(v => isPlayable(v))
+              || s.versions[0];
       return { songId: s.id, versionId: vv.id };
     });
 
@@ -8136,7 +10510,7 @@ function renderProjectSongs(projectName) {
           <div class="songTop">
             <div class="songTitleRow">
               ${syncDot(s)}
-              <div class="songTitle">${escapeHtml(s.title || "Untitled")}</div>
+              <div class="songTitleBadge"><div class="songTitle">${escapeHtml(s.title || "Untitled")}</div>${sharedBadge(s)}</div>
             </div>
             <button class="songMore" data-proj-song-more="${s.id}" aria-label="Song menu">&#x22EF;</button>
           </div>
@@ -8477,7 +10851,9 @@ function renderReleaseDetail(releaseId) {
   const items = songs
     .filter(s => (s.versions || []).length)
     .map(s => {
-      const vv = s.versions.find(v => v.isActive) || s.versions[0];
+      const vv = s.versions.find(v => v.isActive && isPlayable(v))
+              || s.versions.find(v => isPlayable(v))
+              || s.versions[0];
       return { songId: s.id, versionId: vv.id };
     });
 
@@ -8933,6 +11309,9 @@ function renderHome() {
       currentTab = "settings";
     });
   });
+
+  // Apply bell badge now that #htbNotif exists in the DOM
+  _updateNotifBadge();
 
   // Card navigation
   activeScreenEl.querySelectorAll("[data-home]").forEach((btn) => {
@@ -9628,26 +12007,253 @@ async function shareInviteSong(songId) {
   openShareRoleSheet({ projectId: null, projectName: null, songId: song.id, songTitle: song.title });
 }
 
-// Full-screen share overlay — Player-style user search + role picker
+// ── Sharing management overlay ──────────────────────────────────────
 let shareOverlayEl = null;
+let _shareRoleDropdownScrim = null;
+
+const _roleSvg = {
+  collaborator: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`,
+  viewer: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`,
+};
 
 function openShareOverlay({ projectId, projectName, songId, songTitle }) {
-  const targetLabel = projectName || songTitle || "content";
-  let selectedUser = null;
-  let searchTimer = null;
-
-  // Create overlay
   if (shareOverlayEl) shareOverlayEl.remove();
   shareOverlayEl = document.createElement("div");
   shareOverlayEl.className = "shareOverlay";
   document.body.appendChild(shareOverlayEl);
   requestAnimationFrame(() => shareOverlayEl.classList.add("open"));
 
-  const renderOverlay = () => {
+  _renderSharingManagement({ projectId, projectName, songId, songTitle });
+}
+
+async function _renderSharingManagement({ projectId, projectName, songId, songTitle }) {
+  if (!shareOverlayEl) return;
+  const targetLabel = projectName || songTitle || "content";
+
+  // Show loading state
+  shareOverlayEl.innerHTML = `
+    <div class="shareOverlayHeader">
+      <button class="shareOverlayClose" id="shareClose">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+      <div class="shareOverlayTitle">Sharing</div>
+    </div>
+    <div class="shareResultsEmpty"><div class="collabSpinner"></div></div>
+  `;
+  $("#shareClose")?.addEventListener("click", closeShareOverlay);
+
+  // Fetch current shares
+  const shares = songId ? await getSongShares(songId) : [];
+
+  if (!shareOverlayEl) return; // closed while loading
+
+  shareOverlayEl.innerHTML = `
+    <div class="shareOverlayHeader">
+      <button class="shareOverlayClose" id="shareClose">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+      <div class="shareOverlayTitle">Sharing</div>
+    </div>
+
+    <div class="sharingBody">
+      <button class="sharingAddBtn" id="sharingAddBtn">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8"/>
+          <polyline points="16 6 12 2 8 6"/>
+          <line x1="12" y1="2" x2="12" y2="15"/>
+        </svg>
+        Share "${escapeHtml(targetLabel)}"
+      </button>
+
+      <div class="sharingList" id="sharingList">
+        ${shares.length ? shares.map(s => {
+          const p = s.profile;
+          const name = p.display_name || "Unknown";
+          const meta = [p.instrument, p.genre, p.location].filter(Boolean).map(escapeHtml).join(" · ") || "RiffBank user";
+          const avatarHtml = p.avatar_url
+            ? (p.avatar_url.startsWith("preset:")
+              ? (() => { const pr = AVATAR_PRESETS.find(a => a.id === p.avatar_url.replace("preset:","")); return pr ? `<div class="friendAvatar" style="width:48px;height:48px">${renderAvatarPreset(pr)}</div>` : `<div class="friendAvatar" style="width:48px;height:48px;font-size:18px">${escapeHtml(name.charAt(0).toUpperCase())}</div>`; })()
+              : `<div class="friendAvatar" style="width:48px;height:48px"><img src="${escapeHtml(p.avatar_url)}" /></div>`)
+            : `<div class="friendAvatar" style="width:48px;height:48px;font-size:18px">${escapeHtml(name.charAt(0).toUpperCase())}</div>`;
+          return `
+            <div class="friendRow sharingRow" data-uid="${escapeHtml(s.userId)}">
+              ${avatarHtml}
+              <div class="friendInfo">
+                <div class="friendName">${escapeHtml(name)}</div>
+                <div class="friendMeta">${meta}</div>
+              </div>
+              <button class="sharingRoleBadge" data-uid="${escapeHtml(s.userId)}" data-role="${s.role}">
+                ${_roleSvg[s.role] || ""}
+                ${s.role === "collaborator" ? "Collaborator" : "Viewer"}
+              </button>
+              <button class="friendRemoveBtn sharingRevokeBtn" data-uid="${escapeHtml(s.userId)}" aria-label="Revoke access">&times;</button>
+            </div>
+          `;
+        }).join("") : `
+          <div class="friendsEmpty">Not shared with anyone yet.<br>Tap the button above to share this song.</div>
+        `}
+      </div>
+    </div>
+  `;
+
+  // Wire close
+  $("#shareClose")?.addEventListener("click", closeShareOverlay);
+
+  // Wire "Share" add button
+  $("#sharingAddBtn")?.addEventListener("click", () => {
+    _openShareAddFlow({ projectId, projectName, songId, songTitle });
+  });
+
+  // Wire role badge dropdowns
+  shareOverlayEl.querySelectorAll(".sharingRoleBadge").forEach(badge => {
+    badge.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const uid = badge.dataset.uid;
+      const currentRole = badge.dataset.role;
+      _openRoleDropdown(badge, uid, currentRole, { projectId, projectName, songId, songTitle });
+    });
+  });
+
+  // Wire revoke buttons
+  shareOverlayEl.querySelectorAll(".sharingRevokeBtn").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const uid = btn.dataset.uid;
+      const row = btn.closest(".sharingRow");
+      const name = row?.querySelector(".friendName")?.textContent || "this user";
+      if (!confirm(`Remove ${name}'s access?`)) return;
+      btn.style.opacity = ".4";
+      try {
+        await revokeSongShare(songId, uid);
+        toast(`Removed ${name}'s access`);
+        _renderSharingManagement({ projectId, projectName, songId, songTitle });
+      } catch (err) {
+        console.error("Revoke failed:", err);
+        toast("Failed to remove access");
+        btn.style.opacity = "1";
+      }
+    });
+  });
+}
+
+// ── Role dropdown + Sal confirmation dialog ─────────────────────────
+function _openRoleDropdown(anchorEl, userId, currentRole, shareOpts) {
+  _closeRoleDropdown();
+
+  const otherRole = currentRole === "collaborator" ? "viewer" : "collaborator";
+  const otherLabel = otherRole === "collaborator" ? "Collaborator" : "Viewer";
+  const currentLabel = currentRole === "collaborator" ? "Collaborator" : "Viewer";
+
+  // Scrim
+  _shareRoleDropdownScrim = document.createElement("div");
+  _shareRoleDropdownScrim.className = "shareRoleScrim open";
+  document.body.appendChild(_shareRoleDropdownScrim);
+
+  // Dropdown
+  const dropdown = document.createElement("div");
+  dropdown.className = "shareRoleDropdown";
+  dropdown.innerHTML = `
+    <button class="shareRoleDropItem active" data-role="${currentRole}">
+      ${_roleSvg[currentRole]} ${currentLabel}
+      <svg class="shareRoleCheck" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+    </button>
+    <button class="shareRoleDropItem" data-role="${otherRole}">
+      ${_roleSvg[otherRole]} ${otherLabel}
+    </button>
+  `;
+  document.body.appendChild(dropdown);
+
+  // Position dropdown above the badge
+  const rect = anchorEl.getBoundingClientRect();
+  dropdown.style.position = "fixed";
+  dropdown.style.left = `${rect.left}px`;
+  dropdown.style.bottom = `${window.innerHeight - rect.top + 6}px`;
+  dropdown.style.zIndex = "100002";
+  requestAnimationFrame(() => dropdown.classList.add("open"));
+
+  // Dismiss on scrim tap
+  _shareRoleDropdownScrim.addEventListener("click", _closeRoleDropdown);
+
+  // Wire role options
+  dropdown.querySelectorAll(".shareRoleDropItem").forEach(item => {
+    item.addEventListener("click", () => {
+      const role = item.dataset.role;
+      _closeRoleDropdown();
+      if (role !== currentRole) {
+        _openRoleConfirmDialog(userId, role, shareOpts);
+      }
+    });
+  });
+}
+
+function _closeRoleDropdown() {
+  if (_shareRoleDropdownScrim) {
+    _shareRoleDropdownScrim.remove();
+    _shareRoleDropdownScrim = null;
+  }
+  document.querySelectorAll(".shareRoleDropdown").forEach(el => el.remove());
+}
+
+function _openRoleConfirmDialog(userId, newRole, shareOpts) {
+  const isCollab = newRole === "collaborator";
+  const roleLabel = isCollab ? "Collaborator" : "Viewer";
+  const blurb = isCollab
+    ? "They'll be able to add songs, versions, and audio to this song."
+    : "They'll only be able to browse and listen — no editing.";
+
+  const backdrop = document.createElement("div");
+  backdrop.className = "shareConfirmBackdrop";
+  backdrop.innerHTML = `
+    <div class="shareConfirmDialog">
+      <img class="shareConfirmSal" src="./sal.png" alt="Sal" />
+      <div class="shareConfirmTitle">Change access to ${roleLabel}?</div>
+      <div class="shareConfirmBlurb">${blurb}</div>
+      <div class="shareConfirmActions">
+        <button class="shareConfirmCancel" id="roleConfirmCancel">Cancel</button>
+        <button class="shareConfirmOk" id="roleConfirmOk">Change to ${roleLabel}</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  requestAnimationFrame(() => backdrop.classList.add("open"));
+
+  const close = () => {
+    backdrop.classList.remove("open");
+    setTimeout(() => backdrop.remove(), 200);
+  };
+
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  backdrop.querySelector("#roleConfirmCancel").addEventListener("click", close);
+  backdrop.querySelector("#roleConfirmOk").addEventListener("click", async () => {
+    const okBtn = backdrop.querySelector("#roleConfirmOk");
+    okBtn.textContent = "Updating...";
+    okBtn.disabled = true;
+    try {
+      await updateSongShareRole(shareOpts.songId, userId, newRole);
+      toast(`Changed to ${roleLabel}`);
+      close();
+      _renderSharingManagement(shareOpts);
+    } catch (err) {
+      console.error("Role update failed:", err);
+      toast("Failed to update role");
+      okBtn.textContent = `Change to ${roleLabel}`;
+      okBtn.disabled = false;
+    }
+  });
+}
+
+// ── Add user sub-flow (search + role picker) ────────────────────────
+function _openShareAddFlow({ projectId, projectName, songId, songTitle }) {
+  if (!shareOverlayEl) return;
+  const targetLabel = projectName || songTitle || "content";
+  let selectedUser = null;
+  let searchTimer = null;
+
+  const renderAddFlow = () => {
     shareOverlayEl.innerHTML = `
       <div class="shareOverlayHeader">
-        <button class="shareOverlayClose" id="shareClose">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        <button class="shareOverlayClose" id="shareAddBack">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
         </button>
         <div class="shareOverlayTitle">Share "${escapeHtml(targetLabel)}"</div>
       </div>
@@ -9693,22 +12299,24 @@ function openShareOverlay({ projectId, projectName, songId, songTitle }) {
             </button>
           </div>
         </div>
-      ` : ""}
-
-      <div class="shareResults" id="shareResults">
-        <div class="shareResultsEmpty"><div class="collabSpinner"></div></div>
-      </div>
+      ` : `
+        <div class="shareResults" id="shareResults">
+          <div class="shareResultsEmpty"><div class="collabSpinner"></div></div>
+        </div>
+      `}
     `;
 
-    // Wire close
-    $("#shareClose")?.addEventListener("click", closeShareOverlay);
+    // Wire back button → return to management screen
+    $("#shareAddBack")?.addEventListener("click", () => {
+      _renderSharingManagement({ projectId, projectName, songId, songTitle });
+    });
 
     // Load friends as default list
     const resultsDefault = $("#shareResults");
     if (resultsDefault && !selectedUser) {
       getMyFriends().then(friends => {
         const cur = $("#shareResults");
-        if (!cur || $("#shareSearch")?.value?.trim()) return; // user already typed
+        if (!cur || $("#shareSearch")?.value?.trim()) return;
         if (!friends.length) {
           cur.innerHTML = `<div class="shareResultsEmpty">Search for people or add friends from the Collab tab</div>`;
           return;
@@ -9718,8 +12326,10 @@ function openShareOverlay({ projectId, projectName, songId, songTitle }) {
           const meta = [u.instrument, u.genre, u.location].filter(Boolean).join(" · ");
           return `
             <button class="shareUserRow" data-uid="${u.id}">
-              ${u.avatar_url && !u.avatar_url.startsWith("preset:")
-                ? `<img class="shareUserAvatar" src="${escapeHtml(u.avatar_url)}" />`
+              ${u.avatar_url
+                ? (u.avatar_url.startsWith("preset:")
+                  ? (() => { const pr = AVATAR_PRESETS.find(a => a.id === u.avatar_url.replace("preset:","")); return pr ? `<div class="shareUserAvatar">${renderAvatarPreset(pr)}</div>` : `<div class="shareUserAvatar shareUserAvatarFallback">${escapeHtml((u.display_name || "?").charAt(0).toUpperCase())}</div>`; })()
+                  : `<img class="shareUserAvatar" src="${escapeHtml(u.avatar_url)}" />`)
                 : `<div class="shareUserAvatar shareUserAvatarFallback">${escapeHtml((u.display_name || "?").charAt(0).toUpperCase())}</div>`
               }
               <div class="shareUserInfo">
@@ -9733,7 +12343,7 @@ function openShareOverlay({ projectId, projectName, songId, songTitle }) {
           row.addEventListener("click", () => {
             const uid = row.getAttribute("data-uid");
             selectedUser = friends.find(f => f.profile?.id === uid)?.profile;
-            renderOverlay();
+            renderAddFlow();
           });
         });
       }).catch(() => {
@@ -9751,21 +12361,14 @@ function openShareOverlay({ projectId, projectName, songId, songTitle }) {
           const q = searchInput.value.trim();
           const resultsEl = $("#shareResults");
           if (!resultsEl) return;
-
-          if (!q) {
-            // Re-show friends list
-            renderOverlay();
-            return;
-          }
+          if (!q) { renderAddFlow(); return; }
 
           resultsEl.innerHTML = `<div class="shareResultsEmpty"><div class="collabSpinner"></div></div>`;
           const users = await searchUsers(q);
-
           if (!users.length) {
             resultsEl.innerHTML = `<div class="shareResultsEmpty">No users found for "${escapeHtml(q)}"</div>`;
             return;
           }
-
           resultsEl.innerHTML = `<div class="shareResultsList">${users.map(u => {
             const meta = [u.instrument, u.genre, u.location].filter(Boolean).join(" · ");
             return `
@@ -9781,27 +12384,25 @@ function openShareOverlay({ projectId, projectName, songId, songTitle }) {
               </button>
             `;
           }).join("")}</div>`;
-
           resultsEl.querySelectorAll(".shareUserRow").forEach(row => {
             row.addEventListener("click", () => {
               const uid = row.getAttribute("data-uid");
               selectedUser = users.find(u => u.id === uid);
-              renderOverlay();
+              renderAddFlow();
             });
           });
         }, 300);
       });
-
       if (!selectedUser) setTimeout(() => searchInput.focus(), 150);
     }
 
     // Wire clear selection
     $("#shareClearUser")?.addEventListener("click", () => {
       selectedUser = null;
-      renderOverlay();
+      renderAddFlow();
     });
 
-    // Wire role buttons
+    // Wire role buttons → share and return to management
     shareOverlayEl.querySelectorAll(".shareRoleOption").forEach(btn => {
       btn.addEventListener("click", async () => {
         const role = btn.dataset.role;
@@ -9815,7 +12416,7 @@ function openShareOverlay({ projectId, projectName, songId, songTitle }) {
             role,
           });
           toast(`Shared with ${selectedUser.display_name} as ${role}`);
-          closeShareOverlay();
+          _renderSharingManagement({ projectId, projectName, songId, songTitle });
         } catch (e) {
           console.error("Share failed:", e);
           toast(e.message || "Failed to share");
@@ -9826,10 +12427,11 @@ function openShareOverlay({ projectId, projectName, songId, songTitle }) {
     });
   };
 
-  renderOverlay();
+  renderAddFlow();
 }
 
 function closeShareOverlay() {
+  _closeRoleDropdown();
   if (!shareOverlayEl) return;
   shareOverlayEl.classList.remove("open");
   setTimeout(() => { shareOverlayEl?.remove(); shareOverlayEl = null; }, 300);
@@ -9928,6 +12530,8 @@ async function refreshSharedData() {
 
 // ── Friends sidebar state ──
 let _collabSidebarOpen = false;
+let _collabFriendsCache = null;  // cached getMyFriends() result
+let _collabConvosCache = null;   // cached getConversations() result
 let _friendsOverlayEl = null;
 let _pendingFriendCount = 0;
 let _pendingFriendAction = null; // { friendshipId, notifId } — set when navigating to profile from notification
@@ -9943,83 +12547,40 @@ function renderCollab() {
   _applyAllBadges(_unreadMsgCount, _pendingFriendCount);
   syncMessageBadges();
 
-  // Build badge subtitles
-  const friendBadge = _pendingFriendCount ? `${_pendingFriendCount} pending` : "";
-  const msgBadge = _unreadMsgCount ? `${_unreadMsgCount} unread` : "";
-  const sharedCount = (sharedData.songs?.length || 0) + (sharedData.projects || []).reduce((n, p) => n + (p.songs?.length || 0), 0);
+  const friendsBadgeHtml = _pendingFriendCount ? `<span class="collabPillBadge">${_pendingFriendCount}</span>` : "";
+  const msgBadgeHtml = _unreadMsgCount ? `<span class="collabPillBadge">${_unreadMsgCount}</span>` : "";
 
   activeScreenEl.innerHTML = `
     <div class="songsPageTitle">Collab</div>
 
-    <div class="collabGrid">
-      <div class="hCard hCollabFriends hWide" role="button" tabindex="0" data-collab-nav="friends" aria-label="Friends">
-        <div class="hShimmer"></div>
-        <div class="hGrad"></div>
-        <div class="hBody">
-          <div class="hLabel">Friends ${_pendingFriendCount ? `<span class="hCardBadge">${_pendingFriendCount}</span>` : ""}</div>
-          ${friendBadge ? `<div class="hSub">${friendBadge}</div>` : ""}
-        </div>
-      </div>
-
-      <div class="hCard hCollabSongs hWide" role="button" tabindex="0" data-collab-nav="songs" aria-label="Songs">
-        <div class="hShimmer"></div>
-        <div class="hGrad"></div>
-        <div class="hBody">
-          <div class="hLabel">Songs</div>
-          ${sharedCount ? `<div class="hSub">${sharedCount} shared</div>` : ""}
-        </div>
-      </div>
-
-      <div class="hCard hCollabMessages hWide" role="button" tabindex="0" data-collab-nav="messages" aria-label="Messages">
-        <div class="hShimmer"></div>
-        <div class="hGrad"></div>
-        <div class="hBody">
-          <div class="hLabel">Messages</div>
-          ${msgBadge ? `<div class="hSub">${msgBadge}</div>` : ""}
-        </div>
-      </div>
-
-      <div class="hCard hCollabAdd hWide" role="button" tabindex="0" data-collab-nav="add" aria-label="Add Friend">
-        <div class="hShimmer"></div>
-        <div class="hGrad"></div>
-        <div class="hBody">
-          <div class="hLabel">Add Friend</div>
-          <div class="hSub">Find &amp; invite people</div>
-        </div>
-      </div>
+    <div class="collabPillBar">
+      <button class="collabPill${collabPill === "projects" ? " collabPillActive" : ""}" data-cpill="projects">Projects</button>
+      <button class="collabPill${collabPill === "friends" ? " collabPillActive" : ""}" data-cpill="friends">Friends${friendsBadgeHtml}</button>
+      <button class="collabPill${collabPill === "messages" ? " collabPillActive" : ""}" data-cpill="messages">Messages${msgBadgeHtml}</button>
     </div>
+
+    <div class="collabPillBody" id="collabPillBody"></div>
+
+    <button class="sdFab" id="collabFab" aria-label="Action"></button>
   `;
 
-  // Wire card taps
-  activeScreenEl.querySelectorAll("[data-collab-nav]").forEach(card => {
-    card.addEventListener("click", () => {
-      const target = card.getAttribute("data-collab-nav");
-      if (target === "friends") {
-        openFriendsList();
-      } else if (target === "songs") {
-        console.log("[Collab] Songs card tapped — navigating forward");
-        navigateForward(() => {
-          console.log("[Collab] Inside navigateForward callback — setting ownerFilter=shared");
-          songsListState.ownerFilter = "shared";
-          songsFromCollab = true;
-          currentTab = "songs";
-          songsView = "list";
-          selectedSongId = null;
-          console.log("[Collab] State set, render will follow");
-        });
-      } else if (target === "messages") {
-        openMessages();
-      } else if (target === "add") {
-        openAddFriend();
-      }
+  // Wire pill taps (skip if already on that pill)
+  activeScreenEl.querySelectorAll(".collabPill").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const target = btn.getAttribute("data-cpill");
+      if (target === collabPill) return;
+      collabPill = target;
+      activeScreenEl.querySelectorAll(".collabPill").forEach(p => p.classList.remove("collabPillActive"));
+      btn.classList.add("collabPillActive");
+      _renderCollabPillContent();
     });
   });
 
-  // Refresh shared data when opening Collab (with cooldown + delay to avoid interrupting transitions)
-  // const _now = Date.now();
-  // if (!refreshSharedData._lastRun || (_now - refreshSharedData._lastRun > 60000)) {
-  //   setTimeout(() => refreshSharedData().catch(() => {}), 500);
-  // }
+  _renderCollabPillContent();
+
+  // Prefetch Friends + Messages in background so tab switches are instant
+  if (!_collabFriendsCache) getMyFriends().then(f => { _collabFriendsCache = f; }).catch(() => {});
+  if (!_collabConvosCache) getConversations().then(c => { _collabConvosCache = c; }).catch(() => {});
 
   // Collapse title scroll handler
   if (activeScreenEl._collapseTitleScroll) {
@@ -10047,6 +12608,495 @@ function renderCollab() {
       onScroll();
     });
   }
+}
+
+// ── Collab pill content renderers ──
+
+function _renderCollabPillContent() {
+  const body = document.getElementById("collabPillBody");
+  if (!body) return;
+  if (collabPill === "projects") _renderCollabProjects(body);
+  else if (collabPill === "friends") _renderCollabFriends(body);
+  else if (collabPill === "messages") _renderCollabMessages(body);
+  _updateCollabFab();
+}
+
+function _updateCollabFab() {
+  const fab = document.getElementById("collabFab");
+  if (!fab) return;
+  // Remove old listener by replacing node
+  const fresh = fab.cloneNode(false);
+  fab.parentNode.replaceChild(fresh, fab);
+  fresh.id = "collabFab";
+  fresh.className = "sdFab";
+
+  if (collabPill === "projects") {
+    fresh.setAttribute("aria-label", "Share");
+    fresh.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="24" height="24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>`;
+    fresh.addEventListener("click", () => _openShareFabMenu());
+  } else if (collabPill === "friends") {
+    fresh.setAttribute("aria-label", "Add");
+    fresh.innerHTML = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`;
+    fresh.addEventListener("click", () => _openFriendsFabMenu());
+  } else if (collabPill === "messages") {
+    fresh.setAttribute("aria-label", "New Message");
+    fresh.innerHTML = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>`;
+    fresh.addEventListener("click", () => _openNewMessagePicker());
+  }
+}
+
+function _openShareFabMenu() {
+  sheetMode = "shareFabMenu";
+  openSheet("shareFabMenu");
+  sheetContent.innerHTML = `
+    <div class="sheetTitle">Share</div>
+    <div class="sheetForm" style="gap:6px; margin-top:14px">
+      <button class="sheetChoice" id="shareFabSingle">
+        Share a Project or Song
+        <span class="sub">share one item with an existing user</span>
+      </button>
+      <button class="sheetChoice" id="shareFabCancel">Cancel</button>
+    </div>
+  `;
+  $("#shareFabSingle")?.addEventListener("click", () => { closeSheet(); openCollabSharePicker(); });
+  $("#shareFabCancel")?.addEventListener("click", closeSheet);
+}
+
+function _openFriendsFabMenu() {
+  sheetMode = "friendsFabMenu";
+  openSheet("friendsFabMenu");
+  sheetContent.innerHTML = `
+    <div class="sheetTitle">Add</div>
+    <div class="sheetForm" style="gap:6px; margin-top:14px">
+      <button class="sheetChoice" id="friendsFabAdd">
+        Add Friend
+        <span class="sub">find someone by username</span>
+      </button>
+      <button class="sheetChoice" id="friendsFabLoaded">
+        Loaded Invite
+        <span class="sub">bundle projects & songs for a new user</span>
+      </button>
+      <button class="sheetChoice" id="friendsFabCancel">Cancel</button>
+    </div>
+  `;
+  $("#friendsFabAdd")?.addEventListener("click", () => { closeSheet(); openAddFriend(); });
+  $("#friendsFabLoaded")?.addEventListener("click", () => { closeSheet(); openLoadedInviteBuilder(); });
+  $("#friendsFabCancel")?.addEventListener("click", closeSheet);
+}
+
+function _renderCollabProjects(body) {
+  const { projects: sharedProjects, songs: sharedSongs, myProjects, mySongs } = sharedData;
+
+  // Merge all shared data into unified project map: projName → { songs[], owners[] }
+  const projMap = new Map();
+  const _ensureProj = (name) => {
+    if (!projMap.has(name)) projMap.set(name, { songs: [], songIds: new Set(), owners: new Set() });
+    return projMap.get(name);
+  };
+
+  // Projects shared WITH me
+  for (const sp of sharedProjects) {
+    const p = _ensureProj(sp.projectName);
+    p.owners.add(sp.ownerName);
+    for (const s of sp.songs) {
+      if (!p.songIds.has(s.id)) { p.songIds.add(s.id); p.songs.push(s); }
+    }
+  }
+  // Individual songs shared WITH me (grouped by project)
+  for (const ss of sharedSongs) {
+    const projName = (ss.song?.project || "").trim();
+    if (!projName) continue;
+    const p = _ensureProj(projName);
+    p.owners.add(ss.ownerName);
+    if (!p.songIds.has(ss.song.id)) { p.songIds.add(ss.song.id); p.songs.push(ss.song); }
+  }
+  // Projects I shared
+  for (const mp of myProjects) {
+    const p = _ensureProj(mp.projectName);
+    const matching = state.songs.filter(s => (s.project || "").trim() === mp.projectName);
+    for (const s of matching) {
+      if (!p.songIds.has(s.id)) { p.songIds.add(s.id); p.songs.push(s); }
+    }
+  }
+  // Individual songs I shared (grouped by project)
+  for (const ms of mySongs) {
+    const projName = (ms.projectName || "").trim();
+    if (!projName) continue;
+    const p = _ensureProj(projName);
+    const s = state.songs.find(x => x.id === ms.songId);
+    if (s && !p.songIds.has(s.id)) { p.songIds.add(s.id); p.songs.push(s); }
+  }
+
+  // Build sorted project list (only those with at least one song)
+  const projects = Array.from(projMap.entries())
+    .filter(([, data]) => data.songs.length > 0)
+    .sort((a, b) => a[0].localeCompare(b[0]));
+
+  if (!projects.length) {
+    body.innerHTML = `
+      <div class="collabWrap">
+        <div class="collabEmpty" style="padding:24px 0;text-align:center">
+          No shared projects yet.
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  const projectCards = projects.map(([name, data], i) => {
+    const count = data.songs.length;
+    const repSong = data.songs[0] || { id: name, title: name, project: name, genre: "" };
+    const ownerList = Array.from(data.owners);
+    const meta = ownerList.length
+      ? `${ownerList.join(", ")} · ${count} song${count !== 1 ? "s" : ""}`
+      : `${count} song${count !== 1 ? "s" : ""}`;
+
+    const sleeveItems = data.songs.slice(0, 4).map(s =>
+      `<div class="pSleeveSong">${escapeHtml(s.title || "Untitled")}</div>`
+    ).join("") + (count > 4 ? `<div class="pSleeveSong pSleeveMore">+${count - 4} more</div>` : "");
+
+    return `
+      <div class="pCard" data-collab-proj="${escapeHtml(name)}" style="animation-delay:${i * 60}ms">
+        <div class="pCardInner">
+          <div class="pSleeve">
+            <div class="pSleeveContent">
+              ${sleeveItems || `<div class="pSleeveSong" style="opacity:.4">No songs</div>`}
+            </div>
+          </div>
+          <div class="pArt">
+            ${coverSvg(repSong, { lite: true })}
+            <div class="pShimmer"></div>
+          </div>
+          <div class="pInfo">
+            <div class="pNameRow"><div class="pName">${escapeHtml(name)}</div>${sharedBadgeProject(name)}</div>
+            <div class="pMeta"><span>${escapeHtml(meta)}</span></div>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  body.innerHTML = projectCards ? `<div class="pGrid">${projectCards}</div>` : "";
+
+  // Wire project card taps → drill into project songs
+  body.querySelectorAll("[data-collab-proj]").forEach(card => {
+    card.addEventListener("click", () => {
+      const name = card.getAttribute("data-collab-proj");
+      navigateForward(() => {
+        collabMode = true;
+        projectDetailScreen = name;
+      });
+    });
+  });
+}
+
+// Resolve project_ids to project names for the invite editor
+async function _resolveInviteProjectNames(invite) {
+  const enriched = { ...invite, _projectNames: [] };
+  if (invite.project_ids?.length) {
+    try {
+      const { data: userData } = await supabase.auth.getUser();
+      const uid = userData?.user?.id;
+      if (uid) {
+        const { data: projs } = await supabase
+          .from("projects").select("id, name").eq("owner_id", uid)
+          .in("id", invite.project_ids);
+        if (projs) enriched._projectNames = projs.map(p => p.name);
+      }
+    } catch {}
+  }
+  return enriched;
+}
+
+// Short time-ago for invite cards
+function _timeAgoShort(ts) {
+  if (!ts) return "";
+  const s = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
+function _renderCollabFriends(body) {
+  // If we have cached data, render instantly
+  if (_collabFriendsCache) {
+    _renderCollabFriendsDOM(body, _collabFriendsCache);
+    // Refresh in background (silent update)
+    getMyFriends().then(friends => { _collabFriendsCache = friends; }).catch(() => {});
+    return;
+  }
+
+  body.innerHTML = `
+    <div id="collabFriendsPending" style="display:none"></div>
+    <div class="collabFriendsBody" style="padding:0 0 40px; display:flex; flex-direction:column; gap:10px;">
+      <div class="friendsEmpty"><div class="collabSpinner"></div><div style="margin-top:12px">Loading...</div></div>
+    </div>
+  `;
+
+  // Load pending friend requests at top
+  if (_pendingFriendCount) {
+    _loadCollabPendingRequests(body);
+  }
+
+  // First load — fetch and cache
+  getMyFriends().then(friends => {
+    _collabFriendsCache = friends;
+    _renderCollabFriendsDOM(body, friends);
+  }).catch(() => {
+    const friendsBody = body.querySelector(".collabFriendsBody");
+    if (friendsBody) friendsBody.innerHTML = `<div class="friendsEmpty">Failed to load friends.</div>`;
+  });
+}
+
+function _renderCollabFriendsDOM(body, friends) {
+  // ── Loaded invite cards (pending invites the user created) ──
+  const pendingInvites = (_loadedInvitesCache || []).filter(inv => !inv.claimed && !(inv.expires_at && new Date(inv.expires_at) < new Date()));
+
+  const inviteCardsHtml = pendingInvites.map((inv, i) => {
+    const projCount = (inv.project_ids || []).length;
+    const songCount = (inv.song_ids || []).length;
+    const parts = [];
+    if (projCount) parts.push(`${projCount} project${projCount > 1 ? "s" : ""}`);
+    if (songCount) parts.push(`${songCount} song${songCount > 1 ? "s" : ""}`);
+    const roleBadge = inv.role === "collaborator"
+      ? `<span class="liInvBadge liInvBadgeCollab">Collab</span>`
+      : `<span class="liInvBadge liInvBadgeViewer">Viewer</span>`;
+    const age = _timeAgoShort(inv.created_at);
+    return `
+      <div class="liInvCard" data-li-inv="${escapeHtml(inv.id)}" style="animation-delay:${i * 60}ms">
+        <div class="liInvIcon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+        </div>
+        <div class="liInvBody">
+          <div class="liInvTitle">Loaded Invite ${roleBadge}</div>
+          <div class="liInvMeta">${parts.join(" & ")} · ${age}</div>
+        </div>
+        <button class="liInvShareBtn" data-li-reshare="${escapeHtml(inv.id)}" title="Re-share link">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+        </button>
+      </div>`;
+  }).join("");
+
+  const inviteSectionHtml = inviteCardsHtml ? `
+    <div class="liInvSection">
+      <div class="liInvSectionLabel">Pending Invites</div>
+      ${inviteCardsHtml}
+    </div>
+  ` : "";
+
+  body.innerHTML = `
+    ${inviteSectionHtml}
+    <div id="collabFriendsPending" style="display:none"></div>
+    <div class="collabFriendsBody" style="padding:0 0 40px; display:flex; flex-direction:column; gap:10px;"></div>
+  `;
+
+  // Wire loaded invite cards — tap to edit, re-share button
+  body.querySelectorAll("[data-li-inv]").forEach(card => {
+    card.addEventListener("click", (e) => {
+      if (e.target.closest("[data-li-reshare]")) return;
+      const invId = card.dataset.liInv;
+      const inv = (_loadedInvitesCache || []).find(i => i.id === invId);
+      if (!inv) return;
+      _resolveInviteProjectNames(inv).then(enriched => {
+        openLoadedInviteBuilder(enriched);
+      });
+    });
+  });
+  body.querySelectorAll("[data-li-reshare]").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const invId = btn.dataset.liReshare;
+      const inv = (_loadedInvitesCache || []).find(i => i.id === invId);
+      if (inv) _reshareLoadedInvite(inv);
+    });
+  });
+
+  // Load pending friend requests
+  if (_pendingFriendCount) {
+    _loadCollabPendingRequests(body);
+  }
+
+  const friendsBody = body.querySelector(".collabFriendsBody");
+  if (!friendsBody) return;
+  if (!friends.length) {
+    friendsBody.innerHTML = `<div class="friendsEmpty">No friends yet. Tap <strong>+</strong> to find people.</div>`;
+    return;
+  }
+  friendsBody.innerHTML = friends.map(f => {
+    const name = f.profile?.display_name || "Unknown";
+    const fullName = [f.profile?.first_name, f.profile?.last_name].filter(Boolean).join(" ");
+    return `
+      <div class="friendRow" data-friend-id="${f.id}">
+        ${_friendAvatarHTML(f.profile)}
+        <div class="friendInfo">
+          <div class="friendName">${escapeHtml(name)}</div>
+          ${fullName ? `<div class="friendMeta">${escapeHtml(fullName)}</div>` : ""}
+        </div>
+        <button class="friendMsgBtn" data-msg="${f.friendId}" aria-label="Message">Message</button>
+      </div>
+    `;
+  }).join("");
+
+  friendsBody.querySelectorAll(".friendRow[data-friend-id]").forEach(row => {
+    row.addEventListener("click", () => {
+      const fId = row.getAttribute("data-friend-id");
+      const friend = friends.find(f => String(f.id) === fId);
+      if (!friend) return;
+      navigateForward(() => { friendProfileId = friend.friendId; overlayView = "friendProfile"; });
+    });
+  });
+  friendsBody.querySelectorAll(".friendMsgBtn").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const uid = btn.getAttribute("data-msg");
+      if (uid) openChat(uid);
+    });
+  });
+}
+
+function _loadCollabPendingRequests(body) {
+  const pendingEl = body.querySelector("#collabFriendsPending");
+  if (!pendingEl) return;
+  getPendingFriendRequests().then(requests => {
+    if (!requests.length || !pendingEl) return;
+    pendingEl.style.display = "";
+    pendingEl.innerHTML = `
+      <div style="padding:0 0 8px">
+        <div class="collabPendingSectionLabel">Pending Requests</div>
+        ${requests.map(r => `
+          <div class="collabPendingRow alertRowClickable" data-req-id="${r.id}" data-req-profile="${r.requester_id}">
+            ${_friendAvatarHTML(r.profile)}
+            <div class="friendInfo">
+              <div class="friendName">${escapeHtml(r.profile?.display_name || "Unknown")}</div>
+              <div class="friendMeta">${_friendMetaText(r.profile)}</div>
+            </div>
+            <div class="friendActions">
+              <button class="friendAcceptBtn" data-cfl-accept="${r.id}">Accept</button>
+              <button class="friendDeclineBtn" data-cfl-decline="${r.id}">Decline</button>
+            </div>
+          </div>
+        `).join("")}
+      </div>
+    `;
+    pendingEl.querySelectorAll("[data-cfl-accept]").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const id = btn.getAttribute("data-cfl-accept");
+        btn.textContent = "...";
+        try {
+          await acceptFriendRequest(id);
+          const row = btn.closest(".collabPendingRow");
+          row.style.opacity = ".4";
+          setTimeout(() => { row.remove(); if (!pendingEl.querySelector(".collabPendingRow")) pendingEl.style.display = "none"; }, 300);
+          toast("Friend request accepted!");
+          _pendingFriendCount = Math.max(0, _pendingFriendCount - 1);
+          _applyAllBadges(_unreadMsgCount, _pendingFriendCount);
+        } catch (err) { toast(err.message || "Failed"); btn.textContent = "Accept"; }
+      });
+    });
+    pendingEl.querySelectorAll("[data-cfl-decline]").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const id = btn.getAttribute("data-cfl-decline");
+        btn.textContent = "...";
+        try {
+          await removeFriendship(id);
+          const row = btn.closest(".collabPendingRow");
+          row.style.opacity = ".4";
+          setTimeout(() => { row.remove(); if (!pendingEl.querySelector(".collabPendingRow")) pendingEl.style.display = "none"; }, 300);
+          toast("Request declined");
+          _pendingFriendCount = Math.max(0, _pendingFriendCount - 1);
+          _applyAllBadges(_unreadMsgCount, _pendingFriendCount);
+        } catch (err) { toast(err.message || "Failed"); btn.textContent = "Decline"; }
+      });
+    });
+    pendingEl.querySelectorAll("[data-req-profile]").forEach(row => {
+      row.addEventListener("click", (e) => {
+        if (e.target.closest("[data-cfl-accept]") || e.target.closest("[data-cfl-decline]")) return;
+        const userId = row.getAttribute("data-req-profile");
+        if (userId) navigateForward(() => { friendProfileId = userId; overlayView = "friendProfile"; });
+      });
+    });
+  }).catch(() => {});
+}
+
+function _renderCollabMessages(body) {
+  // If we have cached data, render instantly
+  if (_collabConvosCache) {
+    _renderCollabMessagesDOM(body, _collabConvosCache);
+    // Refresh in background (silent update)
+    getConversations().then(convos => { _collabConvosCache = convos; }).catch(() => {});
+    return;
+  }
+
+  body.innerHTML = `
+    <div class="collabMsgBody" style="padding:0 0 40px; display:flex; flex-direction:column; gap:0;">
+      <div class="friendsEmpty"><div class="collabSpinner"></div><div style="margin-top:12px">Loading...</div></div>
+    </div>
+  `;
+
+  getConversations().then(convos => {
+    _collabConvosCache = convos;
+    _renderCollabMessagesDOM(body, convos);
+  }).catch(() => {
+    const msgBody = body.querySelector(".collabMsgBody");
+    if (msgBody) msgBody.innerHTML = `<div class="friendsEmpty">Failed to load messages.</div>`;
+  });
+}
+
+function _renderCollabMessagesDOM(body, convos) {
+  body.innerHTML = `
+    <div class="collabMsgBody" style="padding:0 0 40px; display:flex; flex-direction:column; gap:0;"></div>
+  `;
+  const msgBody = body.querySelector(".collabMsgBody");
+  if (!msgBody) return;
+  if (!convos.length) {
+    msgBody.innerHTML = `<div class="friendsEmpty">No messages yet. Tap a friend's <strong>Message</strong> button to start a conversation.</div>`;
+    return;
+  }
+  _renderConvoList(msgBody, convos);
+}
+
+function _openNewMessagePicker() {
+  sheetMode = "newMessage";
+  openSheet("newMessage");
+
+  sheetContent.innerHTML = `
+    <div class="sheetTitle">New Message</div>
+    <div class="sheetForm" style="gap:6px; margin-top:14px; max-height:50vh; overflow-y:auto">
+      <div class="friendsEmpty"><div class="collabSpinner"></div></div>
+    </div>
+  `;
+
+  getMyFriends().then(friends => {
+    const form = sheetContent?.querySelector(".sheetForm");
+    if (!form) return;
+    if (!friends.length) {
+      form.innerHTML = `<div class="friendsEmpty">No friends yet. Add friends first to start messaging.</div>
+        <button class="sheetChoice" id="newMsgCancel">Cancel</button>`;
+      $("#newMsgCancel")?.addEventListener("click", () => closeSheet());
+      return;
+    }
+    form.innerHTML = friends.map(f => {
+      const name = f.profile?.display_name || "Unknown";
+      return `<button class="sheetChoice" data-newmsg-uid="${f.friendId}">${escapeHtml(name)}</button>`;
+    }).join("") + `<button class="sheetChoice" id="newMsgCancel">Cancel</button>`;
+
+    form.querySelectorAll("[data-newmsg-uid]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const uid = btn.getAttribute("data-newmsg-uid");
+        closeSheet();
+        if (uid) openChat(uid);
+      });
+    });
+    $("#newMsgCancel")?.addEventListener("click", () => closeSheet());
+  }).catch(() => {
+    const form = sheetContent?.querySelector(".sheetForm");
+    if (form) form.innerHTML = `<div class="friendsEmpty">Failed to load friends.</div>
+      <button class="sheetChoice" id="newMsgCancel">Cancel</button>`;
+    $("#newMsgCancel")?.addEventListener("click", () => closeSheet());
+  });
 }
 
 function _updateCollabBadges(friendCount, msgCount) {
@@ -10251,6 +13301,25 @@ function _wireCollabSidebar() {
 }
 
 function renderCollabContent() {
+  // Show loading shimmer while shared data is still being fetched
+  if (!sharedData.loaded) {
+    activeScreenEl.innerHTML = `
+      <div class="collabShell">
+        <div class="collabSidebar">${_collabSidebarHTML()}</div>
+        <div class="collabMain">
+          <div class="collabWrap">
+            <div class="songsPageTitle">Collab</div>
+            <div class="collabSection">
+              <div class="collabSectionTitle">Shared With Me</div>
+              <div class="sharedLoadingShimmer"></div>
+              <div class="sharedLoadingShimmer" style="animation-delay:.15s"></div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    return;
+  }
+
   const { projects: sharedProjects, songs: sharedSongs, invites, myProjects, mySongs } = sharedData;
 
   // Gather local collaborators from songs
@@ -10504,9 +13573,13 @@ function _closeFriendsOverlay() {
 function _friendAvatarHTML(profile) {
   if (!profile) return `<div class="friendAvatar">?</div>`;
   if (profile.avatar_url) {
-    const src = profile.avatar_url.startsWith("preset:")
-      ? "" : escapeHtml(profile.avatar_url);
-    if (src) return `<div class="friendAvatar"><img src="${src}" alt=""></div>`;
+    if (profile.avatar_url.startsWith("preset:")) {
+      const presetId = profile.avatar_url.replace("preset:", "");
+      const preset = AVATAR_PRESETS.find(p => p.id === presetId);
+      if (preset) return `<div class="friendAvatar">${renderAvatarPreset(preset)}</div>`;
+    } else {
+      return `<div class="friendAvatar"><img src="${escapeHtml(profile.avatar_url)}" alt=""></div>`;
+    }
   }
   const initial = (profile.display_name || "?").charAt(0).toUpperCase();
   return `<div class="friendAvatar">${escapeHtml(initial)}</div>`;
@@ -10619,7 +13692,11 @@ function openFriendsList() {
 
 function renderFriendsList() {
   setHeader("Friends");
+  document.querySelector(".app")?.classList.add("collapseTitle");
+  const _h1 = document.querySelector(".titleblock h1");
+  if (_h1) _h1.style.opacity = "0";
   activeScreenEl.innerHTML = `
+    <div class="songsPageTitle">Friends</div>
     <div id="friendsPendingSection" style="display:none"></div>
     <div class="friendsBody" style="padding:16px 16px 40px; display:flex; flex-direction:column; gap:10px;">
       <div class="friendsEmpty"><div class="collabSpinner"></div><div style="margin-top:12px">Loading...</div></div>
@@ -10871,9 +13948,12 @@ function _renderFriendProfileContent(profile, shared) {
   const totalCount = allSongs.length;
 
   // Hero image — use avatar as full-bleed background
-  const heroImg = avatarSrc?.startsWith("http")
-    ? `<img src="${avatarSrc}" style="width:100%;height:100%;object-fit:cover;display:block" onerror="this.style.display='none'" />`
-    : `<div style="width:100%;height:100%;background:linear-gradient(135deg,#a78bfa,#f472b6)"></div>`;
+  const presetMatch = avatarSrc?.startsWith("preset:") && AVATAR_PRESETS.find(p => p.id === avatarSrc.slice(7));
+  const heroImg = presetMatch
+    ? `<div style="width:100%;height:100%;background:${presetMatch.bg};display:flex;align-items:center;justify-content:center;font-size:80px">${presetMatch.emoji}</div>`
+    : avatarSrc?.startsWith("http")
+      ? `<img src="${avatarSrc}" style="width:100%;height:100%;object-fit:cover;display:block" onerror="this.style.display='none'" />`
+      : `<div style="width:100%;height:100%;background:linear-gradient(135deg,#a78bfa,#f472b6)"></div>`;
 
   // Song rows builder — matches song detail compact row style
   const songRow = (s, i) => {
@@ -11123,7 +14203,11 @@ let _msgPollTimer = null;
 
 function renderMessages() {
   setHeader("Messages");
+  document.querySelector(".app")?.classList.add("collapseTitle");
+  const _h1 = document.querySelector(".titleblock h1");
+  if (_h1) _h1.style.opacity = "0";
   activeScreenEl.innerHTML = `
+    <div class="songsPageTitle">Messages</div>
     <div class="msgBody" style="padding:16px 16px 40px; display:flex; flex-direction:column; gap:0;">
       <div class="friendsEmpty"><div class="collabSpinner"></div><div style="margin-top:12px">Loading...</div></div>
     </div>
@@ -11328,8 +14412,10 @@ async function openInviteShareScreen() {
 
     <div class="issBody">
       <div class="issAvatar">
-        ${avatarUrl && !avatarUrl.startsWith("preset:")
-          ? `<img src="${escapeHtml(avatarUrl)}" alt="">`
+        ${avatarUrl
+          ? (avatarUrl.startsWith("preset:")
+            ? (() => { const pr = AVATAR_PRESETS.find(a => a.id === avatarUrl.replace("preset:","")); return pr ? renderAvatarPreset(pr) : escapeHtml(initial); })()
+            : `<img src="${escapeHtml(avatarUrl)}" alt="">`)
           : escapeHtml(initial)
         }
       </div>
@@ -11415,7 +14501,11 @@ function openAddFriend() {
 
 function renderAddFriend() {
   setHeader("Add Friend");
+  document.querySelector(".app")?.classList.add("collapseTitle");
+  const _h1 = document.querySelector(".titleblock h1");
+  if (_h1) _h1.style.opacity = "0";
   activeScreenEl.innerHTML = `
+    <div class="songsPageTitle">Add Friend</div>
     <div class="friendSearchWrap" style="padding:16px;">
       <button class="friendInviteBtn" id="friendInvitePhone">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
@@ -11897,8 +14987,271 @@ function openCollabSharePicker() {
   $("#sharePickerCancel")?.addEventListener("click", closeSheet);
 }
 
+// ── Loaded Invite Builder ──────────────────────────────────────────
+
+let _loadedInvitesCache = null; // cached getMyLoadedInvites() result
+
+async function _refreshLoadedInvites() {
+  try { _loadedInvitesCache = await getMyLoadedInvites(); } catch { _loadedInvitesCache = []; }
+}
+
+// Open the loaded invite builder (create or edit mode)
+// editInvite: null for new, or an existing invite object to edit
+function openLoadedInviteBuilder(editInvite = null) {
+  // Gather user's projects (name → supabase lookup needed) and songs
+  const allProjects = [...new Set([
+    ...(state.settings?.defaultProject ? [state.settings.defaultProject.trim()] : []),
+    ...(state.projects || []).map(p => p.trim()).filter(Boolean),
+    ...state.songs.map(s => (s.project || "").trim()).filter(Boolean),
+  ])].sort();
+
+  const allSongs = state.songs.filter(s => s.title).slice(0, 50);
+
+  // Pre-select items if editing
+  const selectedProjects = new Set();
+  const selectedSongIds = new Set();
+  let selectedRole = editInvite?.role || "viewer";
+
+  // If editing, pre-populate from cached project names and song IDs
+  if (editInvite) {
+    for (const sid of (editInvite.song_ids || [])) selectedSongIds.add(sid);
+    if (editInvite._projectNames) {
+      for (const n of editInvite._projectNames) selectedProjects.add(n);
+    }
+  }
+
+  // Create overlay
+  const overlay = document.createElement("div");
+  overlay.className = "liBuilderOverlay";
+  document.body.appendChild(overlay);
+  requestAnimationFrame(() => overlay.classList.add("open"));
+
+  function close() {
+    overlay.classList.remove("open");
+    setTimeout(() => overlay.remove(), 300);
+  }
+
+  function renderBuilder() {
+    const totalSelected = selectedProjects.size + selectedSongIds.size;
+
+    const projRows = allProjects.map(name => {
+      const checked = selectedProjects.has(name);
+      const songCount = state.songs.filter(s => (s.project || "").trim() === name).length;
+      return `
+        <button class="liBuilderItem${checked ? " liSelected" : ""}" data-li-proj="${escapeHtml(name)}">
+          <div class="liBuilderCheck">${checked ? `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>` : ""}</div>
+          <div class="liBuilderItemBody">
+            <div class="liBuilderItemTitle">${escapeHtml(name)}</div>
+            <div class="liBuilderItemSub">${songCount} song${songCount !== 1 ? "s" : ""}</div>
+          </div>
+        </button>`;
+    }).join("");
+
+    const songRows = allSongs.map(s => {
+      const checked = selectedSongIds.has(s.id);
+      const projName = (s.project || "").trim();
+      const projSelected = projName && selectedProjects.has(projName);
+      return `
+        <button class="liBuilderItem${checked ? " liSelected" : ""}${projSelected ? " liDimmed" : ""}" data-li-song="${escapeHtml(s.id)}">
+          <div class="liBuilderCheck">${checked ? `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>` : ""}</div>
+          <div class="liBuilderItemBody">
+            <div class="liBuilderItemTitle">${escapeHtml(s.title)}</div>
+            <div class="liBuilderItemSub">${escapeHtml(s.project || "No project")}</div>
+          </div>
+        </button>`;
+    }).join("");
+
+    overlay.innerHTML = `
+      <div class="liBuilderHeader">
+        <button class="liBuilderClose" id="liBuilderClose">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+        <div class="liBuilderTitle">${editInvite ? "Edit Invite" : "Loaded Invite"}</div>
+        <div class="liBuilderCount">${totalSelected} selected</div>
+      </div>
+
+      <div class="liBuilderBody">
+        <div class="liBuilderSection">
+          <div class="liBuilderSectionLabel">Role</div>
+          <div class="liBuilderRoleBar">
+            <button class="liRoleBtn${selectedRole === "viewer" ? " liRoleActive" : ""}" data-li-role="viewer">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              Viewer
+            </button>
+            <button class="liRoleBtn${selectedRole === "collaborator" ? " liRoleActive" : ""}" data-li-role="collaborator">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+              Collaborator
+            </button>
+          </div>
+        </div>
+
+        ${allProjects.length ? `
+          <div class="liBuilderSection">
+            <div class="liBuilderSectionLabel">Projects</div>
+            ${projRows}
+          </div>
+        ` : ""}
+
+        ${allSongs.length ? `
+          <div class="liBuilderSection">
+            <div class="liBuilderSectionLabel">Songs</div>
+            ${songRows}
+          </div>
+        ` : ""}
+      </div>
+
+      <div class="liBuilderFooter">
+        ${editInvite ? `<button class="liBuilderDelete" id="liBuilderDelete">Delete Invite</button>` : ""}
+        <button class="liBuilderBtn" id="liBuilderCreate" ${totalSelected === 0 ? "disabled" : ""}>
+          ${editInvite ? "Save Changes" : "Create & Share"}
+        </button>
+      </div>
+    `;
+
+    // Wire close
+    overlay.querySelector("#liBuilderClose").addEventListener("click", close);
+
+    // Wire role buttons
+    overlay.querySelectorAll(".liRoleBtn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        selectedRole = btn.dataset.liRole;
+        renderBuilder();
+      });
+    });
+
+    // Wire project toggles
+    overlay.querySelectorAll("[data-li-proj]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const name = btn.dataset.liProj;
+        if (selectedProjects.has(name)) selectedProjects.delete(name);
+        else selectedProjects.add(name);
+        renderBuilder();
+      });
+    });
+
+    // Wire song toggles
+    overlay.querySelectorAll("[data-li-song]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const id = btn.dataset.liSong;
+        if (selectedSongIds.has(id)) selectedSongIds.delete(id);
+        else selectedSongIds.add(id);
+        renderBuilder();
+      });
+    });
+
+    // Wire delete button (edit mode)
+    overlay.querySelector("#liBuilderDelete")?.addEventListener("click", async () => {
+      if (!editInvite) return;
+      try {
+        await deleteLoadedInvite(editInvite.id);
+        toast("Invite deleted");
+        close();
+        _refreshLoadedInvites().then(() => { if (currentTab === "collab") _renderCollabPillContent(); });
+      } catch (e) {
+        toast(e.message || "Failed to delete");
+      }
+    });
+
+    // Wire create/save button
+    overlay.querySelector("#liBuilderCreate").addEventListener("click", async () => {
+      const btn = overlay.querySelector("#liBuilderCreate");
+      btn.disabled = true;
+      btn.textContent = editInvite ? "Saving..." : "Creating...";
+
+      try {
+        // Resolve project names to Supabase IDs
+        const projectIds = [];
+        if (selectedProjects.size) {
+          const { data: userData } = await supabase.auth.getUser();
+          const uid = userData?.user?.id;
+          if (uid) {
+            for (const name of selectedProjects) {
+              const { data: proj } = await supabase
+                .from("projects").select("id").eq("owner_id", uid).eq("name", name).maybeSingle();
+              if (proj?.id) projectIds.push(proj.id);
+            }
+          }
+        }
+
+        // Filter out songs that belong to selected projects (avoid double-sharing)
+        const filteredSongIds = [...selectedSongIds].filter(sid => {
+          const song = state.songs.find(s => s.id === sid);
+          if (!song) return false;
+          const projName = (song.project || "").trim();
+          return !selectedProjects.has(projName);
+        });
+
+        if (!projectIds.length && !filteredSongIds.length) {
+          toast("Select at least one item");
+          btn.disabled = false;
+          btn.textContent = editInvite ? "Save Changes" : "Create & Share";
+          return;
+        }
+
+        if (editInvite) {
+          await updateLoadedInvite(editInvite.id, {
+            projectIds,
+            songIds: filteredSongIds,
+            role: selectedRole,
+          });
+          toast("Invite updated!");
+          close();
+          _refreshLoadedInvites().then(() => { if (currentTab === "collab") _renderCollabPillContent(); });
+        } else {
+          const result = await createLoadedInvite({
+            projectIds,
+            songIds: filteredSongIds,
+            role: selectedRole,
+          });
+
+          const url = `${location.origin}/invite.html?li=${result.token}`;
+
+          if (navigator.share) {
+            try {
+              await navigator.share({ title: "RiffBank Invite", text: "Check out my music on RiffBank!", url });
+            } catch (e) {
+              if (e.name !== "AbortError") {
+                await navigator.clipboard.writeText(url).catch(() => {});
+                toast("Link copied!");
+              }
+            }
+          } else {
+            await navigator.clipboard.writeText(url).catch(() => {});
+            toast("Invite link copied!");
+          }
+
+          close();
+          _refreshLoadedInvites().then(() => { if (currentTab === "collab") _renderCollabPillContent(); });
+        }
+      } catch (e) {
+        console.error("Loaded invite error:", e);
+        toast(e.message || "Something went wrong");
+        btn.disabled = false;
+        btn.textContent = editInvite ? "Save Changes" : "Create & Share";
+      }
+    });
+  }
+
+  renderBuilder();
+}
+
+// Re-share an existing loaded invite link
+async function _reshareLoadedInvite(invite) {
+  const url = `${location.origin}/invite.html?li=${invite.token}`;
+  if (navigator.share) {
+    try { await navigator.share({ title: "RiffBank Invite", text: "Check out my music on RiffBank!", url }); return; }
+    catch (e) { if (e.name === "AbortError") return; }
+  }
+  try { await navigator.clipboard.writeText(url); toast("Invite link copied!"); }
+  catch { toast("Couldn't copy link"); }
+}
+
 function renderAlerts() {
   setHeader("Alerts");
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("collapseTitle");
+  const h1 = appEl?.querySelector(".titleblock h1");
+  if (h1) h1.style.opacity = "0";
 
   // Mark all inbox notifications as read when viewing
   markNotificationsRead();
@@ -11910,6 +15263,7 @@ function renderAlerts() {
   };
 
   const notifIcon = (type) => {
+    if (type === "upload") return `<span style="color:#22c55e"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></span>`;
     if (type === "share") return `<span style="color:#a855f7"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg></span>`;
     if (type === "friend_request" || type === "friend_accepted" || type === "friend_declined") return `<span style="color:#3b82f6"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg></span>`;
     return `<span style="color:#888">&#x1F514;</span>`;
@@ -11929,10 +15283,65 @@ function renderAlerts() {
     return `<div class="alertAvatar">${renderAvatarHtml(n.avatarUrl, 36, initial)}</div>`;
   };
 
-  // Notification inbox items (shares, etc.)
-  const notifications = _loadNotifications();
-  const notifHTML = notifications.length
-    ? notifications.map(n => {
+  // Notification inbox items (shares, etc.) — sorted newest first
+  const notifications = _loadNotifications().sort((a, b) => b.ts - a.ts);
+
+  // Group consecutive upload notifications within 5 minutes into batch summaries
+  const BATCH_WINDOW = 5 * 60 * 1000;
+  const grouped = [];
+  let i = 0;
+  while (i < notifications.length) {
+    const n = notifications[i];
+    if (n.type === "upload") {
+      // Collect all uploads within BATCH_WINDOW of this one
+      const batch = [n];
+      let j = i + 1;
+      while (j < notifications.length && notifications[j].type === "upload" && Math.abs(n.ts - notifications[j].ts) < BATCH_WINDOW) {
+        batch.push(notifications[j]);
+        j++;
+      }
+      if (batch.length >= 2) {
+        grouped.push({ _isBatch: true, items: batch, ts: batch[0].ts });
+        i = j;
+      } else {
+        grouped.push(n);
+        i++;
+      }
+    } else {
+      grouped.push(n);
+      i++;
+    }
+  }
+
+  const notifHTML = grouped.length
+    ? grouped.map(entry => {
+      if (entry._isBatch) {
+        const count = entry.items.length;
+        const titles = entry.items.map(n => escapeHtml(n.title));
+        const preview = titles.slice(0, 3).join(", ") + (count > 3 ? `, +${count - 3} more` : "");
+        return `
+      <div class="alertRow alertRowClickable alertBatchRow" data-batch-expand>
+        <div class="alertIcon">${notifIcon("upload")}</div>
+        <div class="alertBody">
+          <div class="alertTitle">${count} songs imported</div>
+          <div class="alertMsg">${preview}</div>
+        </div>
+        <div class="alertTime">${timeAgo(entry.ts)}</div>
+        <div class="alertChevron"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></div>
+      </div>
+      <div class="alertBatchItems" style="display:none">
+        ${entry.items.map(n => `
+        <div class="alertRow alertBatchChild">
+          <div class="alertIcon">${notifIcon("upload")}</div>
+          <div class="alertBody">
+            <div class="alertTitle">${escapeHtml(n.title)}</div>
+            <div class="alertMsg">${escapeHtml(n.body)}</div>
+          </div>
+          <div class="alertTime">${timeAgo(n.ts)}</div>
+        </div>`).join("")}
+      </div>`;
+      }
+      const n = entry;
       const isFR = n.type === "friend_request" || n.type === "friend_accepted" || n.type === "friend_declined";
       const isPendingFR = n.type === "friend_request" && n.friendshipId;
       const avatarHTML = isFR ? notifAvatar(n) : `<div class="alertIcon">${notifIcon(n.type)}</div>`;
@@ -11955,29 +15364,50 @@ function renderAlerts() {
     }).join("")
     : "";
 
-  // Activity log items (uploads, syncs)
+  // Activity log items (uploads, syncs) — with progress bars for in-progress uploads
   const activityHTML = activityLog.length
-    ? activityLog.map(a => `
+    ? activityLog.map(a => {
+      const inProgress = a.status !== "done" && a.status !== "failed";
+      const pct = a.progress || 0;
+      const barHTML = inProgress ? `<div class="alertProgress"><div class="alertProgressFill" style="width:${pct}%"></div></div>` : "";
+      return `
       <div class="alertRow">
         <div class="alertIcon">${statusIcon(a.status)}</div>
         <div class="alertBody">
           <div class="alertTitle">${escapeHtml(a.songTitle)}</div>
           <div class="alertMsg">${escapeHtml(a.message)}</div>
+          ${barHTML}
         </div>
         <div class="alertTime">${timeAgo(a.ts)}</div>
-      </div>
-    `).join("")
+      </div>`;
+    }).join("")
     : "";
 
-  const hasContent = notifications.length || activityLog.length;
+  const hasContent = grouped.length || activityLog.length || importQueue.length;
 
   activeScreenEl.innerHTML = `
-    <div style="padding:16px">
-      ${notifications.length ? `<div class="alertSectionLabel">Notifications</div>${notifHTML}` : ""}
-      ${activityLog.length ? `<div class="alertSectionLabel" style="${notifications.length ? "margin-top:20px" : ""}">Activity</div>${activityHTML}` : ""}
-      ${!hasContent ? `<div style="padding:40px 20px;text-align:center;color:#666">No notifications yet</div>` : ""}
+    <div style="padding:0 2px">
+      <div class="songsTitleRow"><div class="songsPageTitle">Alerts</div></div>
+      <div id="importQueueContainer"></div>
+      ${grouped.length ? `<div class="alertSectionLabel"${importQueue.length ? ` style="margin-top:20px"` : ""}>Notifications</div>${notifHTML}` : ""}
+      ${activityLog.length ? `<div class="alertSectionLabel" style="${grouped.length || importQueue.length ? "margin-top:20px" : ""}">Activity</div>${activityHTML}` : ""}
+      ${!hasContent ? `<div style="padding:40px 20px;text-align:center;color:rgba(255,255,255,.3)">No notifications yet</div>` : ""}
     </div>
   `;
+
+  // Render import queue into its container
+  _renderImportQueueDOM();
+
+  // Wire batch expand/collapse
+  activeScreenEl.querySelectorAll("[data-batch-expand]").forEach(row => {
+    row.addEventListener("click", () => {
+      const items = row.nextElementSibling;
+      if (!items || !items.classList.contains("alertBatchItems")) return;
+      const expanded = items.style.display !== "none";
+      items.style.display = expanded ? "none" : "block";
+      row.classList.toggle("alertBatchExpanded", !expanded);
+    });
+  });
 
   // Wire accept/decline buttons on friend request notifications
   activeScreenEl.querySelectorAll("[data-notif-accept]").forEach(btn => {
@@ -12031,6 +15461,33 @@ function renderAlerts() {
       }
     });
   });
+
+  // Collapse title: fade small title in as big title scrolls behind topbar
+  if (activeScreenEl._collapseTitleScroll) {
+    activeScreenEl.removeEventListener("scroll", activeScreenEl._collapseTitleScroll);
+    activeScreenEl._collapseTitleScroll = null;
+  }
+  const _screen = activeScreenEl;
+  const _sm = document.querySelector(".app.collapseTitle .titleblock h1");
+  if (_sm) {
+    requestAnimationFrame(() => {
+      const bt = _screen.querySelector(".songsPageTitle");
+      if (!bt) return;
+      const topbarEl = document.querySelector(".topbar");
+      const screenTop = _screen.getBoundingClientRect().top;
+      const topbarBottom = topbarEl ? topbarEl.getBoundingClientRect().bottom : 80;
+      const fadeStart = bt.offsetTop - (topbarBottom - screenTop);
+      const fadeEnd = fadeStart + (bt.offsetHeight || 40);
+      const range = fadeEnd - fadeStart;
+      const onScroll = () => {
+        const progress = Math.min(1, Math.max(0, (_screen.scrollTop - fadeStart) / range));
+        _sm.style.opacity = progress;
+      };
+      _screen._collapseTitleScroll = onScroll;
+      _screen.addEventListener("scroll", onScroll, { passive: true });
+      onScroll();
+    });
+  }
 }
 
 // Update a friend request notification to show accepted/declined status
@@ -13429,6 +16886,14 @@ function renderSongsList() {
     </button>
   `;
 
+  // Show loading hint if shared data hasn't loaded yet and user might see shared songs
+  if (!sharedData.loaded && ownerFilter !== "mine") {
+    const hint = document.createElement("div");
+    hint.className = "sharedLoadingHint";
+    hint.textContent = "Loading shared songs…";
+    $("#songList")?.prepend(hint);
+  }
+
   console.log("[renderSongsList] innerHTML set, building list...");
   const listEl = $("#songList");
 
@@ -13485,7 +16950,7 @@ function renderSongsList() {
             </div>
             <div class="songCardInfo">
               ${syncDot(s)}
-              <div class="songCardTitle">${escapeHtml(s.title)}</div>
+              <div class="songCardTitleRow"><div class="songCardTitle">${escapeHtml(s.title)}</div>${sharedBadge(s)}</div>
               <div class="songCardSub">${vCount} ver${vCount !== 1 ? "s" : ""}</div>
             </div>
           </div>
@@ -13521,7 +16986,7 @@ function renderSongsList() {
 
       listEl.innerHTML = sortedArtists.map(artist => `
         <div class="songsGroup">
-          <div class="songsGroupHead" data-artist="${escapeHtml(artist)}" style="cursor:pointer">${escapeHtml(artist)}</div>
+          <div class="songsGroupHead" data-artist="${escapeHtml(artist)}" style="cursor:pointer">${escapeHtml(artist)}${sharedBadgeProject(artist)}</div>
           <div class="songsGroupLine"></div>
           <div class="songsList">${groupCardsHtml(groups[artist])}</div>
         </div>
@@ -13759,6 +17224,9 @@ function renderSongDetail(id) {
       <button class="pdShuffleBtn" id="songShuffle" ${!items.length ? "disabled" : ""}>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
       </button>
+      <button class="pdShareBtn" id="songShare" aria-label="Share song">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
+      </button>
       <button class="pdMoreBtn" id="songMoreMenu" aria-label="Song menu">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
       </button>
@@ -13830,6 +17298,11 @@ function renderSongDetail(id) {
     syncMiniPlayerUI();
   });
 
+  /* ── Share ── */
+  $("#songShare")?.addEventListener("click", () => {
+    shareInviteSong(song.id);
+  });
+
   /* ── Song more menu (Details, Regen Art, Delete) ── */
   $("#songMoreMenu")?.addEventListener("click", () => {
     openSongDetailMenu(song.id);
@@ -13849,9 +17322,8 @@ function renderSongDetail(id) {
     activeScreenEl.querySelectorAll("[data-vrow]").forEach(row => {
       row.addEventListener("click", (e) => {
         if (e.target.closest("[data-vmore]")) return;
-        navigateForward(() => {
-          selectedVersionId = row.getAttribute("data-vrow");
-        });
+        const vid = row.getAttribute("data-vrow");
+        playVersion(song.id, vid, { goPlayer: false });
       });
     });
 
@@ -14309,13 +17781,13 @@ function renderVersionDetail(songId, versionId) {
         toast("Synced to cloud");
       } else {
         console.warn("Cloud upload failed:", result.error);
-        toast("Local saved, cloud sync failed");
+        toast("Cloud sync failed — will retry on next launch");
       }
 
       renderVersionDetail(songId, versionId);
     } catch (err) {
       console.error(err);
-      toast("Import failed");
+      toast("Import failed — will retry cloud sync on next launch");
     }
   });
 
@@ -15074,16 +18546,27 @@ function renderNowPlaying() {
         fp.style.opacity = "0";
         fp.addEventListener("transitionend", () => fp.remove(), { once: true });
       } else {
-        // Cancel: re-open full player
-        fp.remove();
+        // Cancel: animate player back into place, restore state
         fullPlayerOpen = true;
         setFullPlayerOpen(true);
         prevTabBeforeFullPlayer = _savedPrevTab;
         prevSelectedSongIdBeforeFullPlayer = _savedPrevSongId;
         currentTab = "player";
-        playerScreen = "now-playing";
+        playerScreen = "now";
         syncTabs();
-        render();
+
+        // Slide fp back to origin, then move it back into #view
+        fp.style.transition = "transform 300ms cubic-bezier(.32,0,.6,1)";
+        fp.style.transform = "translateY(0px)";
+        fp.addEventListener("transitionend", () => {
+          fp.style.transition = "";
+          fp.style.transform = "";
+          // Move fp back from body into #view where it belongs
+          const view = document.getElementById("view");
+          if (view && fp.parentNode === document.body) {
+            view.appendChild(fp);
+          }
+        }, { once: true });
       }
       _peekReady = false;
     } else {
@@ -15230,126 +18713,250 @@ $("#npRepeat")?.addEventListener("click", () => {
 // ---------------------
 // Settings
 // ---------------------
+// ── Settings: shared SVG icons ──
+const _setChev = `<div class="setRowChev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg></div>`;
+const _setIcons = {
+  account: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`,
+  cloud: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>`,
+  library: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>`,
+  art: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg>`,
+  debug: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>`,
+  danger: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`,
+};
+
+// Wire collapsing-title scroll listener for a settings sub-screen
+function _setCollapseTitle() {
+  if (activeScreenEl._collapseTitleScroll) {
+    activeScreenEl.removeEventListener("scroll", activeScreenEl._collapseTitleScroll);
+    activeScreenEl._collapseTitleScroll = null;
+  }
+  const _screen = activeScreenEl;
+  const _sm = document.querySelector(".app.collapseTitle .titleblock h1");
+  if (!_sm) return;
+  requestAnimationFrame(() => {
+    const bt = _screen.querySelector(".setPageTitle");
+    if (!bt) return;
+    const topbarEl = document.querySelector(".topbar");
+    const screenTop = _screen.getBoundingClientRect().top;
+    const topbarBottom = topbarEl ? topbarEl.getBoundingClientRect().bottom : 80;
+    const fadeStart = bt.offsetTop - (topbarBottom - screenTop);
+    const fadeEnd = fadeStart + (bt.offsetHeight || 40);
+    const range = fadeEnd - fadeStart;
+    const onScroll = () => {
+      const progress = Math.min(1, Math.max(0, (_screen.scrollTop - fadeStart) / range));
+      _sm.style.opacity = progress;
+    };
+    _screen._collapseTitleScroll = onScroll;
+    _screen.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+  });
+}
+
+// Navigate into a settings sub-screen
+function _setNav(view, title) {
+  navigateForward(() => {
+    settingsView = view;
+    setHeader(title);
+    syncTabs();
+  });
+}
+
+// ── Settings hub (iOS-style) ──
 function renderSettings() {
   setHeader("Settings");
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("collapseTitle");
+  const h1 = appEl?.querySelector(".titleblock h1");
+  if (h1) h1.style.opacity = "0";
+
+  const songCount = state.songs.length;
+  const projCount = [...new Set(state.songs.map(s => (s.project || "").trim()).filter(Boolean))].length;
 
   activeScreenEl.innerHTML = `
-    <div class="card">
-      <h2>Settings</h2>
+    <div class="setPage">
+      <div class="setPageTitle">Settings</div>
 
-      <div style="
-        background: rgba(78,205,196,.08);
-        border: 1px solid rgba(78,205,196,.25);
-        border-radius: 12px;
-        padding: 16px;
-        margin-bottom: 16px;
-      ">
-        <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#4ecdc4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
-          <span style="font-weight:900; font-size:15px;">Cloud Sync</span>
-          <span style="
-            background: rgba(78,205,196,.15);
-            color: #4ecdc4;
-            font-size: 11px;
-            font-weight: 700;
-            padding: 2px 8px;
-            border-radius: 6px;
-            margin-left: auto;
-          ">Connected</span>
-        </div>
-
-        <div class="small" style="margin-bottom:10px; opacity:.7">
-          Audio imports are automatically synced to the cloud. Files also stay on this device for offline playback.
-        </div>
-        <div class="row" style="gap:10px">
-          <button id="cloudSyncPush" class="btn" style="flex:1">Push to cloud</button>
-          <button id="cloudSyncPull" class="btn" style="flex:1">Pull from cloud</button>
-        </div>
-        <div class="row" style="gap:10px; margin-top:10px">
-          <button id="cloudBackupAll" class="btn" style="flex:1; background: rgba(78,205,196,.08); border-color: rgba(78,205,196,.2); color: #4ecdc4;">Backup all audio to cloud</button>
-          <button id="cloudCacheAll" class="btn" style="flex:1">Cache all audio locally</button>
-        </div>
-        <div class="small" style="margin-top:4px; opacity:.7">Backup uploads local-only audio to the cloud. Cache downloads cloud audio to this device.</div>
-        <div class="row" style="gap:10px; margin-top:10px">
-          <button id="cloudRecoverAudio" class="btn" style="flex:1; background: rgba(255,184,77,.08); border-color: rgba(255,184,77,.2); color: #ffb84d;">Recover Audio</button>
-        </div>
-        <div class="row" style="margin-top:6px">
-          <button id="debugRecoveryBtn" class="btn" style="flex:1; background: rgba(150,150,150,.06); border-color: rgba(150,150,150,.15); color: #888; font-size:12px;">Debug Recovery</button>
-        </div>
-        <div class="row" style="gap:10px; margin-top:10px">
-          <button id="cloudSignOut" class="btn" style="flex:1; background: rgba(255,92,119,.08); border-color: rgba(255,92,119,.2); color: #ff5c77;">Sign Out</button>
+      <div class="setSection">
+        <div class="setSectionLabel">Account</div>
+        <div class="setGroup">
+          <div class="setRow" data-set="account">
+            <div class="setRowIcon setIconBlue">${_setIcons.account}</div>
+            <div class="setRowLabel">Account</div>
+            <div class="setRowValue">Signed in</div>
+            ${_setChev}
+          </div>
         </div>
       </div>
 
-      <div class="hr"></div>
-      <h2>AI Art</h2>
-
-      <div class="row" style="gap:10px">
-        <button id="genMissingArt" class="btn" style="flex:1" ${bulkArtState.running ? "disabled" : ""}>${bulkArtState.running ? `${bulkArtState.done}/${bulkArtState.total} done…` : "Generate Missing Art"}</button>
-        <button id="regenAllArt" class="btn" style="flex:1; background: rgba(255,200,50,.08); border-color: rgba(255,200,50,.2); color: #ffc832;" ${bulkArtState.running ? "disabled" : ""}>${bulkArtState.running ? `${bulkArtState.done}/${bulkArtState.total} done…` : "Regenerate All Art"}</button>
-      </div>
-      <div class="small" style="margin-top:4px">Generate art only for songs without cover art, or regenerate for every song.</div>
-
-      <div class="hr"></div>
-      <h2>Defaults</h2>
-
-      <div class="row">
-        <div class="col">
-          <div class="label">Default project</div>
-          <input id="defProject" type="text" value="${escapeHtml(state.settings.defaultProject || "")}" />
-        </div>
-        <div class="col">
-          <div class="label">Default genre</div>
-          <input id="defGenre" type="text" value="${escapeHtml(state.settings.defaultGenre || "")}" />
+      <div class="setSection">
+        <div class="setSectionLabel">Data</div>
+        <div class="setGroup">
+          <div class="setRow" data-set="cloud">
+            <div class="setRowIcon setIconTeal">${_setIcons.cloud}</div>
+            <div class="setRowLabel">Cloud Sync</div>
+            <span class="setStatusBadge" style="background:rgba(78,205,196,.15);color:#4ecdc4;">Connected</span>
+            ${_setChev}
+          </div>
+          <div class="setRow" data-set="library">
+            <div class="setRowIcon setIconPurple">${_setIcons.library}</div>
+            <div class="setRowLabel">Library</div>
+            <div class="setRowValue">${songCount} songs, ${projCount} projects</div>
+            ${_setChev}
+          </div>
         </div>
       </div>
 
-      <div class="row" style="margin-top:10px">
-        <div class="col">
-          <div class="label">Default sprint</div>
-          <input id="defSprint" type="text" value="${escapeHtml(state.settings.defaultSprint || "")}" />
+      <div class="setSection">
+        <div class="setSectionLabel">Tools</div>
+        <div class="setGroup">
+          <div class="setRow" data-set="art">
+            <div class="setRowIcon setIconAmber">${_setIcons.art}</div>
+            <div class="setRowLabel">AI Art</div>
+            ${_setChev}
+          </div>
+          <div class="setRow" data-set="debug">
+            <div class="setRowIcon setIconGray">${_setIcons.debug}</div>
+            <div class="setRowLabel">Debug Tools</div>
+            ${_setChev}
+          </div>
         </div>
       </div>
 
-      <div class="row" style="margin-top:10px">
-        <button id="saveSettings" class="btn primary">Save</button>
+      <div class="setSection">
+        <div class="setGroup">
+          <div class="setRow setDanger" data-set="danger">
+            <div class="setRowIcon setIconRed">${_setIcons.danger}</div>
+            <div class="setRowLabel">Danger Zone</div>
+            ${_setChev}
+          </div>
+        </div>
       </div>
-
-      <div class="hr"></div>
-      <h2>Debug Tools</h2>
-      <div class="row" style="gap:10px; align-items:center">
-        <button id="toggleSyncDebug" class="btn" style="flex:1; ${window.RIFFBANK_DEBUG_SYNC ? "background:rgba(78,205,196,.12); border-color:rgba(78,205,196,.3); color:#4ecdc4" : ""}">${window.RIFFBANK_DEBUG_SYNC ? "Sync Debug: ON" : "Sync Debug: OFF"}</button>
-        <button id="runSyncAudit" class="btn" style="flex:1">Run Sync Audit</button>
-      </div>
-      <div class="small" style="margin-top:4px">
-        Sync Debug shows colored dots on song cards:
-        <span style="color:#4ade80">●</span> local audio
-        <span style="color:#facc15">●</span> cloud-only
-        <span style="color:#f87171">●</span> no audio
-      </div>
-
-      <div class="hr"></div>
-      <h2>Danger zone</h2>
-      <button id="wipe" class="btn">Wipe local data</button>
-      <div class="small">This only affects this device/browser. Export first if you care.</div>
     </div>
   `;
 
-  // Cloud: Push state now
+  // Wire row navigation
+  activeScreenEl.querySelectorAll("[data-set]").forEach(el => {
+    el.addEventListener("click", () => {
+      const view = el.dataset.set;
+      const titles = { account: "Account", cloud: "Cloud Sync", library: "Library", art: "AI Art", debug: "Debug Tools", danger: "Danger Zone" };
+      _setNav(view, titles[view] || "Settings");
+    });
+  });
+
+  _setCollapseTitle();
+}
+
+// ── Settings: Account ──
+function renderSettingsAccount() {
+  setHeader("Account");
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("collapseTitle");
+  const h1 = appEl?.querySelector(".titleblock h1");
+  if (h1) h1.style.opacity = "0";
+
+  activeScreenEl.innerHTML = `
+    <div class="setPage">
+      <div class="setPageTitle">Account</div>
+      <div class="setContent">
+        <div class="setSection">
+          <div class="setSectionLabel">Profile</div>
+          <div class="setGroup">
+            <div class="setRow" style="cursor:default">
+              <div class="setRowIcon setIconBlue">${_setIcons.account}</div>
+              <div class="setRowLabel">Signed in</div>
+              <span class="setStatusBadge" style="background:rgba(74,222,128,.15);color:#4ade80;">Active</span>
+            </div>
+          </div>
+        </div>
+        <div class="setSection">
+          <button class="setBtn setBtnRed" id="setSignOut">Sign Out</button>
+          <div class="setDesc">Your local data stays on this device after signing out.</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  $("#setSignOut")?.addEventListener("click", async () => {
+    if (!confirm("Sign out? Your local data stays on this device.")) return;
+    await signOut();
+    window.location.reload();
+  });
+
+  _setCollapseTitle();
+}
+
+// ── Settings: Cloud Sync ──
+function renderSettingsCloud() {
+  setHeader("Cloud Sync");
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("collapseTitle");
+  const h1 = appEl?.querySelector(".titleblock h1");
+  if (h1) h1.style.opacity = "0";
+
+  activeScreenEl.innerHTML = `
+    <div class="setPage">
+      <div class="setPageTitle">Cloud Sync</div>
+      <div class="setContent">
+        <div class="setSection">
+          <div class="setSectionLabel">Sync Actions</div>
+          <div class="setGroup">
+            <div class="setRow" id="cloudSyncPush">
+              <div class="setRowIcon setIconTeal">${_setIcons.cloud}</div>
+              <div class="setRowLabel">Push to Cloud</div>
+              ${_setChev}
+            </div>
+            <div class="setRow" id="cloudSyncPull">
+              <div class="setRowIcon setIconBlue">${_setIcons.cloud}</div>
+              <div class="setRowLabel">Pull from Cloud</div>
+              ${_setChev}
+            </div>
+          </div>
+          <div class="setDesc">Push sends your local data to the cloud. Pull replaces local data with cloud data.</div>
+        </div>
+
+        <div class="setSection">
+          <div class="setSectionLabel">Audio Storage</div>
+          <div class="setGroup">
+            <div class="setRow" id="cloudBackupAll">
+              <div class="setRowIcon setIconGreen">${_setIcons.cloud}</div>
+              <div class="setRowLabel">Backup All Audio to Cloud</div>
+              ${_setChev}
+            </div>
+            <div class="setRow" id="cloudCacheAll">
+              <div class="setRowIcon setIconPurple">${_setIcons.cloud}</div>
+              <div class="setRowLabel">Cache All Audio Locally</div>
+              ${_setChev}
+            </div>
+          </div>
+          <div class="setDesc">Backup uploads local-only audio to the cloud. Cache downloads cloud audio to this device for offline playback.</div>
+        </div>
+
+        <div class="setSection">
+          <div class="setSectionLabel">Recovery</div>
+          <div class="setGroup">
+            <div class="setRow" id="cloudRecoverAudio">
+              <div class="setRowIcon setIconAmber">${_setIcons.debug}</div>
+              <div class="setRowLabel">Recover Audio</div>
+              ${_setChev}
+            </div>
+          </div>
+          <div class="setDesc">Scans this device for disconnected audio blobs and re-links them to your songs.</div>
+        </div>
+      </div>
+    </div>
+  `;
+
   $("#cloudSyncPush")?.addEventListener("click", async () => {
     toast("Pushing to cloud…");
     const ok = await supabasePushState(state);
     toast(ok ? "Pushed to cloud" : "Push failed");
   });
 
-  // Cloud: Pull state now
   $("#cloudSyncPull")?.addEventListener("click", async () => {
     toast("Pulling from cloud…");
     const cloudState = await supabasePullState();
     if (cloudState?.songs) {
       if (!confirm(`Found ${cloudState.songs.length} songs in cloud. This will wipe all local data and replace it with cloud data. Continue?`)) return;
-
-      // Wipe local audio/cover blobs from IndexedDB
       toast("Clearing local data…");
       audioUrlCache.clear();
       try {
@@ -15361,25 +18968,18 @@ function renderSettings() {
           tx.onerror = () => reject(tx.error);
         });
       } catch (e) { console.warn("[Pull] IDB clear failed:", e); }
-
       state = cloudState;
       normalizeState();
-
-      // Discover audio files in Supabase Storage for versions missing audio_path
       const missingCount = state.songs.reduce((n, s) => n + (s.versions || []).filter(v => !v.audioPath).length, 0);
       if (missingCount) {
         toast(`Discovering audio for ${missingCount} versions…`);
         const discovered = await supabaseDiscoverAudioPaths(state.songs);
         toast(`Found ${discovered.length}/${missingCount} audio files in storage`);
       }
-
       localStorage.setItem(LS_KEY, JSON.stringify(state));
       render();
       toast("Caching cloud audio…");
-
-      // Push back so discovered audioPath values make it to the DB
       await supabasePushState(state).catch(console.warn);
-      // Download cloud audio + covers to local cache
       await cacheAllCloudAudio();
       await restoreCoverUrlsFromCache();
     } else {
@@ -15387,33 +18987,57 @@ function renderSettings() {
     }
   });
 
-  // Cloud: Backup all local audio to cloud
-  $("#cloudBackupAll")?.addEventListener("click", async () => {
-    await backupAllAudioToCloud();
-  });
+  $("#cloudBackupAll")?.addEventListener("click", () => backupAllAudioToCloud());
+  $("#cloudCacheAll")?.addEventListener("click", () => cacheAllCloudAudio());
+  $("#cloudRecoverAudio")?.addEventListener("click", () => recoverAndUploadAudio());
 
-  // Cloud: Cache all audio locally
-  $("#cloudCacheAll")?.addEventListener("click", async () => {
-    await cacheAllCloudAudio();
-  });
+  _setCollapseTitle();
+}
 
-  // Cloud: Recover audio — scan IndexedDB, re-link, re-upload
-  $("#cloudRecoverAudio")?.addEventListener("click", async () => {
-    await recoverAndUploadAudio();
-  });
+// ── Settings: Library ──
+function renderSettingsLibrary() {
+  setHeader("Library");
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("collapseTitle");
+  const h1 = appEl?.querySelector(".titleblock h1");
+  if (h1) h1.style.opacity = "0";
 
-  // Debug recovery
-  $("#debugRecoveryBtn")?.addEventListener("click", () => debugRecovery());
+  activeScreenEl.innerHTML = `
+    <div class="setPage">
+      <div class="setPageTitle">Library</div>
+      <div class="setContent">
+        <div class="setSection">
+          <div class="setSectionLabel">Defaults</div>
+          <div class="setGroup" style="padding:16px">
+            <div class="setInputGroup">
+              <div class="setInputLabel">Default Project</div>
+              <input class="setInput" id="defProject" type="text" value="${escapeHtml(state.settings.defaultProject || "")}" />
+            </div>
+            <div class="setInputGroup">
+              <div class="setInputLabel">Default Genre</div>
+              <input class="setInput" id="defGenre" type="text" value="${escapeHtml(state.settings.defaultGenre || "")}" />
+            </div>
+            <div class="setInputGroup" style="margin-bottom:0">
+              <div class="setInputLabel">Default Sprint</div>
+              <input class="setInput" id="defSprint" type="text" value="${escapeHtml(state.settings.defaultSprint || "")}" />
+            </div>
+          </div>
+        </div>
+        <div class="setSection">
+          <button class="setBtn setBtnTeal" id="saveSettings">Save Defaults</button>
+        </div>
 
-  // Cloud: Sign out
-  $("#cloudSignOut")?.addEventListener("click", async () => {
-    if (!confirm("Sign out? Your local data stays on this device.")) return;
-    await signOut();
-    window.location.reload();
-  });
+        <div class="setSection">
+          <div class="setSectionLabel">Health</div>
+          <div class="setGroup" id="libraryHealthPanel" style="padding:16px">
+            <div style="font-size:13px; opacity:.5">Scanning library…</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
 
-  // Save settings
-  $("#saveSettings").addEventListener("click", () => {
+  $("#saveSettings")?.addEventListener("click", () => {
     state.settings.defaultProject = $("#defProject").value.trim() || "";
     state.settings.defaultGenre = $("#defGenre").value.trim() || "";
     state.settings.defaultSprint = $("#defSprint").value.trim() || "";
@@ -15421,25 +19045,199 @@ function renderSettings() {
     toast("Saved");
   });
 
-  // Bulk art generation — sync buttons to global bulkArtState
-  const syncBulkBtns = () => {
-    const btnMissing = $("#genMissingArt");
-    const btnAll = $("#regenAllArt");
-    if (bulkArtState.running) {
-      const txt = `${bulkArtState.done}/${bulkArtState.total} done…`;
-      if (btnMissing) { btnMissing.disabled = true; btnMissing.textContent = txt; }
-      if (btnAll) { btnAll.disabled = true; btnAll.textContent = txt; }
+  // Library Health panel — async scan (same logic as before)
+  (async () => {
+    const panel = document.getElementById("libraryHealthPanel");
+    if (!panel) return;
+    const allBlobs = await audioGetAll().catch(() => []);
+    const blobByName = new Map(), blobById = new Map(), blobByTitleKey = new Map();
+    const allLocalBlobs = [];
+    for (const rec of allBlobs) {
+      if (rec.id.startsWith("supa:") || rec.id.startsWith("cover:")) continue;
+      blobById.set(rec.id, rec); allLocalBlobs.push(rec);
+      if (rec.name) {
+        blobByName.set(rec.name, rec);
+        const key = rec.name.replace(/\.[^.]+$/, "").toLowerCase().trim();
+        if (key) blobByTitleKey.set(key, rec);
+      }
     }
-  };
-  syncBulkBtns();
+    const recoverable = [], unrecoverable = [], referencedBlobIds = new Set(), usedBlobIds = new Set();
+    for (const song of (state.songs || [])) {
+      let songHasAudio = false, songRecovered = false;
+      for (const v of (song.versions || [])) {
+        if (v.fileId) referencedBlobIds.add(v.fileId);
+        if (v.localAudioId) referencedBlobIds.add(v.localAudioId);
+        if (isPlayable(v)) { songHasAudio = true; continue; }
+        let rec = blobById.get(v.fileId) || blobById.get(v.localAudioId) || blobByName.get(v.fileName) || blobByName.get(v.originalFileName);
+        if (!rec) { const titleKey = (song.title || "").toLowerCase().trim(); if (titleKey) rec = blobByTitleKey.get(titleKey); }
+        if (rec?.blob && !usedBlobIds.has(rec.id)) { usedBlobIds.add(rec.id); recoverable.push({ song, version: v, blobRec: rec }); songRecovered = true; }
+      }
+      if (!songHasAudio && !songRecovered) unrecoverable.push(song);
+    }
+    const recoverableBlobIds = new Set(recoverable.map(r => r.blobRec.id));
+    let orphanCount = 0, orphanSize = 0;
+    for (const rec of allBlobs) {
+      if (rec.id.startsWith("supa:") || rec.id.startsWith("cover:")) continue;
+      if (!referencedBlobIds.has(rec.id) && !recoverableBlobIds.has(rec.id)) { orphanCount++; orphanSize += (rec.size || rec.blob?.size || 0); }
+    }
+    const orphanMB = (orphanSize / 1024 / 1024).toFixed(1);
+
+    if (!recoverable.length && !unrecoverable.length && !orphanCount) {
+      panel.innerHTML = `
+        <div style="display:flex; align-items:center; gap:8px">
+          <span style="color:#4ade80; font-size:18px;">●</span>
+          <span style="font-weight:700; font-size:14px;">Library is healthy</span>
+        </div>
+        <div style="font-size:13px; opacity:.5; margin-top:6px">${state.songs.length} songs, all playable. No orphaned data.</div>
+      `;
+      return;
+    }
+    const recoverableSongs = [...new Map(recoverable.map(r => [r.song.id, r.song])).values()];
+    panel.innerHTML = `
+      ${recoverable.length ? `
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px"><span style="color:#ffb84d; font-size:18px;">●</span><span style="font-weight:700; font-size:14px;">${recoverableSongs.length} song${recoverableSongs.length === 1 ? "" : "s"} can be repaired</span></div>
+        <div style="font-size:13px; opacity:.5; margin-bottom:12px">Audio is on this device but disconnected. Repair will re-link and upload.</div>
+        <button class="setBtn setBtnTeal" id="healthRepair">Repair ${recoverableSongs.length} song${recoverableSongs.length === 1 ? "" : "s"}</button>
+      ` : ""}
+      ${unrecoverable.length ? `
+        <div style="display:flex; align-items:center; gap:8px; margin-top:${recoverable.length ? 16 : 0}px; margin-bottom:8px"><span style="color:#f87171; font-size:18px;">●</span><span style="font-weight:700; font-size:14px;">${unrecoverable.length} song${unrecoverable.length === 1 ? "" : "s"} with no audio</span></div>
+        <div style="font-size:13px; opacity:.5; margin-bottom:12px">No matching audio found. Re-upload or delete these songs.</div>
+        <button class="setBtn setBtnRed" id="healthDeleteBroken">Delete ${unrecoverable.length} broken song${unrecoverable.length === 1 ? "" : "s"}</button>
+      ` : ""}
+      ${orphanCount ? `
+        <div style="display:flex; align-items:center; gap:8px; margin-top:16px; margin-bottom:8px"><span style="color:#888; font-size:18px;">●</span><span style="font-weight:700; font-size:14px;">${orphanCount} leftover blob${orphanCount === 1 ? "" : "s"} (${orphanMB} MB)</span></div>
+        <button class="setBtn setBtnGray" id="healthCleanBlobs" style="margin-top:8px">Clean up (${orphanMB} MB)</button>
+      ` : ""}
+    `;
+
+    document.getElementById("healthRepair")?.addEventListener("click", async () => {
+      const btn = document.getElementById("healthRepair");
+      if (btn) { btn.disabled = true; btn.textContent = "Repairing…"; }
+      let relinked = 0, uploaded = 0, failed = 0;
+      for (const { song, version: v, blobRec: rec } of recoverable) {
+        v.fileId = rec.id; v.fileType = v.fileType || rec.type || ""; v.fileSize = v.fileSize || rec.size || 0; relinked++;
+        if (!v.audioPath) {
+          try {
+            if (btn) btn.textContent = `Uploading ${song.title}…`;
+            const uploadBlob = await compressAudioForUpload(rec.blob);
+            const fileName = v.fileName || rec.name || "audio";
+            const result = await supabaseUploadAudio({ blob: new File([uploadBlob], fileName, { type: uploadBlob.type || rec.type || "audio/*" }), songId: song.id, versionId: v.id, fileName });
+            if (result.success) { v.audioPath = result.audioPath; uploaded++; } else { failed++; }
+          } catch { failed++; }
+        }
+      }
+      saveState(); await supabasePushState(state).catch(console.warn);
+      toast(`Repaired ${relinked} song${relinked === 1 ? "" : "s"}` + (uploaded ? `, ${uploaded} uploaded` : "") + (failed ? `, ${failed} failed` : ""));
+      renderSettingsLibrary();
+    });
+
+    document.getElementById("healthDeleteBroken")?.addEventListener("click", async () => {
+      const ids = new Set(unrecoverable.map(s => s.id));
+      if (!confirm(`Delete ${ids.size} song${ids.size === 1 ? "" : "s"} with no audio? This cannot be undone.`)) return;
+      state.songs = state.songs.filter(s => !ids.has(s.id));
+      saveState(); toast(`Deleted ${ids.size} broken song${ids.size === 1 ? "" : "s"}`);
+      await supabasePushState(state).catch(console.warn);
+      renderSettingsLibrary();
+    });
+
+    document.getElementById("healthCleanBlobs")?.addEventListener("click", async () => {
+      if (!confirm(`Delete ${orphanCount} orphaned blob${orphanCount === 1 ? "" : "s"} (${orphanMB} MB)?`)) return;
+      let cleaned = 0;
+      try {
+        const db = await openAudioDb();
+        const tx = db.transaction(AUDIO_STORE, "readwrite");
+        const store = tx.objectStore(AUDIO_STORE);
+        for (const rec of allBlobs) {
+          if (rec.id.startsWith("supa:") || rec.id.startsWith("cover:")) continue;
+          if (!referencedBlobIds.has(rec.id) && !recoverableBlobIds.has(rec.id)) { store.delete(rec.id); cleaned++; }
+        }
+        await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = () => reject(tx.error); });
+        db.close();
+      } catch (e) { console.warn("[Health] Blob cleanup failed:", e); }
+      toast(`Cleaned ${cleaned} blob${cleaned === 1 ? "" : "s"}`);
+      renderSettingsLibrary();
+    });
+  })();
+
+  _setCollapseTitle();
+}
+
+// ── Settings: AI Art ──
+function renderSettingsArt() {
+  setHeader("AI Art");
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("collapseTitle");
+  const h1 = appEl?.querySelector(".titleblock h1");
+  if (h1) h1.style.opacity = "0";
+
+  const artStatus = bulkArtState.running ? `${bulkArtState.done}/${bulkArtState.total} done…` : "";
+
+  activeScreenEl.innerHTML = `
+    <div class="setPage">
+      <div class="setPageTitle">AI Art</div>
+      <div class="setContent">
+        <div class="setSection">
+          <div class="setSectionLabel">Cover Art Generation</div>
+          <div class="setGroup" style="padding:16px">
+            <div style="font-size:13px; opacity:.5; margin-bottom:14px">Generate unique cover art for your songs using AI. Missing art only generates for songs without covers.</div>
+            <button class="setBtn setBtnTeal" id="genMissingArt" ${bulkArtState.running ? "disabled" : ""} style="margin-bottom:10px">${artStatus || "Generate Missing Art"}</button>
+            <button class="setBtn setBtnAmber" id="regenAllArt" ${bulkArtState.running ? "disabled" : ""}>${artStatus || "Regenerate All Art"}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
 
   $("#genMissingArt")?.addEventListener("click", () => startBulkGenArt(true));
   $("#regenAllArt")?.addEventListener("click", () => startBulkGenArt(false));
 
+  _setCollapseTitle();
+}
+
+// ── Settings: Debug Tools ──
+function renderSettingsDebug() {
+  setHeader("Debug Tools");
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("collapseTitle");
+  const h1 = appEl?.querySelector(".titleblock h1");
+  if (h1) h1.style.opacity = "0";
+
+  activeScreenEl.innerHTML = `
+    <div class="setPage">
+      <div class="setPageTitle">Debug Tools</div>
+      <div class="setContent">
+        <div class="setSection">
+          <div class="setSectionLabel">Sync Debug</div>
+          <div class="setGroup">
+            <div class="setRow" id="toggleSyncDebug">
+              <div class="setRowIcon ${window.RIFFBANK_DEBUG_SYNC ? "setIconTeal" : "setIconGray"}">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+              </div>
+              <div class="setRowLabel">Sync Debug</div>
+              <div class="setRowValue">${window.RIFFBANK_DEBUG_SYNC ? "ON" : "OFF"}</div>
+              ${_setChev}
+            </div>
+            <div class="setRow" id="runSyncAudit">
+              <div class="setRowIcon setIconGray">${_setIcons.debug}</div>
+              <div class="setRowLabel">Run Sync Audit</div>
+              ${_setChev}
+            </div>
+            <div class="setRow" id="debugRecoveryBtn">
+              <div class="setRowIcon setIconGray">${_setIcons.debug}</div>
+              <div class="setRowLabel">Debug Recovery</div>
+              ${_setChev}
+            </div>
+          </div>
+          <div class="setDesc">Sync debug shows colored dots on song cards: <span style="color:#4ade80">●</span> synced <span style="color:#facc15">●</span> local only <span style="color:#f87171">●</span> no audio</div>
+        </div>
+      </div>
+    </div>
+  `;
+
   $("#toggleSyncDebug")?.addEventListener("click", () => {
     window.RIFFBANK_DEBUG_SYNC = !window.RIFFBANK_DEBUG_SYNC;
     toast(`Sync debug ${window.RIFFBANK_DEBUG_SYNC ? "ON" : "OFF"}`);
-    renderSettings();
+    renderSettingsDebug();
   });
 
   $("#runSyncAudit")?.addEventListener("click", async () => {
@@ -15448,18 +19246,135 @@ function renderSettings() {
     const reds = results.filter(r => r.status === "red");
     const yellows = results.filter(r => r.status === "yellow");
     const greens = results.length - reds.length - yellows.length;
-    let msg = `${results.length} versions: ${greens} synced, ${yellows.length} local only, ${reds.length} no audio`;
-    if (reds.length) msg += `\n\nBroken:\n${reds.map(r => `• ${r.song} / ${r.version}`).join("\n")}`;
-    console.log("[RiffBank Audit]", msg);
+    toast(`${results.length} versions: ${greens} synced, ${yellows.length} local only, ${reds.length} no audio`);
   });
 
-  $("#wipe").addEventListener("click", async () => {
-    if (!confirm("Wipe all local RiffBank data and sign out? This is like deleting and reinstalling the app.")) return;
+  $("#debugRecoveryBtn")?.addEventListener("click", () => debugRecovery());
 
-    // 1. Clear all localStorage (app state, onboarding flags, nudge flags, etc.)
+  _setCollapseTitle();
+}
+
+// ── Settings: Danger Zone ──
+function renderSettingsDanger() {
+  setHeader("Danger Zone");
+  const appEl = document.querySelector(".app");
+  appEl?.classList.add("collapseTitle");
+  const h1 = appEl?.querySelector(".titleblock h1");
+  if (h1) h1.style.opacity = "0";
+
+  activeScreenEl.innerHTML = `
+    <div class="setPage">
+      <div class="setPageTitle">Danger Zone</div>
+      <div class="setContent">
+        <div class="setSection">
+          <div class="setSectionLabel">Clear Library</div>
+          <div class="setGroup" style="padding:16px">
+            <div style="font-size:13px; opacity:.5; margin-bottom:14px">
+              Permanently delete <b>all songs, versions, projects, and audio</b> from both Supabase and this device. This cannot be undone.
+            </div>
+            <button class="setBtn setBtnRed" id="clearEntireLibrary">Clear Entire Library</button>
+          </div>
+        </div>
+
+        <div class="setSection">
+          <div class="setSectionLabel">Local Data</div>
+          <div class="setGroup" style="padding:16px">
+            <div style="font-size:13px; opacity:.5; margin-bottom:14px">
+              Wipe all local data (localStorage + IndexedDB) and sign out. Cloud data is untouched. Like deleting and reinstalling.
+            </div>
+            <button class="setBtn setBtnGray" id="wipe">Wipe Local Data & Sign Out</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  // Clear Entire Library — Supabase + local
+  $("#clearEntireLibrary")?.addEventListener("click", async () => {
+    if (!confirm("Delete ALL songs, versions, projects, and audio from your account and this device? This cannot be undone.")) return;
+    if (!confirm("Are you absolutely sure? This will permanently erase your entire RiffBank library from the cloud.")) return;
+
+    // Full-screen progress overlay
+    const overlay = document.createElement("div");
+    overlay.id = "clearLibOverlay";
+    overlay.style.cssText = "position:fixed;inset:0;z-index:999999;background:var(--bg,#0d0d0f);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;padding:32px;";
+    overlay.innerHTML = `
+      <div style="font-size:24px;font-weight:700;color:#fff;letter-spacing:-0.3px;">Clearing Library</div>
+      <div id="clearLibStatus" style="font-size:15px;color:rgba(255,255,255,.5);text-align:center;">Preparing…</div>
+      <div style="width:240px;height:4px;background:rgba(255,255,255,.08);border-radius:2px;overflow:hidden;">
+        <div id="clearLibBar" style="height:100%;width:0%;background:#f87171;border-radius:2px;transition:width .3s ease;"></div>
+      </div>
+      <div id="clearLibCount" style="font-size:13px;color:rgba(255,255,255,.3);font-variant-numeric:tabular-nums;">0 / 0</div>
+    `;
+    document.body.appendChild(overlay);
+
+    const statusEl = overlay.querySelector("#clearLibStatus");
+    const barEl = overlay.querySelector("#clearLibBar");
+    const countEl = overlay.querySelector("#clearLibCount");
+
+    const updateProgress = (i, total, label) => {
+      const pct = total > 0 ? Math.round(((i + 1) / total) * 100) : 0;
+      if (statusEl) statusEl.textContent = label;
+      if (barEl) barEl.style.width = pct + "%";
+      if (countEl) countEl.textContent = `${i + 1} / ${total}`;
+    };
+
+    try {
+      const songsToDelete = [...(state.songs || [])];
+      const total = songsToDelete.length;
+
+      // 1. Delete each song from Supabase (DB rows + storage files)
+      for (let i = 0; i < total; i++) {
+        updateProgress(i, total, `Deleting "${songsToDelete[i].title || "Untitled"}"…`);
+        await deleteSongEverywhere(songsToDelete[i]);
+      }
+
+      // 2. Delete all projects
+      if (statusEl) statusEl.textContent = "Removing projects…";
+      const session = await getSession();
+      const userId = session?.user?.id;
+      if (userId) {
+        try { await supabase.from("projects").delete().eq("owner_id", userId); } catch {}
+      }
+
+      // 3. Clear local state
+      if (statusEl) statusEl.textContent = "Clearing local data…";
+      state.songs = [];
+      state.projects = [];
+      state.releases = [];
+      normalizeState();
+      saveState();
+
+      // 4. Clear IndexedDB
+      audioUrlCache.clear();
+      try {
+        const db = await openAudioDB();
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(AUDIO_STORE, "readwrite");
+          tx.objectStore(AUDIO_STORE).clear();
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
+      } catch (e) { console.warn("[ClearLib] IDB clear failed:", e); }
+
+      // Done — show completion briefly then navigate away
+      if (barEl) barEl.style.width = "100%";
+      if (statusEl) { statusEl.textContent = "Library cleared"; statusEl.style.color = "#4ade80"; }
+      await new Promise(r => setTimeout(r, 800));
+      overlay.remove();
+      settingsView = null;
+      render();
+    } catch (e) {
+      console.error("[ClearLib] failed:", e);
+      if (statusEl) { statusEl.textContent = "Failed — check console"; statusEl.style.color = "#f87171"; }
+      setTimeout(() => overlay.remove(), 3000);
+    }
+  });
+
+  // Wipe local data
+  $("#wipe")?.addEventListener("click", async () => {
+    if (!confirm("Wipe all local RiffBank data and sign out? Cloud data is untouched.")) return;
     localStorage.clear();
-
-    // 2. Delete IndexedDB (cached audio blobs, cover blobs) — must await completion
     async function deleteIDB(name) {
       return new Promise((resolve) => {
         const req = indexedDB.deleteDatabase(name);
@@ -15471,22 +19386,14 @@ function renderSettings() {
     try {
       if (indexedDB.databases) {
         const dbs = await indexedDB.databases();
-        for (const db of dbs) {
-          if (db.name) await deleteIDB(db.name);
-        }
-      } else {
-        await deleteIDB(AUDIO_DB);
-      }
-    } catch {
-      try { await deleteIDB(AUDIO_DB); } catch {}
-    }
-
-    // 3. Sign out of Supabase
+        for (const db of dbs) { if (db.name) await deleteIDB(db.name); }
+      } else { await deleteIDB(AUDIO_DB); }
+    } catch { try { await deleteIDB(AUDIO_DB); } catch {} }
     try { await signOut(); } catch {}
-
-    // 4. Hard reload — cleanest way to get back to a fresh state
     window.location.reload();
   });
+
+  _setCollapseTitle();
 }
 
 // ---------------------
