@@ -14854,7 +14854,7 @@ function renderProfileContent(profile) {
         </div>
         <div class="profHeroInfo">
           <div class="profHeroName">${escapeHtml(displayName)}</div>
-          <div class="profHeroStats">${songCount} · Songs · ${projectCount} Projects · ${(sharedData.songs?.length || 0) + (sharedData.mySongs?.length || 0)} Shared</div>
+          <div class="profHeroStats">${songCount} · Songs · ${projectCount} Projects · ${(sharedData.songs?.length || 0) + (sharedData.mySongs?.length || 0) + (sharedData.projects || []).reduce((n, sp) => n + (sp.songs?.length || 0), 0) + (sharedData.myProjects || []).reduce((n, mp) => n + (mp.songs?.length || 0), 0)} Shared</div>
         </div>
       </div>
 
