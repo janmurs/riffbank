@@ -8,16 +8,11 @@
 
 window.onerror = (m, src, line, col) => console.error(`[RiffBank] JS ERROR: ${m} (${line}:${col})`);
 
-// Dev toggles: skip splash / welcome screen
- const DISABLE_SPLASH = true;
- const DISABLE_WELCOME = true;
-
-// Debug: show cache version badge on every screen (toggle on/off)
-const SHOW_BUILD_BADGE = false;
+// Dev toggles + debug flags now in constants.js
 
 // ── Import queue (alerts bell, persisted to localStorage for resume) ──
 // Each entry: { id, title, project, status, progress, ts, existingSongId, idbKey, fileName, fileType, fileSize }
-const IMPORT_QUEUE_KEY = "riffbank_import_queue";
+// IMPORT_QUEUE_KEY now in constants.js
 let importQueue = [];
 
 function _loadImportQueue() {
@@ -201,8 +196,7 @@ const activityLog = [];
 const _uploadProgressMap = { saving: 5, compressing: 20, uploading: 50, syncing: 85, done: 100, failed: 0 };
 
 // ── Persistent notification inbox (survives refresh, 30-day retention) ──
-const NOTIF_STORAGE_KEY = "riffbank_notifications";
-const NOTIF_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+// NOTIF_STORAGE_KEY, NOTIF_MAX_AGE_MS now in constants.js
 
 function _loadNotifications() {
   try {
@@ -300,6 +294,11 @@ window.toggleSyncDebug = () => {
   render();
 };
 
+import {
+  DISABLE_SPLASH, DISABLE_WELCOME, SHOW_BUILD_BADGE,
+  LS_KEY, IMPORT_QUEUE_KEY, NOTIF_STORAGE_KEY, NOTIF_MAX_AGE_MS,
+  AUDIO_DB, AUDIO_STORE,
+} from "./constants.js";
 import { $ } from "./ui/dom.js";
 import { runSplashSequence, replaySplash } from "./splash/splash.js";
 import {
@@ -322,7 +321,7 @@ import {
   getLoadedInvitePreview, claimLoadedInvite,
 } from "./supabase.js";
 
-const LS_KEY = "riffbank_v1";
+// LS_KEY now in constants.js
 const HAS_SAVED_STATE = !!localStorage.getItem(LS_KEY); // used to detect first-run seeding
 
 let prevTabBeforeFullPlayer = null;
@@ -1267,8 +1266,7 @@ const toastEl = $("#toast");
 // ---------------------
 // Audio storage (IndexedDB) - Phase 1
 // ---------------------
-const AUDIO_DB = "riffbank_audio_v2";
-const AUDIO_STORE = "files";
+// AUDIO_DB, AUDIO_STORE now in constants.js
 const audioUrlCache = new Map(); // localAudioId -> objectURL
 const coverUrlCache = new Map(); // coverPath -> blob objectURL (persists via IndexedDB)
 
