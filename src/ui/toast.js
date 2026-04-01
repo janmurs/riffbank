@@ -1,1 +1,3 @@
-export function noopToast() {}
+export function toast(msg) {
+  console.log("[RiffBank]", msg);
+}

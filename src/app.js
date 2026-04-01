@@ -299,7 +299,28 @@ import {
   LS_KEY, IMPORT_QUEUE_KEY, NOTIF_STORAGE_KEY, NOTIF_MAX_AGE_MS,
   AUDIO_DB, AUDIO_STORE,
 } from "./constants.js";
-import { $ } from "./ui/dom.js";
+import {
+  $, nowStamp, slug, escapeHtml, escapeTextarea, uid,
+  basenameNoExt, titleizeFromSlug, safeString, normalizeFileUrl,
+  extFromPath, yyyymmddFromDate, guessNumericSuffixFromTitle,
+} from "./ui/dom.js";
+import { toast } from "./ui/toast.js";
+import {
+  initCoverArt, coverSvg, coverCache, generatingArtSongs,
+  isIOSDevice, buildArtPrompt, hashStr, makeRng, clamp,
+} from "./ui/coverArt.js";
+import {
+  state, setState, sharedData, setSharedData,
+  loadState, normalizeState, ensureProjectInState,
+  saveState, initStateSave,
+} from "./state.js";
+import {
+  audioUrlCache, coverUrlCache,
+  openAudioDB, putAudioBlob, getAudioBlob,
+  putCoverBlob, getCoverBlobUrl, restoreCoverUrlsFromCache,
+  compressAudioForUpload,
+  openAudioDb, audioPut, audioGet, audioDelete, audioGetAll,
+} from "./audio/audioDB.js";
 import { runSplashSequence, replaySplash } from "./splash/splash.js";
 import {
   SUPABASE_URL, SUPABASE_ANON_KEY,
@@ -1263,14 +1284,7 @@ const headerTitle = $("#headerTitle");
 const headerBackEl = document.getElementById("headerBack");
 const toastEl = $("#toast");
 
-// ---------------------
-// Audio storage (IndexedDB) - Phase 1
-// ---------------------
-// AUDIO_DB, AUDIO_STORE now in constants.js
-const audioUrlCache = new Map(); // localAudioId -> objectURL
-const coverUrlCache = new Map(); // coverPath -> blob objectURL (persists via IndexedDB)
-
-// v2 DB name abandons the corrupt v1 DB — no flush needed
+// Audio storage (IndexedDB) now in audio/audioDB.js
 
 // ---------------------
 // iOS audio unlock (required if you do async before play())
@@ -1302,106 +1316,8 @@ async function unlockAudioOnce() {
   }
 }
 
-function openAudioDB() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(AUDIO_DB, 1);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(AUDIO_STORE)) {
-        db.createObjectStore(AUDIO_STORE, { keyPath: "id" });
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function putAudioBlob({ id, blob, name, type, size }) {
-  const db = await openAudioDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(AUDIO_STORE, "readwrite");
-    tx.objectStore(AUDIO_STORE).put({
-      id,
-      blob,
-      name,
-      type,
-      size,
-      savedAt: nowStamp(),
-    });
-    tx.oncomplete = () => resolve(true);
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-async function getAudioBlob(id) {
-  const db = await openAudioDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(AUDIO_STORE, "readonly");
-    const req = tx.objectStore(AUDIO_STORE).get(id);
-    req.onsuccess = () => resolve(req.result || null);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-// ---------------------
-// Cover art cache (IndexedDB) — survives app restarts
-// ---------------------
-async function putCoverBlob(coverPath, blob) {
-  if (!coverPath || !blob) return;
-  const id = `cover:${coverPath}`;
-  await putAudioBlob({ id, blob, name: "cover", type: blob.type || "image/jpeg", size: blob.size });
-}
-
-async function getCoverBlobUrl(coverPath) {
-  if (!coverPath) return null;
-  if (coverUrlCache.has(coverPath)) return coverUrlCache.get(coverPath);
-  const rec = await getAudioBlob(`cover:${coverPath}`);
-  if (rec?.blob) {
-    const url = URL.createObjectURL(rec.blob);
-    coverUrlCache.set(coverPath, url);
-    return url;
-  }
-  return null;
-}
-
-// Restore cover URLs from IndexedDB for all songs (call on startup, before render)
-async function restoreCoverUrlsFromCache() {
-  for (const song of (state.songs || [])) {
-    if (song.coverPath) {
-      let url = await getCoverBlobUrl(song.coverPath);
-      if (!url) {
-        // Try fetching from Supabase storage
-        const blob = await supabaseFetchCoverBlob(song.coverPath).catch(() => null);
-        if (blob) {
-          await putCoverBlob(song.coverPath, blob);
-          url = URL.createObjectURL(blob);
-          coverUrlCache.set(song.coverPath, url);
-        }
-      }
-      song.coverImageUrl = url || null;
-    }
-    // Restore user-uploaded cover URLs
-    if (song.coverSource === "user" || song.userCoverPath) {
-      const localKey = `user_${song.id}_cover.jpg`;
-      // Try cloud path first, then local IndexedDB key
-      let userUrl = song.userCoverPath ? await getCoverBlobUrl(song.userCoverPath) : null;
-      if (!userUrl) userUrl = await getCoverBlobUrl(localKey);
-      if (!userUrl && song.userCoverPath) {
-        // Try fetching from Supabase storage
-        const blob = await supabaseFetchCoverBlob(song.userCoverPath).catch(() => null);
-        if (blob) {
-          await putCoverBlob(song.userCoverPath, blob);
-          userUrl = URL.createObjectURL(blob);
-          coverUrlCache.set(song.userCoverPath, userUrl);
-        }
-      }
-      if (userUrl) {
-        song.userCoverImageUrl = userUrl;
-        if (song.coverSource !== "user") song.coverSource = "user";
-      }
-    }
-  }
-}
+// openAudioDB, putAudioBlob, getAudioBlob, putCoverBlob,
+// getCoverBlobUrl, restoreCoverUrlsFromCache now in audio/audioDB.js
 
 function getActiveTab() {
   // If you already track current tab in a variable, return that instead.
@@ -1673,9 +1589,7 @@ function isHomeRoot() {
   );
 }
 
-function toast(msg) {
-  console.log("[RiffBank]", msg);
-}
+// toast() now in ui/toast.js
 
 // ---------------------
 // Global audio + mini player
@@ -2030,155 +1944,22 @@ async function playNowPlaying({ autoplay = true } = {}){
   await syncMiniPlayerUI();
 }
 
-function nowStamp(d = new Date()) {
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mi = String(d.getMinutes()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd} ${hh}${mi}`;
-}
+// nowStamp, slug, escapeHtml, escapeTextarea, uid now in ui/dom.js
 
-function slug(s) {
-  return String(s || "")
-    .trim()
-    .replace(/[\/\\:*?"<>|#%{}[\]^`]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
+// state, loadState, sharedData now in state.js
+setState(loadState());
 
-function escapeHtml(str) {
-  return String(str ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
+// Wire cover art module dependencies (saveState/render are hoisted function declarations)
+initCoverArt({ supabaseFetchCoverBlob, saveState, render });
 
-function escapeTextarea(str) {
-  return String(str ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
-}
-
-function uid() {
-  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
-  return (
-    "id-" +
-    Date.now().toString(36) +
-    "-" +
-    Math.random().toString(36).slice(2, 10) +
-    "-" +
-    Math.random().toString(36).slice(2, 10)
-  );
-}
-
-function loadState() {
-  const raw = localStorage.getItem(LS_KEY);
-  if (raw) {
-    try { return JSON.parse(raw); } catch {}
-  }
-  return {
-    version: 1,
-    settings: {
-      defaultProject: "",
-      defaultGenre: "Metalcore",
-      defaultSprint: "Unsorted",
-      lyricsScratch: ""
-    },
-    songs: [],
-    quickLog: [],
-  };
-}
-
-let state = loadState();
-
-// Shared content cache (runtime only, fetched from Supabase on Collab tab)
-let sharedData = { projects: [], songs: [], invites: [], myProjects: [], mySongs: [], loaded: false };
-
-function normalizeState() {
-  state.settings = state.settings || {};
-  state.songs = Array.isArray(state.songs) ? state.songs : [];
-  state.quickLog = Array.isArray(state.quickLog) ? state.quickLog : [];
-  state.releases = Array.isArray(state.releases) ? state.releases : [];
-  state.songs.forEach((song) => {
-    song.versions = Array.isArray(song.versions) ? song.versions : [];
-    song.versions.forEach((v) => {
-      if (typeof v.isActive !== "boolean") v.isActive = false;
-      // Local file support
-      if (v.fileId === undefined) v.fileId = null;
-      if (v.fileName === undefined) v.fileName = "";
-      if (v.fileType === undefined) v.fileType = "";
-      if (v.fileSize === undefined) v.fileSize = 0;
-
-      if (v.localAudioId === undefined) v.localAudioId = null;
-      if (v.originalFileName === undefined) v.originalFileName = "";
-      // Supabase cloud storage
-      if (v.driveFileId && !v.audioPath) v.audioPath = null; // migrate: driveFileId no longer used
-      if (v.audioPath === undefined) v.audioPath = null;
-      // Player playlist flags
-      if (typeof v.playerYes !== "boolean") v.playerYes = false;
-      if (typeof v.favorite !== "boolean") v.favorite = false;
-    });
-    // Enforce exactly one active version
-    const activeVs = song.versions.filter(v => v.isActive);
-    if (activeVs.length === 0 && song.versions.length) {
-      // None active — pick most recently updated
-      const newest = song.versions.reduce((a, b) =>
-        new Date(a.updatedAt || a.createdAt || 0) >= new Date(b.updatedAt || b.createdAt || 0) ? a : b
-      );
-      newest.isActive = true;
-    } else if (activeVs.length > 1) {
-      // Multiple active — keep most recently updated, clear the rest
-      const newest = activeVs.reduce((a, b) =>
-        new Date(a.updatedAt || a.createdAt || 0) >= new Date(b.updatedAt || b.createdAt || 0) ? a : b
-      );
-      song.versions.forEach(v => { v.isActive = (v.id === newest.id); });
-    }
-    if (song.coverImageUrl === undefined) song.coverImageUrl = null;
-    // Migrate coverDriveFileId → coverPath
-    if (song.coverDriveFileId && !song.coverPath) song.coverPath = null;
-    if (song.coverPath === undefined) song.coverPath = null;
-    // User-uploaded cover art
-    if (song.userCoverImageUrl === undefined) song.userCoverImageUrl = null;
-    if (song.userCoverPath === undefined) song.userCoverPath = null;
-    if (!song.coverSource) song.coverSource = song.userCoverPath ? "user" : "ai";
-  });
-  // Projects (persisted independently of songs)
-  state.projects = Array.isArray(state.projects) ? state.projects : [];
-
-  // Player state (queue)
-  state.player = state.player || {};
-  state.player.queue = Array.isArray(state.player.queue) ? state.player.queue : [];
-  state.player.repeatQueue = Array.isArray(state.player.repeatQueue) ? state.player.repeatQueue : [];
-  state.player.nowPlaying = state.player.nowPlaying || null;
-
-  // Playback toggles (persisted)
-  if (typeof state.player.shuffle !== "boolean") state.player.shuffle = false;
-  if (state.player.repeat !== true && state.player.repeat !== "one") state.player.repeat = false;
-}
-
+// normalizeState, ensureProjectInState, saveState now in state.js
 normalizeState();
 
-function ensureProjectInState(name) {
-  const trimmed = (name || "").trim();
-  if (!trimmed) return;
-  if (!state.projects.includes(trimmed)) {
-    state.projects.push(trimmed);
-  }
-}
-
-function saveState() {
-  localStorage.setItem(LS_KEY, JSON.stringify(state));
-  // Auto-sync to Supabase (debounced) — skip during bulk import to avoid
-  // partial pushes that can trigger realtime sync and delete un-pushed songs.
-  // The import loop does its own explicit push at the end.
-  if (!_importQueueRunning) {
-    supabaseSyncStateSoon(state);
-  }
-}
+// Wire saveState's sync dependency
+initStateSave({
+  syncFn: supabaseSyncStateSoon,
+  importQueueRunningFn: () => _importQueueRunning,
+});
 
 // ---------------------
 // Default library seeding (from /public/library)
@@ -2189,52 +1970,8 @@ async function fetchJson(url) {
   return await res.json();
 }
 
-function basenameNoExt(path) {
-  const base = String(path || "").split("/").pop() || "";
-  return base.replace(/\.[a-z0-9]+$/i, "");
-}
-
-function titleizeFromSlug(s) {
-  return String(s || "")
-    .replace(/[_-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/\b\w/g, (m) => m.toUpperCase());
-}
-
-function safeString(x) {
-  return (x == null ? "" : String(x)).trim();
-}
-
-function normalizeFileUrl(file) {
-  // Accept "./library/...", "/library/...", or "library/..."
-  let f = safeString(file);
-  if (!f) return "";
-  if (f.startsWith("http://") || f.startsWith("https://")) return f;
-  if (f.startsWith("/")) return f;
-  if (f.startsWith("./")) return f;
-  if (f.startsWith("library/")) return "./" + f;
-  return "./" + f;
-}
-
-function extFromPath(p) {
-  const m = String(p || "").match(/\.([a-z0-9]+)$/i);
-  return (m?.[1] || "").toLowerCase();
-}
-
-function yyyymmddFromDate(d) {
-  const s = safeString(d);
-  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (!m) return "";
-  return `${m[1]}${m[2]}${m[3]}`;
-}
-
-function guessNumericSuffixFromTitle(t) {
-  const s = safeString(t);
-  // e.g. "Wasting 20260206 2" -> "2"
-  const m = s.match(/\b(\d{1,2})\b\s*$/);
-  return m ? m[1] : "";
-}
+// basenameNoExt, titleizeFromSlug, safeString, normalizeFileUrl,
+// extFromPath, yyyymmddFromDate, guessNumericSuffixFromTitle now in ui/dom.js
 
 function resolveSeedLibraryUrl({ bandId, songSlug, verObj }) {
   // Only for seeded catalog items coming from /public/library manifests.
@@ -2428,7 +2165,7 @@ async function seedDefaultLibraryIfNeeded({ force = false } = {}) {
 
   if (!seeded.length) return false;
 
-  state = loadState();
+  setState(loadState());
   state.songs = seeded;
   state.quickLog = [];
   state.player = { queue: [], nowPlaying: null };
@@ -2439,147 +2176,8 @@ async function seedDefaultLibraryIfNeeded({ force = false } = {}) {
 
 // ---------------------
 // ---------------------
-// Audio compression — shrink WAVs for cloud upload
-// Decodes to AudioBuffer, mixes to mono, re-encodes as 16-bit WAV
-// ---------------------
-const COMPRESS_THRESHOLD = 40 * 1024 * 1024; // only compress files > 40MB
-
-async function compressAudioForUpload(blob) {
-  // Skip compression for files under 50MB (Supabase free tier limit)
-  if (blob.size <= COMPRESS_THRESHOLD) return blob;
-
-  // Skip compression while audio is playing — real-time MediaRecorder encoding
-  // creates a competing AudioContext that causes playback glitches
-  if (!globalAudio.paused) {
-    console.log("[Compress] Skipping — audio is playing, avoiding playback glitches");
-    return blob;
-  }
-
-  // Encode to M4A/AAC (stereo, high quality) via MediaRecorder
-  // Safari/iOS: audio/mp4 (AAC), Chrome: audio/webm (Opus) — both excellent quality
-  try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const arrayBuf = await blob.arrayBuffer();
-    const audioBuffer = await ctx.decodeAudioData(arrayBuf);
-
-    // Render at original sample rate and channel count (preserve stereo)
-    const sampleRate = audioBuffer.sampleRate;
-    const channels = audioBuffer.numberOfChannels;
-    const length = audioBuffer.length;
-    const offline = new OfflineAudioContext(channels, length, sampleRate);
-    const source = offline.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(offline.destination);
-    source.start(0);
-    const rendered = await offline.startRendering();
-    ctx.close();
-
-    // Pick best available container: M4A (Safari) > WebM/Opus (Chrome)
-    const mimeType = MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4"
-      : MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus"
-      : null;
-
-    if (!mimeType) {
-      console.warn("[Compress] No supported audio encoder, uploading original");
-      return blob;
-    }
-
-    // Play the rendered buffer through MediaRecorder to encode
-    const dest = new AudioContext({ sampleRate });
-    const bufferSource = dest.createBufferSource();
-    bufferSource.buffer = rendered;
-    const destNode = dest.createMediaStreamDestination();
-    bufferSource.connect(destNode);
-
-    const recorder = new MediaRecorder(destNode.stream, {
-      mimeType,
-      audioBitsPerSecond: 256000, // 256kbps — high quality
-    });
-
-    const chunks = [];
-    recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
-
-    const encodedBlob = await new Promise((resolve) => {
-      recorder.onstop = () => {
-        const encoded = new Blob(chunks, { type: mimeType });
-        resolve(encoded);
-      };
-      recorder.start();
-      bufferSource.start(0);
-      // Stop recording after the audio duration + small buffer
-      setTimeout(() => {
-        recorder.stop();
-        bufferSource.stop();
-        dest.close();
-      }, (rendered.duration * 1000) + 200);
-    });
-
-    const ext = mimeType.includes("mp4") ? "m4a" : "webm";
-    console.log(`[Compress] ${(blob.size / 1e6).toFixed(1)}MB → ${(encodedBlob.size / 1e6).toFixed(1)}MB (${ext}, ${channels}ch)`);
-    return encodedBlob;
-  } catch (e) {
-    console.warn("[Compress] Failed, uploading original:", e);
-    return blob;
-  }
-}
-
-// Local audio store (IndexedDB) — iPhone-friendly
-// ---------------------
-
-function openAudioDb() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(AUDIO_DB, 1);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(AUDIO_STORE)) {
-        db.createObjectStore(AUDIO_STORE, { keyPath: "id" });
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function audioPut(fileRecord) {
-  const db = await openAudioDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(AUDIO_STORE, "readwrite");
-    tx.objectStore(AUDIO_STORE).put(fileRecord);
-    tx.oncomplete = () => { db.close(); resolve(true); };
-    tx.onerror = () => { db.close(); reject(tx.error); };
-  });
-}
-
-async function audioGet(id) {
-  const db = await openAudioDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(AUDIO_STORE, "readonly");
-    const req = tx.objectStore(AUDIO_STORE).get(id);
-    req.onsuccess = () => { db.close(); resolve(req.result || null); };
-    req.onerror = () => { db.close(); reject(req.error); };
-  });
-}
-
-async function audioDelete(id) {
-  const db = await openAudioDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(AUDIO_STORE, "readwrite");
-    tx.objectStore(AUDIO_STORE).delete(id);
-    tx.oncomplete = () => { db.close(); resolve(true); };
-    tx.onerror = () => { db.close(); reject(tx.error); };
-  });
-}
-
-// List all blobs in IndexedDB (for recovery)
-async function audioGetAll() {
-  const db = await openAudioDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(AUDIO_STORE, "readonly");
-    const req = tx.objectStore(AUDIO_STORE).getAll();
-    req.onsuccess = () => { db.close(); resolve(req.result || []); };
-    req.onerror = () => { db.close(); reject(req.error); };
-  });
-}
+// compressAudioForUpload, openAudioDb, audioPut, audioGet,
+// audioDelete, audioGetAll now in audio/audioDB.js
 
 // Delete a song from Supabase (DB rows + storage files) — fire-and-forget
 async function deleteSongEverywhere(song) {
@@ -2676,7 +2274,7 @@ async function recoverAndUploadAudio() {
       if (v.audioPath) continue;
       try {
         toast(`Compressing ${song.title}…`);
-        const uploadBlob = await compressAudioForUpload(rec.blob);
+        const uploadBlob = await compressAudioForUpload(rec.blob, globalAudio);
         const fileName = v.fileName || rec.name || "audio";
         const result = await supabaseUploadAudio({
           blob: new File([uploadBlob], fileName, { type: uploadBlob.type || rec.type || "audio/*" }),
@@ -4235,7 +3833,7 @@ async function backupAllAudioToCloud() {
       // Don't upload while audio is playing — causes playback glitches
       if (!globalAudio.paused) await waitForAudioIdle();
       await yieldToMain();
-      const compressed = await compressAudioForUpload(blob);
+      const compressed = await compressAudioForUpload(blob, globalAudio);
       await yieldToMain();
       if (!globalAudio.paused) await waitForAudioIdle();
       const fileName = v.fileName || v.label || "audio";
@@ -4301,7 +3899,7 @@ async function ensureAllAudioInCloud() {
     if (!blob) { failed++; continue; }
 
     try {
-      const compressed = await compressAudioForUpload(blob);
+      const compressed = await compressAudioForUpload(blob, globalAudio);
       await yieldToMain();
       if (!globalAudio.paused) await waitForAudioIdle();
       const fileName = v.fileName || v.label || "audio";
@@ -7703,7 +7301,7 @@ $("#importFile")?.addEventListener("change", async (e) => {
 
     if (!confirm("Import will replace your current data on this device. Continue?")) return;
 
-    state = incoming;
+    setState(incoming);
     normalizeState();
     saveState();
     toast("Imported ✅");
@@ -8180,7 +7778,7 @@ async function attachSharedAudio(song, v, blob, fileName, fileType, fileSize) {
   // Upload to Supabase Storage (compress large files first)
   toast("Syncing to cloud…");
   try {
-    const compressed = await compressAudioForUpload(blob);
+    const compressed = await compressAudioForUpload(blob, globalAudio);
     const result = await supabaseUploadAudio({
       blob: new File([compressed], fileName, { type: compressed.type || fileType }),
       songId: song.id,
@@ -8245,7 +7843,7 @@ async function attachSharedAudioCloud(song, v, blob, fileName, fileType) {
   try {
     await yieldToMain();
     logActivity(logId, title, "compressing", "Compressing audio…");
-    const compressed = await compressAudioForUpload(blob);
+    const compressed = await compressAudioForUpload(blob, globalAudio);
     await yieldToMain();
 
     // Re-check: if user started playing during compression, wait again
@@ -9826,7 +9424,7 @@ async function init() {
 
   let syncDone = false;
   const syncTask = withTimeout(Promise.all([
-    restoreCoverUrlsFromCache().then(() => render()).catch(() => {}),
+    restoreCoverUrlsFromCache(state.songs, supabaseFetchCoverBlob).then(() => render()).catch(() => {}),
     (!_importFlowRan
       ? incrementalSyncFromSupabase().then(() => {
           preFetchCloudAudio().catch(console.warn);
@@ -10176,7 +9774,7 @@ async function incrementalSyncFromSupabase() {
     state.releases = cloudState.releases || state.releases;
     state.projects = cloudState.projects || state.projects;
     normalizeState();
-    await restoreCoverUrlsFromCache();
+    await restoreCoverUrlsFromCache(state.songs, supabaseFetchCoverBlob);
     saveState();
     coverCache.clear();
     render();
@@ -10269,7 +9867,7 @@ async function incrementalSyncFromSupabase() {
 
   if (added || updated || removed) {
     normalizeState();
-    await restoreCoverUrlsFromCache();
+    await restoreCoverUrlsFromCache(state.songs, supabaseFetchCoverBlob);
     saveState();
     coverCache.clear();
     render();
@@ -12686,7 +12284,7 @@ async function refreshSharedData() {
       _showShareNotification(newItems);
     }
 
-    sharedData = { projects: projects || [], songs: songs || [], invites: invites || [], myProjects: myProjects || [], mySongs: mySongs || [], loaded: true };
+    setSharedData({ projects: projects || [], songs: songs || [], invites: invites || [], myProjects: myProjects || [], mySongs: mySongs || [], loaded: true });
   } catch (e) {
     console.warn("[Collab] Failed to fetch shared data:", e);
     if (!sharedData.loaded) sharedData = { projects: [], songs: [], invites: [], myProjects: [], mySongs: [], loaded: true };
@@ -16331,32 +15929,7 @@ function renderNextActions() {
   );
 }
 
-function clamp(n, a, b){ return Math.max(a, Math.min(b, n)); }
-
-function hashStr(str){
-  str = String(str || "");
-  let h = 2166136261;
-  for (let i=0;i<str.length;i++){
-    h ^= str.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return (h >>> 0);
-}
-
-function makeRng(seed){
-  let t = seed >>> 0;
-  return () => {
-    // xorshift32
-    t ^= t << 13; t >>>= 0;
-    t ^= t >> 17; t >>>= 0;
-    t ^= t << 5;  t >>>= 0;
-    return (t >>> 0) / 4294967296;
-  };
-}
-
-// --- Cover caching + iOS "lite" mode ---
-const coverCache = new Map();
-const generatingArtSongs = new Set(); // song IDs currently generating art
+// clamp, hashStr, makeRng, coverCache, generatingArtSongs now in ui/coverArt.js
 
 // Auto-generate art for a newly created song (fire-and-forget)
 function autoGenerateArt(song) {
@@ -16751,66 +16324,7 @@ function showCropOverlay(songId, imageSrc) {
 let artCooldownUntil = 0; // timestamp — global 10s cooldown after any art request
 const bulkArtState = { running: false, done: 0, total: 0 }; // bulk art gen progress
 
-function buildArtPrompt(song) {
-  // Deterministic hash from song title + project to pick scene/style combos
-  const seed = (song.title || "").length * 7 + (song.project || "").length * 13
-    + (song.title || "").charCodeAt(0) * 31
-    + ((song.title || "").charCodeAt(1) || 0) * 17;
-
-  const scenes = [
-    "vast mountain landscape at golden hour, dramatic peaks, alpine lake reflection, wildflowers in foreground, volumetric light rays through clouds",
-    "deep ocean underwater scene, bioluminescent jellyfish, coral reef, shafts of sunlight through water, ethereal blue-green glow, floating particles",
-    "abandoned industrial warehouse, shattered windows, overgrown vines reclaiming concrete, dramatic god-rays, dust particles in light beams",
-    "dense enchanted forest, towering ancient trees, mystical fog, fireflies glowing, moss-covered roots, dappled moonlight filtering through canopy",
-    "vast desert at twilight, sand dunes with wind ripples, lone joshua tree silhouette, purple-orange gradient sky, stars emerging",
-    "futuristic neon cityscape from rooftop, holographic billboards, flying vehicles, rain-slicked streets far below, cyberpunk atmosphere, glowing windows",
-    "frozen tundra landscape, northern lights aurora borealis, ice formations, starfield sky, teal and purple light dancing, snow-covered terrain",
-    "lush tropical coastline at sunset, palm trees swaying, turquoise waves crashing, dramatic cloud formations, golden hour warmth, volcanic island in distance",
-    "cosmic nebula scene, swirling galaxies, colorful interstellar gas clouds, distant stars, asteroid field, deep space, celestial wonder",
-    "overgrown ancient temple ruins, jungle reclaiming stone architecture, shafts of green-tinted light, carved stone faces, hanging vines, mystical atmosphere",
-    "stormy seascape, towering waves, lightning illuminating dark clouds, lighthouse beam cutting through rain, dramatic ocean spray, powerful nature",
-    "cherry blossom garden at night, lantern-lit pathway, pink petals falling, koi pond reflection, misty atmosphere, Japanese aesthetic",
-    "volcanic landscape, molten lava flows, dark rock formations, fiery orange glow against dark sky, smoke and ash, raw elemental power",
-    "abstract fluid art, swirling metallic paint, iridescent colors blending, macro photography feel, glossy surface tension, mesmerizing patterns",
-    "sunflower field stretching to horizon, dramatic cumulus clouds, warm afternoon light, single weathered barn, painted sky, rural serenity",
-    "underground crystal cavern, massive amethyst and quartz formations, underground river, bioluminescent fungi, prismatic light reflections",
-  ];
-
-  const styles = [
-    "cinematic photography",
-    "oil painting, thick brushstrokes",
-    "moody atmospheric digital art",
-    "watercolor illustration, soft edges",
-    "retro analog film grain aesthetic",
-    "hyper-detailed digital matte painting",
-    "minimalist graphic art, bold shapes",
-    "dreamlike surrealist composition",
-  ];
-
-  const palettes = [
-    "warm amber and deep crimson tones",
-    "cool blues and silver moonlight",
-    "vibrant teal and electric magenta",
-    "muted earth tones, olive and rust",
-    "pastel pink and lavender haze",
-    "deep indigo and gold accents",
-    "emerald green and copper highlights",
-    "monochrome with one vivid accent color",
-  ];
-
-  const scene = scenes[seed % scenes.length];
-  const style = styles[(seed * 3 + 5) % styles.length];
-  const palette = palettes[(seed * 7 + 11) % palettes.length];
-
-  return [
-    "album cover art",
-    song.genre ? `${song.genre} music mood` : null,
-    scene,
-    style,
-    palette,
-    "no text, no words, no letters, no numbers, no typography, no writing, no logos, no symbols, no watermarks, textless, wordless, purely visual composition, square format"
-  ].filter(Boolean).join(", ");
-}
+// buildArtPrompt now in ui/coverArt.js
 
 async function generateArtForSong(song) {
   const session = await getSession();
@@ -16945,194 +16459,7 @@ async function startBulkGenArt(onlyMissing) {
   render();
 }
 
-function isIOSDevice(){
-  // iPadOS can report as MacIntel with touch points
-  return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-}
-
-function coverSvg(song, { lite = false } = {}) {
-  const forceLite = lite || isIOSDevice();
-  const key = `${song.id}|${song.title}|${song.project}|${song.genre}|${song.coverImageUrl || ""}|${song.userCoverImageUrl || ""}|${song.coverSource || "ai"}|${forceLite ? "lite" : "full"}`;
-
-  if (generatingArtSongs.has(song.id)) {
-    return `<div style="width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;background:linear-gradient(135deg,#1a1a2e,#16213e);border-radius:inherit;color:#888;font-size:13px;gap:8px">
-      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#666" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="animation:spin 2s linear infinite">
-        <path d="M12 2a10 10 0 0 1 10 10" /><style>@keyframes spin{to{transform:rotate(360deg)}}</style>
-      </svg>
-      <span style="opacity:.6">Generating…</span>
-    </div>`;
-  }
-
-  if (coverCache.has(key)) return coverCache.get(key);
-
-  // User-uploaded cover takes priority when coverSource is "user"
-  if (song.coverSource === "user" && song.userCoverImageUrl) {
-    const errHandler = song.userCoverPath
-      ? ` onerror="this.onerror=null;window._refreshUserCoverFromCloud&&window._refreshUserCoverFromCloud('${escapeHtml(song.id)}','${escapeHtml(song.userCoverPath)}',this)"`
-      : ` onerror="this.onerror=null;window._clearBrokenUserCover&&window._clearBrokenUserCover('${escapeHtml(song.id)}',this)"`;
-
-    const img = `<img src="${escapeHtml(song.userCoverImageUrl)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;display:block" decoding="sync" alt=""${errHandler}>`;
-    coverCache.set(key, img);
-    return img;
-  }
-
-  // Resolve user cover from cache/cloud if path exists but URL doesn't
-  if (song.coverSource === "user" && !song.userCoverImageUrl && !song._userCoverResolving) {
-    song._userCoverResolving = true;
-    (async () => {
-      const localKey = `user_${song.id}_cover.jpg`;
-      let url = song.userCoverPath ? await getCoverBlobUrl(song.userCoverPath) : null;
-      if (!url) url = await getCoverBlobUrl(localKey);
-      if (!url && song.userCoverPath) {
-        const blob = await supabaseFetchCoverBlob(song.userCoverPath).catch(() => null);
-        if (blob) {
-          await putCoverBlob(song.userCoverPath, blob);
-          url = URL.createObjectURL(blob);
-          coverUrlCache.set(song.userCoverPath, url);
-        }
-      }
-      song._userCoverResolving = false;
-      if (url) {
-        song.userCoverImageUrl = url;
-        coverCache.clear();
-        saveState();
-        render();
-      }
-    })().catch(() => { song._userCoverResolving = false; });
-  }
-
-  if (song.coverImageUrl) {
-    const errHandler = song.coverPath
-      ? ` onerror="this.onerror=null;window._refreshCoverFromCloud&&window._refreshCoverFromCloud('${escapeHtml(song.id)}','${escapeHtml(song.coverPath)}',this)"`
-      : ` onerror="this.onerror=null;window._clearBrokenCover&&window._clearBrokenCover('${escapeHtml(song.id)}',this)"`;
-
-    const img = `<img src="${escapeHtml(song.coverImageUrl)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;display:block" decoding="sync" alt=""${errHandler}>`;
-    coverCache.set(key, img);
-    return img;
-  }
-
-  // coverImageUrl is missing but cloud path exists — resolve from IDB cache or Supabase
-  if (song.coverPath && !song._coverResolving) {
-    song._coverResolving = true;
-    (async () => {
-      let url = await getCoverBlobUrl(song.coverPath);
-      if (!url) {
-        const blob = await supabaseFetchCoverBlob(song.coverPath);
-        if (blob) {
-          await putCoverBlob(song.coverPath, blob);
-          url = URL.createObjectURL(blob);
-          coverUrlCache.set(song.coverPath, url);
-        }
-      }
-      song._coverResolving = false;
-      if (url) {
-        song.coverImageUrl = url;
-        coverCache.clear();
-        saveState();
-        render();
-      }
-    })().catch(() => { song._coverResolving = false; });
-  }
-
-  const seed = hashStr(`${song.id}|${song.title}|${song.project}|${song.genre}`);
-  const r = makeRng(seed);
-  const u = (seed >>> 0).toString(36); // unique prefix for SVG IDs
-
-  const h1 = Math.floor(r()*360);
-  const h2 = (h1 + 90 + Math.floor(r()*90)) % 360;
-  const h3 = (h2 + 90 + Math.floor(r()*90)) % 360;
-
-  const c1 = `hsl(${h1} 95% 60%)`;
-  const c2 = `hsl(${h2} 95% 58%)`;
-  const c3 = `hsl(${h3} 95% 62%)`;
-
-  const b = Array.from({length: 3}).map(() => ({
-    x: Math.floor(r()*120),
-    y: Math.floor(r()*120),
-    rad: Math.floor(40 + r()*55),
-    col: [c1,c2,c3][Math.floor(r()*3)]
-  }));
-
-  const sx1 = Math.floor(r()*40);
-  const sy1 = Math.floor(30 + r()*60);
-  const sx2 = Math.floor(90 + r()*40);
-  const sy2 = Math.floor(20 + r()*80);
-
-  // LITE: no turbulence/grain, no SVG filter stack (huge iOS win)
-  const svg = forceLite ? `
-  <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
-    <defs>
-      <linearGradient id="g${u}" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0" stop-color="${c1}" stop-opacity=".95"/>
-        <stop offset=".55" stop-color="${c2}" stop-opacity=".85"/>
-        <stop offset="1" stop-color="${c3}" stop-opacity=".9"/>
-      </linearGradient>
-      <radialGradient id="v${u}" cx="50%" cy="45%" r="70%">
-        <stop offset="55%" stop-color="rgba(0,0,0,0)"/>
-        <stop offset="100%" stop-color="rgba(0,0,0,.28)"/>
-      </radialGradient>
-    </defs>
-
-    <rect width="120" height="120" fill="url(#g${u})"/>
-    ${b.map(x => `<circle cx="${x.x}" cy="${x.y}" r="${x.rad}" fill="${x.col}" opacity=".22"/>`).join("")}
-
-    <path d="M ${sx1} ${sy1} C ${sx1+35} ${sy1-30}, ${sx2-35} ${sy2+30}, ${sx2} ${sy2}"
-      stroke="rgba(255,255,255,.55)" stroke-width="5" stroke-linecap="round" opacity=".18"/>
-
-    <rect width="120" height="120" fill="url(#v${u})"/>
-  </svg>` : `
-  <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
-    <defs>
-      <linearGradient id="g${u}" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0" stop-color="${c1}" stop-opacity=".95"/>
-        <stop offset=".55" stop-color="${c2}" stop-opacity=".85"/>
-        <stop offset="1" stop-color="${c3}" stop-opacity=".9"/>
-      </linearGradient>
-
-      <filter id="b${u}">
-        <feGaussianBlur stdDeviation="12" />
-      </filter>
-
-      <filter id="n${u}">
-        <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch" />
-        <feColorMatrix type="matrix" values="
-          1 0 0 0 0
-          0 1 0 0 0
-          0 0 1 0 0
-          0 0 0 .12 0"/>
-      </filter>
-
-      <filter id="w${u}">
-        <feGaussianBlur stdDeviation="3" result="b"/>
-        <feMerge>
-          <feMergeNode in="b"/>
-          <feMergeNode in="SourceGraphic"/>
-        </feMerge>
-      </filter>
-
-      <radialGradient id="v${u}" cx="50%" cy="45%" r="70%">
-        <stop offset="55%" stop-color="rgba(0,0,0,0)"/>
-        <stop offset="100%" stop-color="rgba(0,0,0,.35)"/>
-      </radialGradient>
-    </defs>
-
-    <rect width="120" height="120" fill="url(#g${u})"/>
-
-    <g filter="url(#b${u})" opacity=".9">
-      ${b.map(x => `<circle cx="${x.x}" cy="${x.y}" r="${x.rad}" fill="${x.col}" opacity=".55"/>`).join("")}
-    </g>
-
-    <path d="M ${sx1} ${sy1} C ${sx1+35} ${sy1-30}, ${sx2-35} ${sy2+30}, ${sx2} ${sy2}"
-      stroke="rgba(255,255,255,.65)" stroke-width="6" stroke-linecap="round" opacity=".22" filter="url(#w${u})"/>
-
-    <rect width="120" height="120" fill="url(#v${u})"/>
-    <rect width="120" height="120" filter="url(#n${u})" opacity=".55"/>
-  </svg>`;
-
-  coverCache.set(key, svg);
-  return svg;
-}
+// isIOSDevice, coverSvg now in ui/coverArt.js
 
 
 // ---------------------
@@ -18102,7 +17429,7 @@ function renderVersionDetail(songId, versionId) {
 
       // Upload to Supabase Storage in background (compress large files first)
       toast("Syncing to cloud…");
-      const compressed = await compressAudioForUpload(file);
+      const compressed = await compressAudioForUpload(file, globalAudio);
       const result = await supabaseUploadAudio({
         blob: new File([compressed], file.name || "audio", { type: compressed.type || file.type || "audio/*" }),
         songId: song.id,
@@ -18174,7 +17501,7 @@ function renderVersionDetail(songId, versionId) {
     if (!blob) return toast("No local file to upload");
 
     toast("Compressing & uploading…");
-    const compressed = await compressAudioForUpload(blob);
+    const compressed = await compressAudioForUpload(blob, globalAudio);
     const result = await supabaseUploadAudio({
       blob: new File([compressed], fileName, { type: compressed.type || blob.type || "audio/*" }),
       songId: song.id,
@@ -19303,7 +18630,7 @@ function renderSettingsCloud() {
           tx.onerror = () => reject(tx.error);
         });
       } catch (e) { console.warn("[Pull] IDB clear failed:", e); }
-      state = cloudState;
+      setState(cloudState);
       normalizeState();
       const missingCount = state.songs.reduce((n, s) => n + (s.versions || []).filter(v => !v.audioPath).length, 0);
       if (missingCount) {
@@ -19316,7 +18643,7 @@ function renderSettingsCloud() {
       toast("Caching cloud audio…");
       await supabasePushState(state).catch(console.warn);
       await cacheAllCloudAudio();
-      await restoreCoverUrlsFromCache();
+      await restoreCoverUrlsFromCache(state.songs, supabaseFetchCoverBlob);
     } else {
       toast("No data found in cloud");
     }
@@ -19454,7 +18781,7 @@ function renderSettingsLibrary() {
         if (!v.audioPath) {
           try {
             if (btn) btn.textContent = `Uploading ${song.title}…`;
-            const uploadBlob = await compressAudioForUpload(rec.blob);
+            const uploadBlob = await compressAudioForUpload(rec.blob, globalAudio);
             const fileName = v.fileName || rec.name || "audio";
             const result = await supabaseUploadAudio({ blob: new File([uploadBlob], fileName, { type: uploadBlob.type || rec.type || "audio/*" }), songId: song.id, versionId: v.id, fileName });
             if (result.success) { v.audioPath = result.audioPath; uploaded++; } else { failed++; }
