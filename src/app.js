@@ -318,6 +318,10 @@ import {
 import { Nav } from "./ui/nav.js";
 import { iconBookmark, iconChart, iconBulb, iconPlus, iconPeople } from "./ui/icons.js";
 import {
+  salSvg, dismissOnboarding, showWelcomeScreen, showDriveScreen,
+  openSalSheet, openSalOnboarding,
+} from "./ui/onboarding.js";
+import {
   audioUrlCache, coverUrlCache,
   openAudioDB, putAudioBlob, getAudioBlob,
   putCoverBlob, getCoverBlobUrl, restoreCoverUrlsFromCache,
@@ -3608,106 +3612,7 @@ function badgeForStatus(status) {
 // Create button in bottom nav
 document.querySelector(".createNavBtn")?.addEventListener("click", () => openCreateOverlay());
 
-// ── Sal SVG mascot ──────────────────────────────────────────────────
-// Auto-traced from sal.png using vtracer. Transparent background.
-// Returns an <img> tag pointing to the SVG file.
-function salSvg(size = 140) {
-  return `<img src="./sal.svg" alt="Sal" width="${size}" style="height:auto;">`;
-}
-
-// ── Onboarding cleanup — fades + removes all onboarding overlays ────
-function dismissOnboarding() {
-  document.querySelectorAll(".welcomeScreen, .driveScreen").forEach(el => {
-    el.classList.add("welcomeOut");
-    el.addEventListener("animationend", () => el.remove(), { once: true });
-  });
-  document.body.classList.remove("welcoming");
-}
-
-// ── Welcome screen (Duolingo-style landing after splash) ────────────
-// Returns a promise that resolves when user taps a button.
-// result: "getStarted" or "hasAccount"
-function showWelcomeScreen() {
-  return new Promise(resolve => {
-    document.body.classList.add("welcoming");
-    const el = document.createElement("div");
-    el.id = "welcomeScreen";
-    // Start fully opaque so it seamlessly replaces the splash overlay
-    el.className = "welcomeScreen welcomeIn";
-    el.innerHTML = `
-      <div class="welcomeSalWrap">
-        ${salSvg(140)}
-      </div>
-      <div class="welcomeTitle">RiffBank</div>
-      <div class="welcomeSub">Your music. Everywhere.</div>
-      <div class="welcomeBtns">
-        <button class="welcomeBtn welcomeBtnPrimary" data-action="getStarted">GET STARTED</button>
-        <button class="welcomeBtn welcomeBtnSecondary" data-action="hasAccount">I ALREADY HAVE AN ACCOUNT</button>
-      </div>
-    `;
-
-    el.addEventListener("click", e => {
-      const btn = e.target.closest("[data-action]");
-      if (!btn) return;
-      // Resolve immediately — the overlay stays in place so the app shell
-      // never flashes. init() will call dismissOnboarding() after render().
-      resolve(btn.dataset.action);
-    });
-
-    document.body.appendChild(el);
-    // Welcome is already opaque; now safe to unhide the app shell behind it
-    document.body.classList.remove("splashing");
-  });
-}
-
-// ── Drive connect screen (Duolingo-style, after welcome) ────────────
-// Returns a promise: { action: "connected"|"skip"|"back", email?, homeFolderName? }
-function showDriveScreen() {
-  return new Promise(resolve => {
-    const el = document.createElement("div");
-    el.className = "driveScreen";
-    el.innerHTML = `
-      <button class="driveBackBtn" data-action="back">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="15 18 9 12 15 6"/>
-        </svg>
-      </button>
-      <div class="driveBubbleArea">
-        <div class="driveBubble">
-          <strong>RiffBank</strong> stores, manages, and releases all of your in-progress songs in the cloud.
-        </div>
-        <div class="driveSalWrap">${salSvg(120)}</div>
-      </div>
-      <div class="driveBtns">
-        <button class="driveBtnConnect" data-action="connect">CONNECT GOOGLE DRIVE</button>
-        <button class="driveBtnSkip" data-action="skip">Maybe later</button>
-      </div>
-    `;
-
-    let _signedInEmail = "";
-    let _existingFolderId = null;
-
-    el.addEventListener("click", async e => {
-      const btn = e.target.closest("[data-action]");
-      if (!btn) return;
-      const action = btn.dataset.action;
-
-      if (action === "back" || action === "skip") {
-        // Resolve immediately — overlay stays. init() cleans up after render().
-        resolve({ action });
-        return;
-      }
-
-      if (action === "connect" || action === "connectExisting" || action === "pick") {
-        // Cloud auth handled by Supabase auth screen — skip legacy Drive flow
-        resolve({ action: "skip" });
-      }
-    });
-
-    document.body.appendChild(el);
-    requestAnimationFrame(() => el.classList.add("welcomeIn"));
-  });
-}
+// salSvg, dismissOnboarding, showWelcomeScreen, showDriveScreen now in ui/onboarding.js
 
 // Profile nav button — inject user avatar into nav icon
 function syncProfileNavIcon() {
@@ -4283,79 +4188,7 @@ let _ptrBusy = false;
   }, { passive: true, capture: true });
 })();
 
-function openSalSheet() {
-  // Remove any existing Sal sheet
-  document.getElementById("salSheetBackdrop")?.remove();
-  document.getElementById("salSheet")?.remove();
-
-  const backdrop = document.createElement("div");
-  backdrop.id = "salSheetBackdrop";
-  backdrop.className = "actionSheetBackdrop";
-
-  const sheet = document.createElement("div");
-  sheet.id = "salSheet";
-  sheet.className = "actionSheet";
-  sheet.style.cssText = "padding: 0; overflow: hidden; border-radius: 22px;";
-  sheet.innerHTML = `
-    <div style="display:flex;flex-direction:column;align-items:center;padding:28px 24px 12px;gap:12px;">
-      ${salSvg(80)}
-      <div style="font-size:22px;font-weight:900;color:#fff;letter-spacing:-0.4px;">Hey, I'm Sal!</div>
-      <div style="font-size:14px;color:rgba(255,255,255,.55);text-align:center;line-height:1.6;max-width:280px;">
-        Your RiffBank guide. I'll help you manage songs, projects, versions, and everything in between.
-      </div>
-    </div>
-    <div style="height:1px;background:rgba(255,255,255,.08);margin:0 16px;"></div>
-    <button class="actionSheetBtn" id="salClose">Got it</button>
-  `;
-
-  function close() { backdrop.remove(); sheet.remove(); }
-  backdrop.addEventListener("click", close);
-  sheet.querySelector("#salClose")?.addEventListener("click", close);
-
-  document.body.appendChild(backdrop);
-  document.body.appendChild(sheet);
-}
-
-// Sal first-time onboarding — auto-opens once for new users
-function openSalOnboarding({ force = false } = {}) {
-  if (!force && localStorage.getItem("salOnboardingDone")) return;
-  if (!force && state.songs?.length) { localStorage.setItem("salOnboardingDone", "1"); return; }
-
-  // Remove any existing Sal sheet
-  document.getElementById("salSheetBackdrop")?.remove();
-  document.getElementById("salSheet")?.remove();
-
-  const backdrop = document.createElement("div");
-  backdrop.id = "salSheetBackdrop";
-  backdrop.className = "actionSheetBackdrop";
-
-  const sheet = document.createElement("div");
-  sheet.id = "salSheet";
-  sheet.className = "actionSheet";
-  sheet.style.cssText = "padding: 0; overflow: hidden; border-radius: 22px;";
-  sheet.innerHTML = `
-    <div style="display:flex;flex-direction:column;align-items:center;padding:32px 24px 20px;gap:14px;">
-      ${salSvg(96)}
-      <div style="font-size:24px;font-weight:900;color:#fff;letter-spacing:-0.4px;">Welcome to RiffBank!</div>
-      <div style="font-size:15px;color:rgba(255,255,255,.55);text-align:center;line-height:1.7;max-width:290px;">
-        Hey, I'm <strong style="color:#fff;">Sal</strong>! I'll be your guide around here.<br><br>
-        RiffBank keeps all your songs, versions, and projects safe in the <strong style="color:#fff;">cloud</strong> — record on any device and access your music anywhere.
-      </div>
-    </div>
-    <div style="height:1px;background:rgba(255,255,255,.08);margin:0 16px;"></div>
-    <div style="padding:8px 0 6px;display:flex;flex-direction:column;">
-      <button class="actionSheetBtn" id="salDismiss" style="font-weight:700;">Got it, let's go!</button>
-    </div>
-  `;
-
-  function close() { backdrop.remove(); sheet.remove(); localStorage.setItem("salOnboardingDone", "1"); }
-
-  backdrop.addEventListener("click", close);
-  sheet.querySelector("#salDismiss")?.addEventListener("click", close);
-
-  document.body.appendChild(backdrop);
-  document.body.appendChild(sheet);
-}
+// openSalSheet, openSalOnboarding now in ui/onboarding.js
 
 // Tabs
 document.querySelectorAll(".tab").forEach((btn) => {
