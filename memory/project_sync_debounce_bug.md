@@ -11,4 +11,8 @@ Two bugs in `supabaseSyncStateSoon` (src/supabase.js:115-122) cause state change
 
 **Why:** User changed active version on one device but it never appeared on another. The sync path exists (`is_active` is pushed/pulled correctly), but these timing issues prevent the push from firing.
 
-**How to apply:** After the current refactor is complete, fix `supabaseSyncStateSoon` — shorter debounce or immediate push for critical changes, re-queue on `_pushRunning` conflict, and add `visibilitychange` flush before tab suspends.
+3. **Local persistence after cache bump** — user reported active version not surviving a SW cache bump even locally. Possible that `setActive()` change isn't making it to localStorage before the reload, or the normalization logic (app.js "enforce exactly one active version") is picking a different version via the `updatedAt` tiebreaker, overriding the user's choice.
+
+**How to apply:** After the current refactor is complete:
+- Fix `supabaseSyncStateSoon` — shorter debounce or immediate push for critical changes, re-queue on `_pushRunning` conflict, add `visibilitychange` flush before tab suspends
+- Investigate whether `setActive()` → `saveState()` round-trip survives cache bumps, and whether the normalization tiebreaker can override a deliberate user choice

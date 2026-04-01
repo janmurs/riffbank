@@ -122,3 +122,19 @@ export function saveState() {
     _syncFn(state);
   }
 }
+
+// ── Data accessors ──
+
+export function getSong(id) {
+  return state.songs.find((s) => s.id === id)
+    || (state._sharedSongsCache || []).find(s => s.id === id);
+}
+
+export function getVersion(song, versionId) {
+  return (song?.versions || []).find(v => v.id === versionId) || null;
+}
+
+export function featuredVersion(song) {
+  if (!song) return null;
+  return (song.versions || []).find(v => v.isActive) || (song.versions || [])[0] || null;
+}
