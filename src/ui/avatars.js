@@ -1,4 +1,18 @@
 import { escapeHtml } from "./dom.js";
+import { state } from "../state.js";
+
+export function syncProfileNavIcon() {
+  const navIcon = document.querySelector(".profileNavIcon");
+  if (!navIcon) return;
+  const avatarUrl = state.settings?.profileAvatarUrl;
+  if (avatarUrl?.startsWith("preset:")) {
+    const presetId = avatarUrl.replace("preset:", "");
+    const preset = AVATAR_PRESETS.find(p => p.id === presetId);
+    if (preset) navIcon.innerHTML = `<div class="profileNavImg" style="overflow:hidden;display:flex;align-items:center;justify-content:center">${renderAvatarPreset(preset)}</div>`;
+  } else if (avatarUrl?.startsWith("http")) {
+    navIcon.innerHTML = `<img class="profileNavImg" src="${avatarUrl}" />`;
+  }
+}
 
 export const AVATAR_PRESETS = [
   { id: "fox",      bg: "#f97316", emoji: "🦊", label: "Fox" },

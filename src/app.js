@@ -329,7 +329,7 @@ import {
 } from "./ui/onboarding.js";
 import {
   AVATAR_PRESETS, renderAvatarPreset, openAvatarPicker,
-  renderAvatarHtml, openAvatarCrop,
+  renderAvatarHtml, openAvatarCrop, syncProfileNavIcon,
 } from "./ui/avatars.js";
 import {
   getVersionSyncColor, getSongSyncColor, sharedBadge,
@@ -340,6 +340,7 @@ import "./swRegister.js";
 import { showAuthScreen } from "./ui/authScreen.js";
 import { showProfileSetupIfNeeded } from "./ui/profileSetup.js";
 import { runSalImportFlow, getImportFlowRan, setImportFlowRan } from "./ui/salImportFlow.js";
+import { initSync, incrementalSyncFromSupabase } from "./sync.js";
 import {
   audioUrlCache, coverUrlCache, cachedAudioPaths,
   openAudioDB, putAudioBlob, getAudioBlob,
@@ -1167,6 +1168,7 @@ setState(loadState());
 initCoverArt({ supabaseFetchCoverBlob, saveState, render });
 initCloudSync({ globalAudio, render });
 initCoverArtOps({ render, getSelectedSongId: () => selectedSongId });
+initSync({ render, getImportQueueRunning: () => _importQueueRunning, getImportQueue: () => importQueue });
 
 // normalizeState, ensureProjectInState, saveState now in state.js
 normalizeState();
@@ -3085,19 +3087,7 @@ document.querySelector(".createNavBtn")?.addEventListener("click", () => openCre
 // salSvg, dismissOnboarding, showWelcomeScreen, showDriveScreen now in ui/onboarding.js
 
 // Profile nav button — inject user avatar into nav icon
-function syncProfileNavIcon() {
-  const navIcon = document.querySelector(".profileNavIcon");
-  if (!navIcon) return;
-  const avatarUrl = state.settings?.profileAvatarUrl;
-  if (avatarUrl?.startsWith("preset:")) {
-    const presetId = avatarUrl.replace("preset:", "");
-    const preset = AVATAR_PRESETS.find(p => p.id === presetId);
-    if (preset) navIcon.innerHTML = `<div class="profileNavImg" style="overflow:hidden;display:flex;align-items:center;justify-content:center">${renderAvatarPreset(preset)}</div>`;
-  } else if (avatarUrl?.startsWith("http")) {
-    navIcon.innerHTML = `<img class="profileNavImg" src="${avatarUrl}" />`;
-  }
-  // else keep the default SVG from HTML
-}
+// syncProfileNavIcon now in ui/avatars.js
 
 // Unread message badge — updates Collab nav icon + Messages sidebar button
 let _unreadMsgCount = 0;
@@ -6815,151 +6805,6 @@ async function init() {
 }
 
 // Incremental sync: pull Supabase state and merge only new/changed songs
-async function incrementalSyncFromSupabase() {
-  // Never sync while bulk import is running — cloud has partial/stale data
-  // and merging it would delete or overwrite the songs being imported.
-  if (_importQueueRunning) {
-    console.log("[Sync] Skipping — bulk import in progress");
-    return;
-  }
-
-  const cloudState = await supabasePullStateSilent();
-  if (!cloudState) return; // network failure — don't touch local state
-
-  // Re-check after async pull — import may have started while pull was in-flight
-  if (_importQueueRunning) {
-    console.log("[Sync] Skipping merge — bulk import started during pull");
-    return;
-  }
-
-  const localHasSongs = state.songs && state.songs.length > 0;
-  const cloudHasSongs = cloudState.songs && cloudState.songs.length > 0;
-
-  // Cloud is empty — adopt that as truth (library was cleared on another device)
-  if (!cloudHasSongs) {
-    if (localHasSongs) {
-      state.songs = [];
-      state.projects = cloudState.projects || [];
-      state.releases = [];
-      normalizeState();
-      saveState();
-      coverCache.clear();
-      render();
-      toast("Library synced from cloud (empty)");
-    }
-    return;
-  }
-
-  if (!localHasSongs) {
-    // Local is empty — adopt cloud state wholesale
-    state.songs = cloudState.songs;
-    state.releases = cloudState.releases || state.releases;
-    state.projects = cloudState.projects || state.projects;
-    normalizeState();
-    await restoreCoverUrlsFromCache(state.songs, supabaseFetchCoverBlob);
-    saveState();
-    coverCache.clear();
-    render();
-    toast("Loaded library from cloud");
-    return;
-  }
-
-  // Build lookup of cloud songs by ID for deletion detection
-  const cloudSongIds = new Set(cloudState.songs.map(s => s.id));
-
-  // Remove local songs that no longer exist in the cloud.
-  // BUT: skip deletion entirely while a bulk import is running — the import creates
-  // songs locally before pushing them to cloud, so they won't be in cloudSongIds yet.
-  // Also protect any songs that are in the pending import queue (not yet pushed).
-  // Protect songs from any import queue item that isn't old — "done" items
-  // may not have been pushed to cloud yet, so cloud won't know about them.
-  const RECENT_MS = 5 * 60 * 1000; // 5 minutes
-  const importingIds = new Set(importQueue
-    .filter(q => q.status === "waiting" || q.status === "uploading"
-              || (q.status === "done" && q.ts && Date.now() - q.ts < RECENT_MS))
-    .map(q => q.existingSongId || q.id)
-  );
-  const beforeCount = state.songs.length;
-  let removed = 0;
-  if (!_importQueueRunning) {
-    state.songs = state.songs.filter(s => cloudSongIds.has(s.id) || importingIds.has(s.id));
-    removed = beforeCount - state.songs.length;
-  }
-
-  // Build lookup of local songs by title+project (stable identity)
-  const localByKey = new Map();
-  for (const s of state.songs) {
-    localByKey.set(`${(s.title || "").trim()}|${(s.project || "").trim()}`, s);
-  }
-
-  let added = 0, updated = 0;
-
-  for (const cs of cloudState.songs) {
-    const key = `${(cs.title || "").trim()}|${(cs.project || "").trim()}`;
-    const local = localByKey.get(key);
-
-    if (!local) {
-      state.songs.push(cs);
-      added++;
-    } else {
-      const localTime = new Date(local.updatedAt || 0).getTime();
-      const cloudTime = new Date(cs.updatedAt || 0).getTime();
-      if (cloudTime > localTime) {
-        const preserveFields = ["_coverResolving", "_userCoverResolving"];
-        for (const f of preserveFields) {
-          if (local[f] !== undefined) cs[f] = local[f];
-        }
-        // Preserve local cover blob URLs (cloud doesn't store blob URLs)
-        if (local.userCoverImageUrl && !cs.userCoverImageUrl) cs.userCoverImageUrl = local.userCoverImageUrl;
-        if (local.coverImageUrl && !cs.coverImageUrl) cs.coverImageUrl = local.coverImageUrl;
-        // Keep user coverSource if local has a user cover
-        if (local.coverSource === "user" && local.userCoverPath) cs.coverSource = "user";
-
-        // Preserve local-only audio fields (fileId, localAudioId) that cloud doesn't store.
-        // Cloud pull always returns these as null — merging would wipe out IndexedDB references.
-        // BUT: only preserve if the version doesn't already have cloud audio (audioPath).
-        // If cloud audio exists, it's the authoritative full copy — a stale local fileId
-        // might point to a truncated blob and would wrongly take priority in playback.
-        const localVersionsById = new Map();
-        for (const lv of (local.versions || [])) localVersionsById.set(lv.id, lv);
-        for (const cv of (cs.versions || [])) {
-          const lv = localVersionsById.get(cv.id);
-          if (lv) {
-            if (lv.fileId && !cv.fileId && !cv.audioPath) cv.fileId = lv.fileId;
-            if (lv.localAudioId && !cv.localAudioId && !cv.audioPath) cv.localAudioId = lv.localAudioId;
-          }
-        }
-
-        Object.assign(local, cs);
-        updated++;
-      }
-      if (!local.coverPath && cs.coverPath) {
-        local.coverPath = cs.coverPath;
-        updated++;
-      }
-    }
-  }
-
-  // Sync project list from cloud (cloud is truth)
-  if (cloudState.projects?.length) {
-    state.projects = [...cloudState.projects];
-  } else {
-    state.projects = [];
-  }
-
-  if (added || updated || removed) {
-    normalizeState();
-    await restoreCoverUrlsFromCache(state.songs, supabaseFetchCoverBlob);
-    saveState();
-    coverCache.clear();
-    render();
-    const parts = [];
-    if (added) parts.push(`${added} new`);
-    if (updated) parts.push(`${updated} updated`);
-    if (removed) parts.push(`${removed} removed`);
-    toast(`Synced: ${parts.join(", ")}`);
-  }
-}
 
 // ES modules run after DOM is parsed, so DOMContentLoaded may already be gone
 if (document.readyState === "loading") {
