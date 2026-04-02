@@ -95,3 +95,41 @@ export function guessNumericSuffixFromTitle(t) {
   const m = s.match(/\b(\d{1,2})\b\s*$/);
   return m ? m[1] : "";
 }
+
+export function shuffleArray(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+export function normalizeAudioLink(link) {
+  if (!link) return link;
+
+  // Leave absolute / special URLs alone
+  if (/^(https?:)?\/\//i.test(link)) return link;
+  if (link.startsWith("blob:")) return link;
+  if (link.startsWith("data:")) return link;
+
+  let out = String(link).trim();
+
+  // Remove leading "./"
+  if (out.startsWith("./")) out = out.slice(1); // "./public/.." -> "/public/.."
+
+  // Ensure it starts with "/"
+  if (!out.startsWith("/")) out = "/" + out;
+
+  // Fix "public/..." paths -> served from root
+  if (out.startsWith("/public/")) out = out.slice("/public".length); // "/public/library/.." -> "/library/.."
+
+  return out;
+}
+
+export function fmtTime(sec) {
+  if (!Number.isFinite(sec) || sec < 0) return "0:00";
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}

@@ -4,6 +4,7 @@ import { nowStamp } from "../ui/dom.js";
 // ── Runtime caches ──
 export const audioUrlCache = new Map(); // localAudioId -> objectURL
 export const coverUrlCache = new Map(); // coverPath -> blob objectURL (persists via IndexedDB)
+export const cachedAudioPaths = new Set(); // audioPaths known to be cached in IndexedDB
 
 // ── Primary IndexedDB helpers (used by putAudioBlob / getAudioBlob) ──
 

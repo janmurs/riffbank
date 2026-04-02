@@ -303,6 +303,7 @@ import {
   $, nowStamp, slug, escapeHtml, escapeTextarea, uid,
   basenameNoExt, titleizeFromSlug, safeString, normalizeFileUrl,
   extFromPath, yyyymmddFromDate, guessNumericSuffixFromTitle,
+  shuffleArray, normalizeAudioLink, fmtTime,
 } from "./ui/dom.js";
 import { toast } from "./ui/toast.js";
 import {
@@ -322,7 +323,15 @@ import {
   openSalSheet, openSalOnboarding,
 } from "./ui/onboarding.js";
 import {
-  audioUrlCache, coverUrlCache,
+  AVATAR_PRESETS, renderAvatarPreset, openAvatarPicker,
+  renderAvatarHtml, openAvatarCrop,
+} from "./ui/avatars.js";
+import {
+  getVersionSyncColor, getSongSyncColor, sharedBadge,
+  sharedBadgeProject, syncDot,
+} from "./ui/syncBadges.js";
+import {
+  audioUrlCache, coverUrlCache, cachedAudioPaths,
   openAudioDB, putAudioBlob, getAudioBlob,
   putCoverBlob, getCoverBlobUrl, restoreCoverUrlsFromCache,
   compressAudioForUpload,
@@ -560,12 +569,7 @@ function getNowPlayingOverlayEl() {
   return nowPlayingOverlayEl;
 }
 
-  function fmtTime(sec) {
-    if (!Number.isFinite(sec) || sec < 0) return "0:00";
-    const m = Math.floor(sec / 60);
-    const s = Math.floor(sec % 60);
-    return `${m}:${String(s).padStart(2, "0")}`;
-  }
+// fmtTime now in ui/dom.js
 
 function openNowPlaying() {
   if (!state.player?.nowPlaying) return;
@@ -2851,27 +2855,7 @@ async function _processImportQueue() {
   if (drawerView === "alerts") _renderImportQueueDOM();
 }
 
-function normalizeAudioLink(link) {
-  if (!link) return link;
-
-  // Leave absolute / special URLs alone
-  if (/^(https?:)?\/\//i.test(link)) return link;
-  if (link.startsWith("blob:")) return link;
-  if (link.startsWith("data:")) return link;
-
-  let out = String(link).trim();
-
-  // Remove leading "./"
-  if (out.startsWith("./")) out = out.slice(1); // "./public/.." -> "/public/.."
-
-  // Ensure it starts with "/"
-  if (!out.startsWith("/")) out = "/" + out;
-
-  // Fix "public/..." paths -> served from root
-  if (out.startsWith("/public/")) out = out.slice("/public".length); // "/public/library/.." -> "/library/.."
-
-  return out;
-}
+// normalizeAudioLink now in ui/dom.js
 
 // Set of fileIds whose local blobs are known-bad (truncated/corrupt) — skip to cloud
 const _badLocalBlobs = new Set();
@@ -2945,7 +2929,7 @@ async function getPlayableUrlForVersion(songId, versionId) {
 }
 
 // In-memory set of audioPaths known to be cached in IndexedDB
-const _cachedAudioPaths = new Set();
+// cachedAudioPaths now exported as cachedAudioPaths from audio/audioDB.js
 
 // Cache all cloud-only audio blobs into IndexedDB for offline playback.
 async function cacheAllCloudAudio() {
@@ -2954,10 +2938,10 @@ async function cacheAllCloudAudio() {
     for (const v of (song.versions || [])) {
       if (!v.audioPath) continue;
       if (v.fileId || v.localAudioId) continue;
-      if (_cachedAudioPaths.has(v.audioPath)) continue;
+      if (cachedAudioPaths.has(v.audioPath)) continue;
       try {
         const existing = await audioGet(`supa:${v.audioPath}`);
-        if (existing?.blob) { _cachedAudioPaths.add(v.audioPath); continue; }
+        if (existing?.blob) { cachedAudioPaths.add(v.audioPath); continue; }
       } catch {}
       cloudVersions.push({ song, v });
     }
@@ -2983,7 +2967,7 @@ async function cacheAllCloudAudio() {
           type: v.fileType || blob.type || "audio/*",
           size: blob.size,
         });
-        _cachedAudioPaths.add(v.audioPath);
+        cachedAudioPaths.add(v.audioPath);
         done++;
       } else {
         failed++;
@@ -3140,74 +3124,7 @@ async function ensureAllAudioInCloud() {
 
 // Sync debug: check each version's audio availability
 // Returns "green" (local + synced to cloud), "yellow" (local only, not backed up), "red" (no audio)
-function getVersionSyncColor(v) {
-  if (!v) return "red";
-  const hasLocal = !!(v.fileId || v.localAudioId || v.link || _cachedAudioPaths.has(v.audioPath));
-  const hasClouds = !!v.audioPath;
-  if (hasLocal && hasClouds) return "green";
-  if (hasLocal || hasClouds) return "yellow";
-  return "red";
-}
-
-// Returns best-case sync color across versions that have audio.
-// Versions with no audio at all are ignored (they're empty, not broken).
-// Only returns "red" if NO version has any audio source.
-function getSongSyncColor(song) {
-  if (!song?.versions?.length) return "red";
-  let best = "red";
-  for (const v of song.versions) {
-    const c = getVersionSyncColor(v);
-    if (c === "green") return "green";
-    if (c === "yellow") best = "yellow";
-  }
-  return best;
-}
-
-// Shared badge icons — purple outbound (I shared), green inbound (shared with me)
-function sharedBadge(song) {
-  if (song._shared) {
-    // Inbound — shared with me (green left arrow)
-    return `<span class="sharedBadge sharedBadgeIn" title="Shared with you"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 5 5 12 12 19"/></svg></span>`;
-  }
-  // Outbound — I shared this song or its project
-  const mySongIds = new Set((sharedData.mySongs || []).map(ms => ms.songId));
-  const myProjNames = new Set((sharedData.myProjects || []).map(mp => mp.projectName));
-  if (mySongIds.has(song.id) || myProjNames.has((song.project || "").trim())) {
-    return `<span class="sharedBadge sharedBadgeOut" title="Shared by you"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></span>`;
-  }
-  return "";
-}
-
-// Project-level shared badge — also checks if any individual songs in this project are shared
-function sharedBadgeProject(projectName) {
-  const myProjNames = new Set((sharedData.myProjects || []).map(mp => mp.projectName));
-  const mySongProjs = new Set((sharedData.mySongs || []).map(ms => ms.projectName).filter(Boolean));
-  const sharedProjNames = new Set((sharedData.projects || []).map(sp => sp.projectName));
-  const sharedSongProjs = new Set([
-    ...(sharedData.songs || []).map(ss => (ss.song?.project || "").trim()).filter(Boolean),
-    ...(sharedData.projects || []).flatMap(sp => (sp.songs || []).map(s => (s.project || "").trim())).filter(Boolean),
-  ]);
-  if (myProjNames.has(projectName) || mySongProjs.has(projectName)) {
-    return `<span class="sharedBadge sharedBadgeOut" title="Shared by you"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></span>`;
-  }
-  if (sharedProjNames.has(projectName) || sharedSongProjs.has(projectName)) {
-    return `<span class="sharedBadge sharedBadgeIn" title="Shared with you"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 5 5 12 12 19"/></svg></span>`;
-  }
-  return "";
-}
-
-// Returns an HTML dot string for debug overlay (empty string if debug off)
-function syncDot(song) {
-  const color = getSongSyncColor(song);
-  // Always show red dot for songs with no audio — users need to know
-  if (color === "red") {
-    return `<span class="syncDot syncDot--red" title="No audio"></span>`;
-  }
-  // Debug-only for green/yellow states
-  if (!window.RIFFBANK_DEBUG_SYNC) return "";
-  const label = color === "green" ? "Synced" : "Local only";
-  return `<span class="syncDot syncDot--${color}" title="${label}"></span>`;
-}
+// getVersionSyncColor, getSongSyncColor, sharedBadge, sharedBadgeProject, syncDot now in ui/syncBadges.js
 
 // Deep async audit: checks IndexedDB for actual blobs, logs a table to console
 window.auditSync = async () => {
@@ -3317,14 +3234,7 @@ function playerItems(data) {
   return out;
 }
 
-function shuffleArray(arr) {
-  const a = arr.slice();
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
+// shuffleArray now in ui/dom.js
 
 // PWA SW register (auto-update + auto-activate)
 if ("serviceWorker" in navigator) {
@@ -6513,10 +6423,10 @@ async function preFetchCloudAudio() {
       if (!v.audioPath || v.fileId) continue;
       const dbKey = `supa:${v.audioPath}`;
       const existing = await audioGet(dbKey);
-      if (existing?.blob) { _cachedAudioPaths.add(v.audioPath); continue; }
+      if (existing?.blob) { cachedAudioPaths.add(v.audioPath); continue; }
       const blob = await supabaseFetchAudioBlob(v.audioPath);
       if (blob) {
-        _cachedAudioPaths.add(v.audioPath);
+        cachedAudioPaths.add(v.audioPath);
         await putAudioBlob({
           id: dbKey,
           blob,
@@ -7275,7 +7185,7 @@ function showSalImportScreen() {
         if (!v.audioPath) continue;
         try {
           const existing = await audioGet(`supa:${v.audioPath}`);
-          if (existing?.blob) { _cachedAudioPaths.add(v.audioPath); continue; }
+          if (existing?.blob) { cachedAudioPaths.add(v.audioPath); continue; }
         } catch {}
         needsAudio = true;
         toDownload.push({ song, version: v, row });
@@ -7324,7 +7234,7 @@ function showSalImportScreen() {
               type: v.fileType || blob.type || "audio/*",
               size: blob.size,
             });
-            _cachedAudioPaths.add(v.audioPath);
+            cachedAudioPaths.add(v.audioPath);
             succeeded.push(item);
           } else {
             failed.push(item);
@@ -7421,7 +7331,7 @@ function showSalImportRetry(failedItems) {
               type: v.fileType || blob.type || "audio/*",
               size: blob.size,
             });
-            _cachedAudioPaths.add(v.audioPath);
+            cachedAudioPaths.add(v.audioPath);
             row.classList.add("salRetryDone");
             row.querySelector(".salRetryActions").innerHTML = `<span style="color:#22c55e;font-size:13px;font-weight:700;">Done!</span>`;
           } else {
@@ -7502,351 +7412,7 @@ function showSalRefresherPrompt() {
 // ── Avatar Picker Sheet ──────────────────────────
 
 // Preset cartoon avatars — cute Sal-style characters
-const AVATAR_PRESETS = [
-  { id: "fox",      bg: "#f97316", emoji: "🦊", label: "Fox" },
-  { id: "bear",     bg: "#a78bfa", emoji: "🐻", label: "Bear" },
-  { id: "cat",      bg: "#f472b6", emoji: "🐱", label: "Cat" },
-  { id: "dog",      bg: "#60a5fa", emoji: "🐶", label: "Dog" },
-  { id: "rabbit",   bg: "#34d399", emoji: "🐰", label: "Rabbit" },
-  { id: "panda",    bg: "#6b7280", emoji: "🐼", label: "Panda" },
-  { id: "owl",      bg: "#8b5cf6", emoji: "🦉", label: "Owl" },
-  { id: "penguin",  bg: "#38bdf8", emoji: "🐧", label: "Penguin" },
-  { id: "lion",     bg: "#fbbf24", emoji: "🦁", label: "Lion" },
-  { id: "koala",    bg: "#a3a3a3", emoji: "🐨", label: "Koala" },
-  { id: "unicorn",  bg: "#e879f9", emoji: "🦄", label: "Unicorn" },
-  { id: "hedgehog", bg: "#d97706", emoji: "🦔", label: "Hedgehog" },
-];
-
-function renderAvatarPreset(preset) {
-  return `<div style="width:100%;height:100%;background:${preset.bg};display:flex;align-items:center;justify-content:center;font-size:28px;border-radius:inherit">${preset.emoji}</div>`;
-}
-
-/**
- * Opens an Instagram-style bottom sheet avatar picker.
- * @param {object} opts
- * @param {string|null} opts.currentSrc  - current avatar image URL
- * @param {function} opts.onPickFile     - called with File when user picks from library/camera
- * @param {function} opts.onPickPreset   - called with preset object { id, bg, emoji }
- * @param {function} opts.onRemove       - called when user removes current picture
- */
-function openAvatarPicker({ currentSrc, onPickFile, onPickPreset, onRemove }) {
-  // Remove any existing picker
-  document.getElementById("avatarPickerBackdrop")?.remove();
-  document.getElementById("avatarPickerSheet")?.remove();
-
-  const backdrop = document.createElement("div");
-  backdrop.id = "avatarPickerBackdrop";
-  backdrop.className = "avatarPickerBackdrop";
-
-  const sheet = document.createElement("div");
-  sheet.id = "avatarPickerSheet";
-  sheet.className = "avatarPickerSheet";
-
-  let activeTab = "photo"; // "photo" | "avatar"
-
-  function renderSheet() {
-    const initial = "?";
-    const presetGrid = AVATAR_PRESETS.map(p => `
-      <button class="avPresetBtn" data-preset="${p.id}">
-        ${renderAvatarPreset(p)}
-      </button>
-    `).join("");
-
-    sheet.innerHTML = `
-      <div class="avPickerHandle"></div>
-      <div class="avPickerTabs">
-        <button class="avPickerTab ${activeTab === "photo" ? "active" : ""}" data-tab="photo">
-          ${currentSrc
-            ? `<img src="${currentSrc}" class="avPickerTabImg" />`
-            : `<div class="avPickerTabFallback">${escapeHtml(initial)}</div>`
-          }
-        </button>
-        <button class="avPickerTab ${activeTab === "avatar" ? "active" : ""}" data-tab="avatar">
-          <div class="avPickerTabFallback" style="font-size:18px">🦔</div>
-        </button>
-      </div>
-
-      ${activeTab === "photo" ? `
-        <div class="avPickerOptions">
-          <button class="avPickerOption" data-action="pick">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>
-            <span>Choose photo</span>
-          </button>
-          ${currentSrc ? `
-            <button class="avPickerOption avPickerOptionDanger" data-action="remove">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3,6 5,6 21,6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
-              <span>Remove current picture</span>
-            </button>
-          ` : ""}
-        </div>
-      ` : `
-        <div class="avPresetGrid">
-          ${presetGrid}
-        </div>
-      `}
-    `;
-
-    // Wire tabs
-    sheet.querySelectorAll(".avPickerTab").forEach(tab => {
-      tab.addEventListener("click", () => {
-        activeTab = tab.dataset.tab;
-        renderSheet();
-      });
-    });
-
-    // Wire "Choose photo" — iOS will show its native Photo Library / Take Photo / Files menu
-    sheet.querySelector("[data-action='pick']")?.addEventListener("click", () => {
-      let input = document.getElementById("_imagePicker");
-      if (!input) {
-        input = document.createElement("input");
-        input.id = "_imagePicker";
-        input.type = "file";
-        input.accept = "image/*";
-        input.style.cssText = "position:fixed;left:-9999px;top:-9999px;opacity:0;pointer-events:none";
-        document.body.appendChild(input);
-      }
-      input.value = "";
-      const handler = async () => {
-        input.removeEventListener("change", handler);
-        const file = input.files?.[0];
-        if (!file) return;
-        close();
-        // Open crop overlay before passing to callback
-        const cropped = await openAvatarCrop(file);
-        if (cropped) onPickFile?.(cropped.file, cropped.previewUrl);
-      };
-      input.addEventListener("change", handler);
-      input.click();
-    });
-
-    sheet.querySelector("[data-action='remove']")?.addEventListener("click", () => {
-      close();
-      onRemove?.();
-    });
-
-    // Wire preset avatars
-    sheet.querySelectorAll(".avPresetBtn").forEach(btn => {
-      btn.addEventListener("click", () => {
-        const preset = AVATAR_PRESETS.find(p => p.id === btn.dataset.preset);
-        if (preset) { close(); onPickPreset?.(preset); }
-      });
-    });
-  }
-
-  function close() {
-    sheet.classList.remove("open");
-    backdrop.classList.remove("open");
-    setTimeout(() => { backdrop.remove(); sheet.remove(); }, 300);
-  }
-
-  backdrop.addEventListener("click", close);
-
-  document.body.appendChild(backdrop);
-  document.body.appendChild(sheet);
-  renderSheet();
-  requestAnimationFrame(() => { backdrop.classList.add("open"); sheet.classList.add("open"); });
-}
-
-// Helper: render an avatar from a URL or preset: string
-function renderAvatarHtml(src, size, fallbackInitial) {
-  if (src?.startsWith("preset:")) {
-    const presetId = src.replace("preset:", "");
-    const preset = AVATAR_PRESETS.find(p => p.id === presetId);
-    if (preset) return `<div style="width:${size}px;height:${size}px;border-radius:50%;overflow:hidden">${renderAvatarPreset(preset)}</div>`;
-  }
-  if (src?.startsWith("http")) {
-    const fb = fallbackInitial || "?";
-    return `<img style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;display:block" src="${src}" onerror="this.outerHTML='<div style=\\'width:${size}px;height:${size}px;border-radius:50%;background:linear-gradient(135deg,#a78bfa,#f472b6);display:flex;align-items:center;justify-content:center;font-weight:900;font-size:${Math.round(size * 0.4)}px;color:#fff\\'>${fb}</div>'" />`;
-  }
-  return `<div style="width:${size}px;height:${size}px;border-radius:50%;background:linear-gradient(135deg,#a78bfa,#f472b6);display:flex;align-items:center;justify-content:center;font-family:'Montserrat',sans-serif;font-weight:900;font-size:${Math.round(size * 0.4)}px;color:#fff">${fallbackInitial || "?"}</div>`;
-}
-
-/**
- * Opens a circular avatar crop overlay.
- * @param {File} file - image file to crop
- * @returns {Promise<{file: File, previewUrl: string} | null>} cropped result or null if cancelled
- */
-function openAvatarCrop(file) {
-  return new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const imageSrc = reader.result;
-
-      document.querySelector(".avatarCropOverlay")?.remove();
-
-      const overlay = document.createElement("div");
-      overlay.className = "avatarCropOverlay";
-      overlay.innerHTML = `
-        <div class="avCropHeader">
-          <button class="avCropCancel">Cancel</button>
-          <span class="avCropTitle">Move and Scale</span>
-          <button class="avCropDone">Done</button>
-        </div>
-        <div class="avCropBody">
-          <div class="avCropFrame">
-            <img class="avCropImg" src="${imageSrc}" draggable="false" />
-            <div class="avCropMask"></div>
-          </div>
-        </div>
-        <div class="avCropControls">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,.4)" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
-          <input type="range" class="avCropZoom" min="100" max="500" value="100" />
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,.4)" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
-        </div>
-      `;
-
-      document.body.appendChild(overlay);
-      requestAnimationFrame(() => overlay.classList.add("open"));
-
-      const img = overlay.querySelector(".avCropImg");
-      const frame = overlay.querySelector(".avCropFrame");
-      const zoomSlider = overlay.querySelector(".avCropZoom");
-
-      let baseScale = 1, userZoom = 1, tx = 0, ty = 0;
-      let isDragging = false, startX = 0, startY = 0, startTx = 0, startTy = 0;
-      // Pinch zoom state
-      let pinchStartDist = 0, pinchStartZoom = 1;
-
-      const totalScale = () => baseScale * userZoom;
-
-      function applyTransform() {
-        img.style.width = img.naturalWidth + "px";
-        img.style.height = img.naturalHeight + "px";
-        img.style.transform = `translate(${tx}px, ${ty}px) scale(${totalScale()})`;
-      }
-
-      function clampPosition() {
-        const size = frame.clientWidth; // square
-        const s = totalScale();
-        const imgW = img.naturalWidth * s;
-        const imgH = img.naturalHeight * s;
-        if (imgW >= size) tx = Math.min(0, Math.max(size - imgW, tx));
-        else tx = (size - imgW) / 2;
-        if (imgH >= size) ty = Math.min(0, Math.max(size - imgH, ty));
-        else ty = (size - imgH) / 2;
-      }
-
-      function initLayout() {
-        const size = frame.clientWidth;
-        const nw = img.naturalWidth, nh = img.naturalHeight;
-        if (!nw || !nh || !size) return;
-        baseScale = Math.max(size / nw, size / nh);
-        tx = (size - nw * totalScale()) / 2;
-        ty = (size - nh * totalScale()) / 2;
-        applyTransform();
-      }
-
-      img.onload = () => initLayout();
-      if (img.complete && img.naturalWidth) initLayout();
-
-      // Zoom slider
-      zoomSlider.addEventListener("input", () => {
-        const oldZoom = userZoom;
-        userZoom = parseInt(zoomSlider.value) / 100;
-        const size = frame.clientWidth;
-        const ratio = userZoom / oldZoom;
-        tx = size / 2 - ratio * (size / 2 - tx);
-        ty = size / 2 - ratio * (size / 2 - ty);
-        clampPosition();
-        applyTransform();
-      });
-
-      // Drag
-      frame.addEventListener("touchstart", (e) => {
-        if (e.touches.length === 2) {
-          // Pinch start
-          const dx = e.touches[0].clientX - e.touches[1].clientX;
-          const dy = e.touches[0].clientY - e.touches[1].clientY;
-          pinchStartDist = Math.hypot(dx, dy);
-          pinchStartZoom = userZoom;
-          return;
-        }
-        isDragging = true;
-        startX = e.touches[0].clientX; startY = e.touches[0].clientY;
-        startTx = tx; startTy = ty;
-        e.preventDefault();
-      }, { passive: false });
-
-      frame.addEventListener("touchmove", (e) => {
-        if (e.touches.length === 2 && pinchStartDist > 0) {
-          // Pinch zoom
-          const dx = e.touches[0].clientX - e.touches[1].clientX;
-          const dy = e.touches[0].clientY - e.touches[1].clientY;
-          const dist = Math.hypot(dx, dy);
-          const newZoom = Math.max(1, Math.min(5, pinchStartZoom * (dist / pinchStartDist)));
-          const oldZoom = userZoom;
-          userZoom = newZoom;
-          zoomSlider.value = Math.round(userZoom * 100);
-          const size = frame.clientWidth;
-          const ratio = userZoom / oldZoom;
-          tx = size / 2 - ratio * (size / 2 - tx);
-          ty = size / 2 - ratio * (size / 2 - ty);
-          clampPosition();
-          applyTransform();
-          e.preventDefault();
-          return;
-        }
-        if (!isDragging) return;
-        const pt = e.touches[0];
-        tx = startTx + (pt.clientX - startX);
-        ty = startTy + (pt.clientY - startY);
-        clampPosition();
-        applyTransform();
-        e.preventDefault();
-      }, { passive: false });
-
-      frame.addEventListener("touchend", () => { isDragging = false; pinchStartDist = 0; });
-      frame.addEventListener("touchcancel", () => { isDragging = false; pinchStartDist = 0; });
-
-      // Mouse drag fallback
-      frame.addEventListener("mousedown", (e) => {
-        isDragging = true; startX = e.clientX; startY = e.clientY; startTx = tx; startTy = ty;
-      });
-      window.addEventListener("mousemove", (e) => {
-        if (!isDragging) return;
-        tx = startTx + (e.clientX - startX);
-        ty = startTy + (e.clientY - startY);
-        clampPosition(); applyTransform();
-      });
-      window.addEventListener("mouseup", () => { isDragging = false; });
-
-      function dismiss() {
-        overlay.classList.remove("open");
-        setTimeout(() => overlay.remove(), 300);
-      }
-
-      // Cancel
-      overlay.querySelector(".avCropCancel").addEventListener("click", () => { dismiss(); resolve(null); });
-
-      // Done — render cropped image to canvas
-      overlay.querySelector(".avCropDone").addEventListener("click", () => {
-        const size = frame.clientWidth;
-        const s = totalScale();
-        const canvas = document.createElement("canvas");
-        const outputSize = 512; // hi-res output
-        canvas.width = outputSize;
-        canvas.height = outputSize;
-        const ctx = canvas.getContext("2d");
-
-        // Map frame coordinates to source image coordinates
-        const srcX = -tx / s;
-        const srcY = -ty / s;
-        const srcSize = size / s;
-
-        ctx.drawImage(img, srcX, srcY, srcSize, srcSize, 0, 0, outputSize, outputSize);
-
-        canvas.toBlob((blob) => {
-          if (!blob) { dismiss(); resolve(null); return; }
-          const croppedFile = new File([blob], "avatar.jpg", { type: "image/jpeg" });
-          const previewUrl = URL.createObjectURL(blob);
-          dismiss();
-          resolve({ file: croppedFile, previewUrl });
-        }, "image/jpeg", 0.92);
-      });
-    };
-    reader.readAsDataURL(file);
-  });
-}
+// AVATAR_PRESETS, renderAvatarPreset, openAvatarPicker, renderAvatarHtml, openAvatarCrop now in ui/avatars.js
 
 // ── Profile Setup (shown once after first signup) ──
 
@@ -8552,7 +8118,7 @@ async function init() {
         if (!v.audioPath || v.fileId || v.localAudioId) continue;
         try {
           const rec = await audioGet(`supa:${v.audioPath}`);
-          if (rec?.blob) _cachedAudioPaths.add(v.audioPath);
+          if (rec?.blob) cachedAudioPaths.add(v.audioPath);
         } catch {}
       }
     }
