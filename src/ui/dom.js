@@ -127,6 +127,8 @@ export function normalizeAudioLink(link) {
   return out;
 }
 
+export const yieldToMain = () => new Promise(r => setTimeout(r, 0));
+
 export function fmtTime(sec) {
   if (!Number.isFinite(sec) || sec < 0) return "0:00";
   const m = Math.floor(sec / 60);

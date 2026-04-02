@@ -138,3 +138,11 @@ export function featuredVersion(song) {
   if (!song) return null;
   return (song.versions || []).find(v => v.isActive) || (song.versions || [])[0] || null;
 }
+
+export function isPlayable(v) {
+  return !!(v?.link || v?.fileId || v?.localAudioId || v?.audioPath);
+}
+
+export function songHasPlayableAudio(song) {
+  return (song?.versions || []).some(v => isPlayable(v));
+}
