@@ -15,9 +15,25 @@ export const ctx = {
   getSongsListState: null,
   getProjectsOwnerFilter: null,
   setProjectsOwnerFilter: null,
+  openCreateOverlay: null,
+  openSheet: null,
+  openSongMenu: null,
+  playVersion: null,
+  addToQueue: null,
+  createVersion: null,
+  setActive: null,
+  openSongFilters: null,
+  pickAudioFile: null,
+  getGlobalAudio: null,
+  unlockAudioOnce: null,
+  playNowPlaying: null,
+  syncMiniPlayerUI: null,
+  shareInviteSong: null,
+  openVersionMenu: null,
 };
 
-export function initAppContext({ render, navigateForward, goBack, setHeader, syncTabs, getActiveScreenEl, _updateNotifBadge, resetSongsFilters, getSongsListState, getProjectsOwnerFilter, setProjectsOwnerFilter }) {
+export function initAppContext(opts) {
+  const { render, navigateForward, goBack, setHeader, syncTabs, getActiveScreenEl, _updateNotifBadge, resetSongsFilters, getSongsListState, getProjectsOwnerFilter, setProjectsOwnerFilter, openCreateOverlay, openSheet, openSongMenu, playVersion, addToQueue, createVersion, setActive, openSongFilters, pickAudioFile, getGlobalAudio, unlockAudioOnce, playNowPlaying, syncMiniPlayerUI, shareInviteSong, openVersionMenu } = opts;
   ctx.render = render;
   ctx.navigateForward = navigateForward;
   ctx.goBack = goBack;
@@ -29,4 +45,19 @@ export function initAppContext({ render, navigateForward, goBack, setHeader, syn
   ctx.getSongsListState = getSongsListState;
   ctx.getProjectsOwnerFilter = getProjectsOwnerFilter;
   ctx.setProjectsOwnerFilter = setProjectsOwnerFilter;
+  ctx.openCreateOverlay = openCreateOverlay;
+  ctx.openSheet = openSheet;
+  ctx.openSongMenu = openSongMenu;
+  ctx.playVersion = playVersion;
+  ctx.addToQueue = addToQueue;
+  ctx.createVersion = createVersion;
+  ctx.setActive = setActive;
+  ctx.openSongFilters = openSongFilters;
+  ctx.pickAudioFile = pickAudioFile;
+  ctx.getGlobalAudio = getGlobalAudio;
+  ctx.unlockAudioOnce = unlockAudioOnce;
+  ctx.playNowPlaying = playNowPlaying;
+  ctx.syncMiniPlayerUI = syncMiniPlayerUI;
+  ctx.shareInviteSong = shareInviteSong;
+  ctx.openVersionMenu = openVersionMenu;
 }
