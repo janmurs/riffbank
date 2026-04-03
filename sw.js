@@ -8,7 +8,7 @@
 
 // Type ./start.sh to start local server
 
-const CACHE_VERSION = "2026-04-03_20"; // <-- bump this when you deploy
+const CACHE_VERSION = "2026-04-02_4"; // <-- bump this when you deploy
 const STATIC_CACHE = `riffbank-static-${CACHE_VERSION}`;
 const RUNTIME_CACHE = `riffbank-runtime-${CACHE_VERSION}`;
 
@@ -17,8 +17,27 @@ const PRECACHE_URLS = [
   "/index.html",
   "/styles.css",
   "/src/app.js",
+  "/src/constants.js",
+  "/src/state.js",
+  "/src/router.js",
+  "/src/sync.js",
+  "/src/seedLibrary.js",
+  "/src/swRegister.js",
   "/src/supabase.js",
   "/src/ui/dom.js",
+  "/src/ui/toast.js",
+  "/src/ui/nav.js",
+  "/src/ui/icons.js",
+  "/src/ui/coverArt.js",
+  "/src/ui/coverArtOps.js",
+  "/src/ui/syncBadges.js",
+  "/src/ui/avatars.js",
+  "/src/ui/onboarding.js",
+  "/src/ui/authScreen.js",
+  "/src/ui/profileSetup.js",
+  "/src/ui/salImportFlow.js",
+  "/src/audio/audioDB.js",
+  "/src/audio/cloudSync.js",
   "/src/splash/splash.js",
   "/manifest.json",
   "/icon-1024.png",

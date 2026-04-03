@@ -46,7 +46,7 @@ function _updateImportQueueItem(id, updates) {
   if (item) Object.assign(item, updates, { ts: Date.now() });
   _saveImportQueue();
   _updateNotifBadge();
-  if (drawerView === "alerts") _renderImportQueueDOM();
+  if (R.drawerView === "alerts") _renderImportQueueDOM();
 }
 
 function _timeAgo(ts) {
@@ -98,11 +98,11 @@ function _renderImportQueueDOM() {
       const songId = row.getAttribute("data-iq-song");
       if (!songId) return;
       navigateForward(() => {
-        drawerView = null;
-        currentTab = "songs";
-        songsView = "list";
-        selectedSongId = songId;
-        selectedVersionId = null;
+        R.drawerView = null;
+        R.currentTab = "songs";
+        R.songsView = "list";
+        R.selectedSongId = songId;
+        R.selectedVersionId = null;
       });
     });
   });
@@ -227,7 +227,7 @@ function addNotification({ title, body, type = "share", friendshipId, requesterN
   if (items.length > 100) items.length = 100;
   _saveNotifications(items);
   _updateNotifBadge();
-  if (drawerView === "alerts") renderAlerts();
+  if (R.drawerView === "alerts") renderAlerts();
 }
 
 function markNotificationsRead() {
@@ -279,7 +279,7 @@ function logActivity(id, songTitle, status, message) {
 
   updateBellBadge();
   // Live-update alerts view if open
-  if (drawerView === "alerts") renderAlerts();
+  if (R.drawerView === "alerts") renderAlerts();
 }
 function updateBellBadge() {
   _updateNotifBadge();
@@ -352,6 +352,7 @@ import {
   initCloudSync, cacheAllCloudAudio, backupAllAudioToCloud, ensureAllAudioInCloud,
 } from "./audio/cloudSync.js";
 import { runSplashSequence, replaySplash } from "./splash/splash.js";
+import { R } from "./router.js";
 import {
   SUPABASE_URL, SUPABASE_ANON_KEY,
   supabase, signUp, signIn, signOut, getSession, onAuthChange, verifyOtp, resendConfirmation,
@@ -375,48 +376,37 @@ import {
 // LS_KEY now in constants.js
 const HAS_SAVED_STATE = !!localStorage.getItem(LS_KEY); // used to detect first-run seeding
 
-let prevTabBeforeFullPlayer = null;
-let prevSelectedSongIdBeforeFullPlayer = null;
 
 let splashAlreadyRan = false;
 
 // ---------------------
 // Player view state
 // ---------------------
-let playerFilter = "all"; // all | playlists | projects | releases
-let playerSort = "recent"; // recent | title
-let playerQuery = "";
 let playerQueue = []; // array of { songId, versionId }
 let sheetState = null; // { songId, versionId }
-let lastTabBeforeFullPlayer = null;
-let fullPlayerOpen = false;
 
 // NEW: fullscreen player UI state (single source of truth)
-let isFullPlayerOpen = false;
 
 // Projects sub-screen ("list" = project list, string = selected project name)
-let projectDetailScreen = null;
 
 // Releases sub-screen (null = list, string = release ID being viewed)
-let releaseDetailId = null;
 
 // Session-only: hide mini player until the user actually plays something after a fresh launch
 let hasPlayedThisSession = false;
 
 // Full-screen Now Playing is an overlay (independent of tabs)
-let isNowPlayingFullscreen = false;
 
 function setFullPlayerOpen(on) {
-  isFullPlayerOpen = !!on;
+  R.isFullPlayerOpen = !!on;
 
   // One CSS toggle so fullscreen can take the whole space
-  document.body.classList.toggle("fullplayer-open", isFullPlayerOpen);
+  document.body.classList.toggle("fullplayer-open", R.isFullPlayerOpen);
 
   // Hard guarantee: never show both at once.
   // IMPORTANT: when closing fullscreen, do NOT force-show the mini player.
   // Let syncMiniPlayerUI decide based on session + nowPlaying state.
   if (miniPlayerEl) {
-    if (isFullPlayerOpen) {
+    if (R.isFullPlayerOpen) {
       miniPlayerEl.classList.add("hidden");
       miniPlayerEl.classList.remove("visible");
       miniPlayerEl.setAttribute("aria-hidden", "true");
@@ -493,9 +483,9 @@ function setActiveScreen(name) {
 // after mutations, then animates between them. No live DOM leaks.
 function navigateForward(mutateFn) {
   const captured = {
-    currentTab, drawerView, projectDetailScreen, releaseDetailId,
-    selectedSongId, selectedVersionId, songsView, overlayView, friendProfileId,
-    songsBackTarget, lyricsEditSongId, collabMode, songsFromCollab, settingsView, collabPill,
+    currentTab: R.currentTab, drawerView: R.drawerView, projectDetailScreen: R.projectDetailScreen, releaseDetailId: R.releaseDetailId,
+    selectedSongId: R.selectedSongId, selectedVersionId: R.selectedVersionId, songsView: R.songsView, overlayView: R.overlayView, friendProfileId: R.friendProfileId,
+    songsBackTarget: R.songsBackTarget, lyricsEditSongId: R.lyricsEditSongId, collabMode: R.collabMode, songsFromCollab: R.songsFromCollab, settingsView: R.settingsView, collabPill: R.collabPill,
     headerTitle: headerTitle?.textContent ?? "RiffBank"
   };
   nav.captureState(captured);
@@ -588,8 +578,8 @@ function getNowPlayingOverlayEl() {
 function openNowPlaying() {
   if (!state.player?.nowPlaying) return;
 
-  fullPlayerOpen = true;
-  isNowPlayingFullscreen = true;
+  R.fullPlayerOpen = true;
+  R.isNowPlayingFullscreen = true;
 
   const overlay = getNowPlayingOverlayEl();
   overlay.innerHTML = renderNowPlayingHTML();
@@ -598,14 +588,14 @@ function openNowPlaying() {
 }
 
 function closeNowPlaying() {
-  fullPlayerOpen = false;
-  isNowPlayingFullscreen = false;
+  R.fullPlayerOpen = false;
+  R.isNowPlayingFullscreen = false;
 
   const overlay = getNowPlayingOverlayEl();renderNowPlayingHTML
   overlay.classList.remove("is-open");
 
   setTimeout(() => {
-    if (!fullPlayerOpen) overlay.innerHTML = "";
+    if (!R.fullPlayerOpen) overlay.innerHTML = "";
   }, 200);
 }
 
@@ -805,10 +795,10 @@ async function getLocalObjectUrl(localAudioId) {
 
 function isHomeRoot() {
   return (
-    currentTab === "home" &&
-    !drawerView &&
-    !overlayView &&
-    !selectedSongId
+    R.currentTab === "home" &&
+    !R.drawerView &&
+    !R.overlayView &&
+    !R.selectedSongId
   );
 }
 
@@ -927,7 +917,7 @@ async function syncMiniPlayerUI() {
   }
 
 // Guard: older builds may not define isNowPlayingFullscreen
-if (typeof isNowPlayingFullscreen !== "undefined" && isNowPlayingFullscreen) {
+if (typeof R.isNowPlayingFullscreen !== "undefined" && R.isNowPlayingFullscreen) {
   miniPlayerEl.classList.add("hidden");
   miniPlayerEl.classList.remove("visible");
   miniPlayerEl.setAttribute("aria-hidden", "true");
@@ -1167,7 +1157,7 @@ setState(loadState());
 // Wire cover art module dependencies (saveState/render are hoisted function declarations)
 initCoverArt({ supabaseFetchCoverBlob, saveState, render });
 initCloudSync({ globalAudio, render });
-initCoverArtOps({ render, getSelectedSongId: () => selectedSongId });
+initCoverArtOps({ render, getSelectedSongId: () => R.selectedSongId });
 initSync({ render, getImportQueueRunning: () => _importQueueRunning, getImportQueue: () => importQueue });
 
 // normalizeState, ensureProjectInState, saveState now in state.js
@@ -1551,10 +1541,10 @@ function _showDuplicateFileDialog(fileName, hits, { onContinue, onDismiss }) {
       onDismiss?.();
       // Navigate to the matching song/version detail
       navigateForward(() => {
-        currentTab = "songs";
-        songsView = "list";
-        selectedSongId = songId;
-        selectedVersionId = versionId || null;
+        R.currentTab = "songs";
+        R.songsView = "list";
+        R.selectedSongId = songId;
+        R.selectedVersionId = versionId || null;
         setHeader("Song");
         syncTabs();
       });
@@ -1636,10 +1626,10 @@ function _showBulkDuplicateFileDialog(allDups, { onContinue, onDismiss }) {
       onDismiss?.();
       closeCreateOverlay();
       navigateForward(() => {
-        currentTab = "songs";
-        songsView = "list";
-        selectedSongId = songId;
-        selectedVersionId = versionId || null;
+        R.currentTab = "songs";
+        R.songsView = "list";
+        R.selectedSongId = songId;
+        R.selectedVersionId = versionId || null;
         setHeader("Song");
         syncTabs();
       });
@@ -1707,10 +1697,10 @@ function _showDuplicateSongDialog(existingSong, { fromCreate } = {}) {
     close();
     if (fromCreate) closeCreateOverlay();
     navigateForward(() => {
-      currentTab = "songs";
-      songsView = "list";
-      selectedSongId = existingSong.id;
-      selectedVersionId = null;
+      R.currentTab = "songs";
+      R.songsView = "list";
+      R.selectedSongId = existingSong.id;
+      R.selectedVersionId = null;
       setHeader("Song");
       syncTabs();
     });
@@ -1745,7 +1735,7 @@ function openBulkImport() {
     const proceedToStaging = () => {
       closeCreateOverlay();
       navigateForward(() => {
-        overlayView = "bulkImport";
+        R.overlayView = "bulkImport";
         setHeader(`Import (${bulkStagingFiles.length})`);
         syncTabs();
       });
@@ -2105,10 +2095,10 @@ function openBulkEditSheet(item) {
       const verId = row.dataset.dupVer;
       closeModal();
       navigateForward(() => {
-        currentTab = "songs";
-        songsView = "list";
-        selectedSongId = songId;
-        selectedVersionId = verId || null;
+        R.currentTab = "songs";
+        R.songsView = "list";
+        R.selectedSongId = songId;
+        R.selectedVersionId = verId || null;
         setHeader("Song");
         syncTabs();
       });
@@ -2389,9 +2379,9 @@ async function startBulkImport() {
   saveOverlay.remove();
 
   // Navigate to Songs list
-  overlayView = null;
-  currentTab = "songs";
-  songsView = "list";
+  R.overlayView = null;
+  R.currentTab = "songs";
+  R.songsView = "list";
   setHeader("Songs");
   syncTabs();
   render();
@@ -2581,7 +2571,7 @@ async function _processImportQueue() {
         console.warn(`[BulkImport] Local save failed for "${qItem.title}" (quota?) — cloud upload continues:`, e);
       }
       saveState();
-      if (drawerView !== "alerts") render();
+      if (R.drawerView !== "alerts") render();
 
       _updateImportQueueItem(qItem.id, { progress: 40, statusText: "Uploading to cloud…" });
 
@@ -2609,7 +2599,7 @@ async function _processImportQueue() {
         _updateImportQueueItem(qItem.id, { status: "failed", progress: 0, statusText: result.error || "Upload failed", songId: song.id, versionId: v.id });
       }
 
-      if (drawerView !== "alerts") render();
+      if (R.drawerView !== "alerts") render();
     } catch (e) {
       console.warn(`[BulkImport] Failed for "${qItem.title}":`, e);
       _updateImportQueueItem(qItem.id, { status: "failed", progress: 0, statusText: e.message || "Failed" });
@@ -2654,7 +2644,7 @@ async function _processImportQueue() {
   // Keep all items — they'll be cleaned up after 24h by _pruneImportQueue()
   _saveImportQueue();
   _updateNotifBadge();
-  if (drawerView === "alerts") _renderImportQueueDOM();
+  if (R.drawerView === "alerts") _renderImportQueueDOM();
 }
 
 // normalizeAudioLink now in ui/dom.js
@@ -2832,12 +2822,12 @@ function playerItems(data) {
 
   // filter
   let out = items;
-  if (playerFilter === "projects") out = out.filter(x => x.project);
+  if (R.playerFilter === "projects") out = out.filter(x => x.project);
   // "playlists" and "releases" are future — show all for now
   // "all" = Riffs (default) — shows everything
 
   // sort
-  if (playerSort === "title") {
+  if (R.playerSort === "title") {
     out = out.slice().sort((a,b) => a.songName.localeCompare(b.songName));
   } else {
     // "recent" (best effort): if no dates, keep natural order
@@ -2860,13 +2850,7 @@ const TAB_TITLES = {
   settings: "Settings",
 };
 
-let currentTab = "home";
-let selectedSongId = null;
-let songsView = "list";
-let songsListScrollTop = 0; // scroll position saved when navigating into a song
 let pendingScrollToUpload = false;
-let selectedVersionId = null; // ✅ new: when you tap a specific version row
-let playerScreen = "list"; // "list" | "now"
 
 const songsListState = {
   sortMode: "updated",
@@ -2878,22 +2862,14 @@ const songsListState = {
 
 let projectsOwnerFilter = "all"; // "all" | "mine" | "shared"
 
-let songsFromCollab = false; // true when Songs opened from Collab screen
-let drawerView = null;
-let songsBackTarget = null; // e.g. "projects" | "collabs"
-let overlayView = null;
-let friendProfileId = null; // user ID for public profile view
-let settingsView = null; // "account" | "cloud" | "library" | "art" | "debug" | "danger" | null
-let collabMode = false; // true when drilling into shared content from Collab tab
-let collabPill = "projects"; // "projects" | "friends" | "messages"
 
 // ---------------------
 // Drawer open/close
 // ---------------------
 
 function setDrawerView(v) {
-  drawerView = v;
-  selectedSongId = null;
+  R.drawerView = v;
+  R.selectedSongId = null;
   render();
 }
 
@@ -2913,19 +2889,19 @@ const ROOT_TABS = new Set(["home", "player"]);
 function syncBackButton() {
   if (!headerBackEl) return;
   // Profile is always root — never show back button
-  if (currentTab === "profile") { headerBackEl.style.display = "none"; return; }
+  if (R.currentTab === "profile") { headerBackEl.style.display = "none"; return; }
   // Collab root — no sidebar, hide back button
-  const onCollabRoot = currentTab === "collab" && !overlayView && !selectedSongId && !projectDetailScreen && !drawerView;
+  const onCollabRoot = R.currentTab === "collab" && !R.overlayView && !R.selectedSongId && !R.projectDetailScreen && !R.drawerView;
   if (onCollabRoot) { headerBackEl.style.display = "none"; return; }
   const onRoot =
-    ROOT_TABS.has(currentTab) &&
-    !drawerView &&
-    !overlayView &&
-    !selectedSongId &&
-    !selectedVersionId &&
-    !projectDetailScreen &&
-    !releaseDetailId &&
-    songsView !== "create";
+    ROOT_TABS.has(R.currentTab) &&
+    !R.drawerView &&
+    !R.overlayView &&
+    !R.selectedSongId &&
+    !R.selectedVersionId &&
+    !R.projectDetailScreen &&
+    !R.releaseDetailId &&
+    R.songsView !== "create";
   headerBackEl.style.display = onRoot ? "none" : "flex";
 }
 
@@ -2935,7 +2911,7 @@ headerBackEl?.addEventListener("click", () => {
 });
 
 function syncTabs() {
-  const highlightTab = currentTab === "songs" ? "home" : currentTab;
+  const highlightTab = R.currentTab === "songs" ? "home" : R.currentTab;
   document.querySelectorAll(".tab").forEach((b) => {
     b.classList.toggle("active", b.dataset.tab === highlightTab);
   });
@@ -2989,11 +2965,11 @@ function playVersion(songId, versionId, { goPlayer = true } = {}) {
   playNowPlaying({ autoplay: true });
 
   if (goPlayer) {
-    drawerView = null;
-    overlayView = null;
-    selectedSongId = null;
-    selectedVersionId = null;
-    currentTab = "player";
+    R.drawerView = null;
+    R.overlayView = null;
+    R.selectedSongId = null;
+    R.selectedVersionId = null;
+    R.currentTab = "player";
     setHeader("Player");
     syncTabs();
     render();
@@ -3125,7 +3101,7 @@ function _attachNotifPermissionToGesture() {
 // Show a local push notification for new messages
 function _showMessageNotification(newCount) {
   if (!("Notification" in window) || Notification.permission !== "granted") return;
-  if (document.visibilityState === "visible" && overlayView === "chat") return; // user is in chat
+  if (document.visibilityState === "visible" && R.overlayView === "chat") return; // user is in chat
   const count = newCount - _prevUnreadMsgCount;
   if (count <= 0) return;
 
@@ -3342,13 +3318,13 @@ let _ptrBusy = false;
   document.addEventListener("touchstart", (e) => {
     if (_ptrRefreshing) return;
     // Block PTR while full player is open or being dismissed
-    if (isFullPlayerOpen || document.getElementById("fullPlayer")) return;
+    if (R.isFullPlayerOpen || document.getElementById("fullPlayer")) return;
     if (!activeScreenEl || activeScreenEl.scrollTop > 1) return;
     // Only allow PTR on root list screens (not detail views)
     if (!PTR_SCREENS.has(activeScreenEl.id)) return;
     // Block on detail views (song detail, version detail, project detail, etc.)
-    if (selectedSongId || selectedVersionId || projectDetailScreen || overlayView) return;
-    if (drawerView && drawerView !== "projects" && drawerView !== "releases") return;
+    if (R.selectedSongId || R.selectedVersionId || R.projectDetailScreen || R.overlayView) return;
+    if (R.drawerView && R.drawerView !== "projects" && R.drawerView !== "releases") return;
     const t = e.changedTouches?.[0];
     if (!t || t.clientX <= 30) return;
     _ptrStartY = t.clientY;
@@ -3475,9 +3451,9 @@ let _ptrBusy = false;
   function _isEligible() {
     if (_ptrBusy) return false;
     if (!activeScreenEl || !EB_SCREENS.has(activeScreenEl.id)) return false;
-    if (selectedSongId || selectedVersionId || projectDetailScreen || overlayView) return false;
-    if (drawerView && drawerView !== "projects" && drawerView !== "releases") return false;
-    if (isFullPlayerOpen || document.getElementById("fullPlayer")) return false;
+    if (R.selectedSongId || R.selectedVersionId || R.projectDetailScreen || R.overlayView) return false;
+    if (R.drawerView && R.drawerView !== "projects" && R.drawerView !== "releases") return false;
+    if (R.isFullPlayerOpen || document.getElementById("fullPlayer")) return false;
     return true;
   }
 
@@ -3656,25 +3632,25 @@ document.querySelectorAll(".tab").forEach((btn) => {
     const targetTab = btn.dataset.tab || "home";
 
     // Already on home root with no overlays — nothing to do
-    if (targetTab === "home" && currentTab === "home" && nav.depth === 0 && !drawerView && !overlayView) {
+    if (targetTab === "home" && R.currentTab === "home" && nav.depth === 0 && !R.drawerView && !R.overlayView) {
       return;
     }
 
     // If tapping home while deep in a nav stack, jump straight to home
     if (targetTab === "home" && nav.depth > 0) {
       nav.slideTransition({ direction: "jumpHome", mutate: () => {
-        songsBackTarget = null;
-        drawerView = null;
-        overlayView = null;
-        selectedSongId = null;
-        selectedVersionId = null;
-        projectDetailScreen = null;
-        releaseDetailId = null;
-        songsView = "list";
-        songsListScrollTop = 0;
-        collabMode = false;
-        songsFromCollab = false;
-        currentTab = "home";
+        R.songsBackTarget = null;
+        R.drawerView = null;
+        R.overlayView = null;
+        R.selectedSongId = null;
+        R.selectedVersionId = null;
+        R.projectDetailScreen = null;
+        R.releaseDetailId = null;
+        R.songsView = "list";
+        R.songsListScrollTop = 0;
+        R.collabMode = false;
+        R.songsFromCollab = false;
+        R.currentTab = "home";
         if (screens.home) screens.home.scrollTop = 0;
         try { window.scrollTo(0, 0); } catch {}
         try { document.documentElement.scrollTop = 0; } catch {}
@@ -3686,27 +3662,27 @@ document.querySelectorAll(".tab").forEach((btn) => {
       return;
     }
 
-    songsBackTarget = null;
+    R.songsBackTarget = null;
     nav.clearStacks();
 
     // Normal navigation
-    drawerView = null;
-    overlayView = null;
-    selectedSongId = null;
-    selectedVersionId = null;
-    projectDetailScreen = null;
-    releaseDetailId = null;
-    songsView = "list";
-    songsListScrollTop = 0;
-    collabMode = false;
-    songsFromCollab = false;
+    R.drawerView = null;
+    R.overlayView = null;
+    R.selectedSongId = null;
+    R.selectedVersionId = null;
+    R.projectDetailScreen = null;
+    R.releaseDetailId = null;
+    R.songsView = "list";
+    R.songsListScrollTop = 0;
+    R.collabMode = false;
+    R.songsFromCollab = false;
 
-    currentTab = targetTab;
+    R.currentTab = targetTab;
     if (targetTab === "player") {
-      playerScreen = "list";
+      R.playerScreen = "list";
     }
     if (targetTab === "collab") {
-      collabPill = "projects";
+      R.collabPill = "projects";
     }
 
     if (targetTab === "home") {
@@ -3717,7 +3693,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
     }
 
     syncTabs();
-    setHeader(TAB_TITLES[currentTab] || "RiffBank");
+    setHeader(TAB_TITLES[R.currentTab] || "RiffBank");
     render();
   });
 });
@@ -3727,21 +3703,21 @@ headerTitle?.addEventListener("click", () => {
   // Ignore taps when already on a root tab with no nav depth — prevents ghost
   // back-button behaviour on Collab/Home/Player root screens where the collapsed
   // titleblock overlaps the area where a back chevron would appear.
-  const onRoot = ROOT_TABS.has(currentTab) || currentTab === "collab" || currentTab === "profile";
-  if (onRoot && nav.depth === 0 && !drawerView && !overlayView && !selectedSongId && !projectDetailScreen) return;
+  const onRoot = ROOT_TABS.has(R.currentTab) || R.currentTab === "collab" || R.currentTab === "profile";
+  if (onRoot && nav.depth === 0 && !R.drawerView && !R.overlayView && !R.selectedSongId && !R.projectDetailScreen) return;
 
   const resetToHome = () => {
-    drawerView = null;
-    overlayView = null;
-    selectedSongId = null;
-    selectedVersionId = null;
-    projectDetailScreen = null;
-    releaseDetailId = null;
-    songsView = "list";
-    songsListScrollTop = 0;
-    collabMode = false;
-    currentTab = "home";
-    songsBackTarget = null;
+    R.drawerView = null;
+    R.overlayView = null;
+    R.selectedSongId = null;
+    R.selectedVersionId = null;
+    R.projectDetailScreen = null;
+    R.releaseDetailId = null;
+    R.songsView = "list";
+    R.songsListScrollTop = 0;
+    R.collabMode = false;
+    R.currentTab = "home";
+    R.songsBackTarget = null;
     nav.clearStacks();
     if (screens.home) screens.home.scrollTop = 0;
     try { window.scrollTo(0, 0); } catch {}
@@ -3753,7 +3729,7 @@ headerTitle?.addEventListener("click", () => {
   };
 
   // If on home tab with nav depth, jump straight to home; otherwise snap
-  if (currentTab === "home" && nav.depth > 0) {
+  if (R.currentTab === "home" && nav.depth > 0) {
     nav.slideTransition({ direction: "jumpHome", mutate: resetToHome });
   } else {
     resetToHome();
@@ -3805,23 +3781,23 @@ function goBack({ animate = false } = {}) {
     let restoreState = animate ? nav.consumePendingState() : nav.popStacks();
 
     if (restoreState) {
-      currentTab = restoreState.currentTab;
-      drawerView = restoreState.drawerView;
-      projectDetailScreen = restoreState.projectDetailScreen;
-      releaseDetailId = restoreState.releaseDetailId;
-      selectedSongId = restoreState.selectedSongId;
-      selectedVersionId = restoreState.selectedVersionId;
-      songsView = restoreState.songsView;
-      overlayView = restoreState.overlayView;
-      friendProfileId = restoreState.friendProfileId ?? null;
-      songsBackTarget = restoreState.songsBackTarget;
-      lyricsEditSongId = restoreState.lyricsEditSongId ?? null;
-      collabMode = restoreState.collabMode ?? false;
-      songsFromCollab = restoreState.songsFromCollab ?? false;
-      settingsView = restoreState.settingsView ?? null;
-      collabPill = restoreState.collabPill ?? "projects";
+      R.currentTab = restoreState.currentTab;
+      R.drawerView = restoreState.drawerView;
+      R.projectDetailScreen = restoreState.projectDetailScreen;
+      R.releaseDetailId = restoreState.releaseDetailId;
+      R.selectedSongId = restoreState.selectedSongId;
+      R.selectedVersionId = restoreState.selectedVersionId;
+      R.songsView = restoreState.songsView;
+      R.overlayView = restoreState.overlayView;
+      R.friendProfileId = restoreState.friendProfileId ?? null;
+      R.songsBackTarget = restoreState.songsBackTarget;
+      R.lyricsEditSongId = restoreState.lyricsEditSongId ?? null;
+      R.collabMode = restoreState.collabMode ?? false;
+      R.songsFromCollab = restoreState.songsFromCollab ?? false;
+      R.settingsView = restoreState.settingsView ?? null;
+      R.collabPill = restoreState.collabPill ?? "projects";
       // Going back to home resets songs scroll so next visit starts fresh
-      if (restoreState.currentTab === "home" && !restoreState.drawerView) songsListScrollTop = 0;
+      if (restoreState.currentTab === "home" && !restoreState.drawerView) R.songsListScrollTop = 0;
       setHeader(restoreState.headerTitle);
       syncTabs();
       nav._isBackNav = true;
@@ -3835,13 +3811,13 @@ function goBack({ animate = false } = {}) {
     }
 
     // Fallback: no state stack entry (e.g. legacy or root-level back)
-    if (overlayView) {
-      overlayView = null;
-      currentTab = "home";
-      drawerView = null;
-      selectedSongId = null;
-      songsView = "list";
-      songsListScrollTop = 0;
+    if (R.overlayView) {
+      R.overlayView = null;
+      R.currentTab = "home";
+      R.drawerView = null;
+      R.selectedSongId = null;
+      R.songsView = "list";
+      R.songsListScrollTop = 0;
       nav.clearStacks();
       setHeader("RiffBank");
       syncTabs();
@@ -3849,16 +3825,16 @@ function goBack({ animate = false } = {}) {
       return;
     }
 
-    if (currentTab !== "home" || drawerView) {
-      currentTab = "home";
-      drawerView = null;
-      projectDetailScreen = null;
-      releaseDetailId = null;
-      songsView = "list";
-      songsListScrollTop = 0;
-      selectedSongId = null;
-      selectedVersionId = null;
-      collabMode = false;
+    if (R.currentTab !== "home" || R.drawerView) {
+      R.currentTab = "home";
+      R.drawerView = null;
+      R.projectDetailScreen = null;
+      R.releaseDetailId = null;
+      R.songsView = "list";
+      R.songsListScrollTop = 0;
+      R.selectedSongId = null;
+      R.selectedVersionId = null;
+      R.collabMode = false;
       nav.clearStacks();
       setHeader("RiffBank");
       syncTabs();
@@ -3892,9 +3868,9 @@ document.addEventListener("touchstart", (e) => {
 // Left-edge gesture — swipe back
 if (t.clientX <= 24) {
   // Player has nothing to go back to; bare home/collab root has nothing to go back to
-  if (currentTab === "player") return;
-  if (currentTab === "collab" && !projectDetailScreen && !selectedSongId && !overlayView) return;
-  if (currentTab === "home" && !drawerView && !overlayView) return;
+  if (R.currentTab === "player") return;
+  if (R.currentTab === "collab" && !R.projectDetailScreen && !R.selectedSongId && !R.overlayView) return;
+  if (R.currentTab === "home" && !R.drawerView && !R.overlayView) return;
 
   touchTracking = true;
   touchMode = "back";
@@ -4272,15 +4248,15 @@ miniPlayerEl?.addEventListener("click", (e) => {
   if (isControl) return;
   if (!state.player?.nowPlaying) return;
 
-  prevTabBeforeFullPlayer = currentTab;
-  prevSelectedSongIdBeforeFullPlayer = selectedSongId;
+  R.prevTabBeforeFullPlayer = R.currentTab;
+  R.prevSelectedSongIdBeforeFullPlayer = R.selectedSongId;
 
   // Clear any drawer/project state so the render router reaches the player
-  drawerView = null;
-  projectDetailScreen = null;
+  R.drawerView = null;
+  R.projectDetailScreen = null;
 
-  currentTab = "player";
-  playerScreen = "now";
+  R.currentTab = "player";
+  R.playerScreen = "now";
   setHeader("Now Playing");
   syncTabs();
   render();
@@ -4447,7 +4423,7 @@ globalAudio?.addEventListener("ended", async () => {
   // Normal end — reset short-play counter and advance
   _shortPlayCount = 0;
   _shortPlayTrack = null;
-  if (!advanceToNextTrack({ render: fullPlayerOpen })) syncMiniPlayerUI();
+  if (!advanceToNextTrack({ render: R.fullPlayerOpen })) syncMiniPlayerUI();
 });
 
 // Auto-skip on audio load/decode errors so playback doesn't silently stop
@@ -4478,7 +4454,7 @@ globalAudio?.addEventListener("error", () => {
   console.warn(`[Player] Audio error for ${now.songId}, skipping...`);
   // Clear the broken cached URL so retry can re-fetch from source
   _clearAudioCacheForNowPlaying();
-  if (!advanceToNextTrack({ render: fullPlayerOpen })) {
+  if (!advanceToNextTrack({ render: R.fullPlayerOpen })) {
     toast("Playback error — no more tracks");
     syncMiniPlayerUI();
   }
@@ -4684,9 +4660,9 @@ function renderSheet() {
       }
 
       closeSheet();
-      currentTab = "songs";
-      songsView = "list";
-      selectedSongId = song.id;
+      R.currentTab = "songs";
+      R.songsView = "list";
+      R.selectedSongId = song.id;
       setHeader("Song");
       syncTabs();
       render();
@@ -4699,8 +4675,8 @@ function renderSheet() {
 
   if (sheetMode === "lyrics") {
     closeSheet();
-    lyricsEditSongId = null;
-    overlayView = "lyrics";
+    R.lyricsEditSongId = null;
+    R.overlayView = "lyrics";
     setHeader("Lyrics");
     renderLyricsScratch();
     openLyricsSongPicker();
@@ -4762,8 +4738,8 @@ function renderSheet() {
       });
       saveState();
       closeSheet();
-      drawerView = "releases";
-      releaseDetailId = null;
+      R.drawerView = "releases";
+      R.releaseDetailId = null;
       render();
       toast(`"${title}" created 🎵`);
     });
@@ -4793,9 +4769,9 @@ function renderSheet() {
     $("#songMenuOpen")?.addEventListener("click", () => {
       if (!song) return closeSheet();
       closeSheet();
-      currentTab = "songs";
-      songsView = "list";
-      selectedSongId = song.id;
+      R.currentTab = "songs";
+      R.songsView = "list";
+      R.selectedSongId = song.id;
       setHeader("Song");
       syncTabs();
       render();
@@ -4822,9 +4798,9 @@ function renderSheet() {
       state.songs = state.songs.filter(s => s.id !== song.id);
       saveState();
       closeSheet();
-      currentTab = "songs";
-      songsView = "list";
-      selectedSongId = null;
+      R.currentTab = "songs";
+      R.songsView = "list";
+      R.selectedSongId = null;
       setHeader("Songs");
       syncTabs();
       render();
@@ -4879,12 +4855,12 @@ function renderSheet() {
         const first = createVersion(song);
         if (!first) return toast("Couldn't create version");
         navigateForward(() => {
-          selectedVersionId = first.id;
+          R.selectedVersionId = first.id;
         });
         return;
       }
       navigateForward(() => {
-        selectedVersionId = fv.id;
+        R.selectedVersionId = fv.id;
       });
     });
 
@@ -4951,9 +4927,9 @@ function renderSheet() {
       state.songs = state.songs.filter(s => s.id !== song.id);
       saveState();
       closeSheet();
-      selectedSongId = null;
-      selectedVersionId = null;
-      songsView = "list";
+      R.selectedSongId = null;
+      R.selectedVersionId = null;
+      R.songsView = "list";
       setHeader("Songs");
       render();
       // Delete from cloud after UI updates
@@ -5068,8 +5044,8 @@ function renderSheet() {
     $("#vmDetails")?.addEventListener("click", () => {
       closeSheet();
       navigateForward(() => {
-        selectedSongId = song.id;
-        selectedVersionId = v.id;
+        R.selectedSongId = song.id;
+        R.selectedVersionId = v.id;
       });
     });
 
@@ -5158,7 +5134,7 @@ function renderSheet() {
         state.settings.defaultProject = trimmed;
       }
       // Update projectDetailScreen if we're viewing this project
-      if (projectDetailScreen === p) projectDetailScreen = trimmed;
+      if (R.projectDetailScreen === p) R.projectDetailScreen = trimmed;
       saveState();
       coverCache.clear();
       render();
@@ -5206,7 +5182,7 @@ function renderSheet() {
       if (!confirm(`Delete "${rel.title}"?`)) return;
       state.releases = (state.releases || []).filter(r => r.id !== rel.id);
       saveState();
-      releaseDetailId = null;
+      R.releaseDetailId = null;
       render();
     });
     $("#rmCancel")?.addEventListener("click", closeSheet);
@@ -5734,9 +5710,9 @@ function renderCreateOverlay() {
       if (createOverlayEl) { createOverlayEl.remove(); createOverlayEl = null; }
 
       navigateForward(() => {
-        currentTab = "songs";
-        songsView = "list";
-        selectedSongId = song.id;
+        R.currentTab = "songs";
+        R.songsView = "list";
+        R.selectedSongId = song.id;
         setHeader("Song");
         syncTabs();
       });
@@ -5810,89 +5786,89 @@ function render() {
   syncBackButton();
 
     // ✅ Enforce fullscreen player state every render (no overlap, no reserved padding)
-  setFullPlayerOpen(!!fullPlayerOpen);
+  setFullPlayerOpen(!!R.fullPlayerOpen);
 
   document.body.classList.toggle(
     "isHome",
-    currentTab === "home" && !drawerView && !overlayView && !selectedSongId && !selectedVersionId
+    R.currentTab === "home" && !R.drawerView && !R.overlayView && !R.selectedSongId && !R.selectedVersionId
   );
   document.body.classList.toggle(
     "hasHeaderGrad",
-    currentTab === "songs" ||
-    currentTab === "player" ||
-    currentTab === "collab" ||
-    drawerView === "projects" ||
-    drawerView === "releases" ||
-    drawerView === "eps" ||
-    drawerView === "collabs"
+    R.currentTab === "songs" ||
+    R.currentTab === "player" ||
+    R.currentTab === "collab" ||
+    R.drawerView === "projects" ||
+    R.drawerView === "releases" ||
+    R.drawerView === "eps" ||
+    R.drawerView === "collabs"
   );
 
   // On forward navigation, reset scroll so screens always start at the top
   const _isBack = nav._isBackNav;
 
   // Drawer screens
-  if (drawerView === "projects") {
-    if (projectDetailScreen) {
+  if (R.drawerView === "projects") {
+    if (R.projectDetailScreen) {
       setActiveScreen("projectDetail");
       if (!_isBack) activeScreenEl.scrollTop = 0;
-      return renderProjectSongs(projectDetailScreen);
+      return renderProjectSongs(R.projectDetailScreen);
     }
     setActiveScreen("drawer");
     if (!_isBack) activeScreenEl.scrollTop = 0;
     return renderProjects();
   }
-  if (drawerView === "releases") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return releaseDetailId ? renderReleaseDetail(releaseDetailId) : renderReleases(); }
-  if (drawerView === "eps") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderEPs(); }
-  if (drawerView === "collabs") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderCollaborators(); }
-  if (drawerView === "importExport") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderImportExport(); }
-  if (drawerView === "about") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderAbout(); }
-  if (drawerView === "globalSearch") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderGlobalSearch(); }
-  if (drawerView === "alerts") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderAlerts(); }
+  if (R.drawerView === "releases") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return R.releaseDetailId ? renderReleaseDetail(R.releaseDetailId) : renderReleases(); }
+  if (R.drawerView === "eps") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderEPs(); }
+  if (R.drawerView === "collabs") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderCollaborators(); }
+  if (R.drawerView === "importExport") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderImportExport(); }
+  if (R.drawerView === "about") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderAbout(); }
+  if (R.drawerView === "globalSearch") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderGlobalSearch(); }
+  if (R.drawerView === "alerts") { setActiveScreen("drawer"); if (!_isBack) activeScreenEl.scrollTop = 0; return renderAlerts(); }
 
   // Overlay screens (bulk import, lyrics, friends, etc.)
-  if (overlayView === "bulkImport") {
+  if (R.overlayView === "bulkImport") {
     setActiveScreen("drawer");
     if (!_isBack) activeScreenEl.scrollTop = 0;
     return renderBulkImport();
   }
-  if (overlayView === "lyrics") {
+  if (R.overlayView === "lyrics") {
     setActiveScreen("home");
     if (!_isBack) activeScreenEl.scrollTop = 0;
     return renderLyricsScratch();
   }
-  if (overlayView === "friendRequests") {
+  if (R.overlayView === "friendRequests") {
     setActiveScreen("drawer");
     if (!_isBack) activeScreenEl.scrollTop = 0;
     return renderFriendRequests();
   }
-  if (overlayView === "friendsList") {
+  if (R.overlayView === "friendsList") {
     setActiveScreen("drawer");
     if (!_isBack) activeScreenEl.scrollTop = 0;
     return renderFriendsList();
   }
-  if (overlayView === "addFriend") {
+  if (R.overlayView === "addFriend") {
     setActiveScreen("drawer");
     if (!_isBack) activeScreenEl.scrollTop = 0;
     return renderAddFriend();
   }
-  if (overlayView === "friendProfile") {
+  if (R.overlayView === "friendProfile") {
     setActiveScreen("drawer");
     if (!_isBack) activeScreenEl.scrollTop = 0;
-    return renderFriendProfile(friendProfileId);
+    return renderFriendProfile(R.friendProfileId);
   }
-  if (overlayView === "messages") {
+  if (R.overlayView === "messages") {
     setActiveScreen("drawer");
     if (!_isBack) activeScreenEl.scrollTop = 0;
     return renderMessages();
   }
-  if (overlayView === "chat") {
+  if (R.overlayView === "chat") {
     setActiveScreen("drawer");
     if (!_isBack) activeScreenEl.scrollTop = 0;
-    return renderChat(friendProfileId);
+    return renderChat(R.friendProfileId);
   }
 
   // Normal screens
-  if (currentTab === "home") {
+  if (R.currentTab === "home") {
     setActiveScreen("home");
     if (!_isBack) activeScreenEl.scrollTop = 0;
     // On back-nav, reuse existing home if particles are still alive (avoids position jump)
@@ -5900,65 +5876,65 @@ function render() {
     if (_isBack && existingGrid && existingGrid._cleanupHome) return;
     return renderHome();
   }
-  if (currentTab === "songs") {
-    if (selectedSongId && selectedVersionId) {
+  if (R.currentTab === "songs") {
+    if (R.selectedSongId && R.selectedVersionId) {
       setActiveScreen("versionDetail");
       if (!_isBack) activeScreenEl.scrollTop = 0;
-      return renderVersionDetail(selectedSongId, selectedVersionId);
+      return renderVersionDetail(R.selectedSongId, R.selectedVersionId);
     }
-    if (selectedSongId) {
+    if (R.selectedSongId) {
       setActiveScreen("songDetail");
       if (!_isBack) activeScreenEl.scrollTop = 0;
-      return renderSongDetail(selectedSongId);
+      return renderSongDetail(R.selectedSongId);
     }
     setActiveScreen("songs");
     if (!_isBack) activeScreenEl.scrollTop = 0;
-    if (songsView === "create") return renderSongCreate();
+    if (R.songsView === "create") return renderSongCreate();
     return renderSongsList();
   }
-  if (currentTab === "player") {
+  if (R.currentTab === "player") {
     setActiveScreen("player");
-    if (playerScreen === "now") return renderNowPlaying();
+    if (R.playerScreen === "now") return renderNowPlaying();
     return renderPlayer();
   }
-  if (currentTab === "collab") {
-    if (projectDetailScreen) {
-      if (selectedSongId && selectedVersionId) {
+  if (R.currentTab === "collab") {
+    if (R.projectDetailScreen) {
+      if (R.selectedSongId && R.selectedVersionId) {
         setActiveScreen("versionDetail");
         if (!_isBack) activeScreenEl.scrollTop = 0;
-        return renderVersionDetail(selectedSongId, selectedVersionId);
+        return renderVersionDetail(R.selectedSongId, R.selectedVersionId);
       }
-      if (selectedSongId) {
+      if (R.selectedSongId) {
         setActiveScreen("songDetail");
         if (!_isBack) activeScreenEl.scrollTop = 0;
-        return renderSongDetail(selectedSongId);
+        return renderSongDetail(R.selectedSongId);
       }
       setActiveScreen("projectDetail");
       if (!_isBack) activeScreenEl.scrollTop = 0;
-      return renderProjectSongs(projectDetailScreen);
+      return renderProjectSongs(R.projectDetailScreen);
     }
-    if (selectedSongId && selectedVersionId) {
+    if (R.selectedSongId && R.selectedVersionId) {
       setActiveScreen("versionDetail");
       if (!_isBack) activeScreenEl.scrollTop = 0;
-      return renderVersionDetail(selectedSongId, selectedVersionId);
+      return renderVersionDetail(R.selectedSongId, R.selectedVersionId);
     }
-    if (selectedSongId) {
+    if (R.selectedSongId) {
       setActiveScreen("songDetail");
       if (!_isBack) activeScreenEl.scrollTop = 0;
-      return renderSongDetail(selectedSongId);
+      return renderSongDetail(R.selectedSongId);
     }
     setActiveScreen("collab");
     return renderCollab();
   }
-  if (currentTab === "profile") { setActiveScreen("collab"); return renderProfile(); }
-  if (currentTab === "settings") {
+  if (R.currentTab === "profile") { setActiveScreen("collab"); return renderProfile(); }
+  if (R.currentTab === "settings") {
     setActiveScreen("settings");
-    if (settingsView === "account") return renderSettingsAccount();
-    if (settingsView === "cloud") return renderSettingsCloud();
-    if (settingsView === "library") return renderSettingsLibrary();
-    if (settingsView === "art") return renderSettingsArt();
-    if (settingsView === "debug") return renderSettingsDebug();
-    if (settingsView === "danger") return renderSettingsDanger();
+    if (R.settingsView === "account") return renderSettingsAccount();
+    if (R.settingsView === "cloud") return renderSettingsCloud();
+    if (R.settingsView === "library") return renderSettingsLibrary();
+    if (R.settingsView === "art") return renderSettingsArt();
+    if (R.settingsView === "debug") return renderSettingsDebug();
+    if (R.settingsView === "danger") return renderSettingsDanger();
     return renderSettings();
   }
 }
@@ -6154,9 +6130,9 @@ function openShareNewSongSheet(blob, fileName, fileType, fileSize) {
     toast("Uploading to cloud…");
     await attachSharedAudio(song, v, blob, fileName, fileType, fileSize);
 
-    currentTab = "songs";
-    songsView = "list";
-    selectedSongId = song.id;
+    R.currentTab = "songs";
+    R.songsView = "list";
+    R.selectedSongId = song.id;
     setHeader("Song");
     syncTabs();
     render();
@@ -6227,9 +6203,9 @@ function openShareExistingSongSheet(blob, fileName, fileType, fileSize) {
       toast("Uploading to cloud…");
       await attachSharedAudio(song, v, blob, fileName, fileType, fileSize);
 
-      currentTab = "songs";
-      songsView = "list";
-      selectedSongId = song.id;
+      R.currentTab = "songs";
+      R.songsView = "list";
+      R.selectedSongId = song.id;
       setHeader("Song");
       syncTabs();
       render();
@@ -6720,7 +6696,7 @@ async function init() {
     _refreshLoadedInvites(),
   ]).then(() => {
     // Re-render if user is on a tab that shows shared content
-    if (currentTab === "player" || currentTab === "collab" || currentTab === "songs" || drawerView) render();
+    if (R.currentTab === "player" || R.currentTab === "collab" || R.currentTab === "songs" || R.drawerView) render();
   }).catch(console.warn);
 
   // Realtime: instant notifications for shares, messages, friend requests, and own song changes
@@ -6759,7 +6735,7 @@ async function init() {
       toast(label);
       // Refresh full shared data in background (for UI updates)
       refreshSharedData().then(() => {
-        if (currentTab === "player" || currentTab === "collab" || currentTab === "songs" || drawerView) render();
+        if (R.currentTab === "player" || R.currentTab === "collab" || R.currentTab === "songs" || R.drawerView) render();
       }).catch(() => {});
     },
     onNewMessage: async (row) => {
@@ -6795,7 +6771,7 @@ async function init() {
   // Fallback: poll shared data + own songs every 60s in case Realtime disconnects
   setInterval(() => {
     refreshSharedData().then(() => {
-      if (currentTab === "player" || currentTab === "collab" || currentTab === "songs" || drawerView) render();
+      if (R.currentTab === "player" || R.currentTab === "collab" || R.currentTab === "songs" || R.drawerView) render();
     }).catch(() => {});
     // Skip sync while bulk import is running — partial cloud state would delete un-pushed songs
     if (!_importQueueRunning) {
@@ -7020,7 +6996,7 @@ function renderProjects() {
     // Navigate after short delay so animation is visible
     setTimeout(() => {
       navigateForward(() => {
-        projectDetailScreen = projName;
+        R.projectDetailScreen = projName;
       });
     }, 120);
   }
@@ -7126,7 +7102,7 @@ function renderProjectSongs(projectName) {
 
   // In collab mode, merge songs from all shared sources for this project; otherwise use local + shared songs
   let songs;
-  if (collabMode) {
+  if (R.collabMode) {
     const _seen = new Set();
     const _merged = [];
     // Songs from projects shared WITH me
@@ -7478,7 +7454,7 @@ function renderReleases() {
     el.addEventListener("click", () => {
       if (didLongPress) return;
       navigateForward(() => {
-        releaseDetailId = el.getAttribute("data-rel-open");
+        R.releaseDetailId = el.getAttribute("data-rel-open");
       });
     });
   });
@@ -7515,7 +7491,7 @@ function renderReleases() {
 
 function renderReleaseDetail(releaseId) {
   const release = (state.releases || []).find(r => r.id === releaseId);
-  if (!release) { releaseDetailId = null; return renderReleases(); }
+  if (!release) { R.releaseDetailId = null; return renderReleases(); }
 
   setHeader(release.title);
   // Hide topbar title — the hero has its own large title
@@ -7668,12 +7644,12 @@ function renderReleaseDetail(releaseId) {
         if (e.target.closest("[data-rel-song-more]")) return;
         const sid = row.getAttribute("data-open-song");
         navigateForward(() => {
-          releaseDetailId = null;
-          drawerView = null;
-          currentTab = "songs";
-          songsView = "detail";
-          selectedSongId = sid;
-          selectedVersionId = null;
+          R.releaseDetailId = null;
+          R.drawerView = null;
+          R.currentTab = "songs";
+          R.songsView = "detail";
+          R.selectedSongId = sid;
+          R.selectedVersionId = null;
         });
       });
     });
@@ -7735,8 +7711,8 @@ function renderEPs() {
     </div>
   `;
   $("#closeDrawerView").addEventListener("click", () => {
-    drawerView = null;
-    setHeader(TAB_TITLES[currentTab] || "RiffBank");
+    R.drawerView = null;
+    setHeader(TAB_TITLES[R.currentTab] || "RiffBank");
     render();
   });
 }
@@ -7780,18 +7756,18 @@ function renderCollaborators() {
   `;
 
   $("#closeDrawerView").addEventListener("click", () => {
-    drawerView = null;
-    setHeader(TAB_TITLES[currentTab] || "RiffBank");
+    R.drawerView = null;
+    setHeader(TAB_TITLES[R.currentTab] || "RiffBank");
     render();
   });
 
   activeScreenEl.querySelectorAll("[data-filter-collab]").forEach(btn => {
     btn.addEventListener("click", () => {
       const name = btn.getAttribute("data-filter-collab");
-      drawerView = null;
-      currentTab = "songs";
-      songsView = "list";
-      selectedSongId = null;
+      R.drawerView = null;
+      R.currentTab = "songs";
+      R.songsView = "list";
+      R.selectedSongId = null;
       setHeader("Songs");
       syncTabs();
       render();
@@ -7826,8 +7802,8 @@ function renderImportExport() {
   `;
 
   $("#closeDrawerView").addEventListener("click", () => {
-    drawerView = null;
-    setHeader(TAB_TITLES[currentTab] || "RiffBank");
+    R.drawerView = null;
+    setHeader(TAB_TITLES[R.currentTab] || "RiffBank");
     render();
   });
 
@@ -7854,8 +7830,8 @@ function renderAbout() {
   `;
 
   $("#closeDrawerView").addEventListener("click", () => {
-    drawerView = null;
-    setHeader(TAB_TITLES[currentTab] || "RiffBank");
+    R.drawerView = null;
+    setHeader(TAB_TITLES[R.currentTab] || "RiffBank");
     render();
   });
 }
@@ -7878,8 +7854,8 @@ function renderHome() {
   const prevGrid = activeScreenEl.querySelector(".homeGrid");
   if (prevGrid && prevGrid._cleanupHome) prevGrid._cleanupHome();
 
-  overlayView = null;
-  currentTab = "home";
+  R.overlayView = null;
+  R.currentTab = "home";
   setHeader("RiffBank");
 
   activeScreenEl.innerHTML = `
@@ -7986,19 +7962,19 @@ function renderHome() {
   // Topbar button actions
   activeScreenEl.querySelector("#htbNotif")?.addEventListener("click", () => {
     navigateForward(() => {
-      drawerView = "alerts";
+      R.drawerView = "alerts";
       setHeader("Alerts");
       syncTabs();
     });
   });
   activeScreenEl.querySelector("#htbSearch")?.addEventListener("click", () => {
-    drawerView = "globalSearch";
+    R.drawerView = "globalSearch";
     setActiveScreen("drawer");
     renderGlobalSearch();
   });
   activeScreenEl.querySelector("#htbSettings")?.addEventListener("click", () => {
     navigateForward(() => {
-      currentTab = "settings";
+      R.currentTab = "settings";
     });
   });
 
@@ -8013,36 +7989,36 @@ function renderHome() {
         navigateForward(() => {
           resetSongsFilters({ keepSort: true });
           songsListState.ownerFilter = "all";
-          songsFromCollab = false;
-          songsBackTarget = null;
-          songsListScrollTop = 0;
-          currentTab = "songs";
-          songsView = "list";
-          selectedSongId = null;
+          R.songsFromCollab = false;
+          R.songsBackTarget = null;
+          R.songsListScrollTop = 0;
+          R.currentTab = "songs";
+          R.songsView = "list";
+          R.selectedSongId = null;
         });
         return;
       }
       if (target === "projects") {
         navigateForward(() => {
           projectsOwnerFilter = "all";
-          drawerView = "projects";
+          R.drawerView = "projects";
 
-          selectedSongId = null;
+          R.selectedSongId = null;
         });
         return;
       }
       if (target === "releases") {
         navigateForward(() => {
-          drawerView = "releases";
+          R.drawerView = "releases";
 
-          selectedSongId = null;
+          R.selectedSongId = null;
         });
         return;
       }
       if (target === "lyrics") {
         navigateForward(() => {
-          lyricsEditSongId = null;
-          overlayView = "lyrics";
+          R.lyricsEditSongId = null;
+          R.overlayView = "lyrics";
           setHeader("Lyrics");
           renderLyricsScratch();
         });
@@ -9156,7 +9132,7 @@ function _showShareNotification(newItems) {
 
   // Push notification (if permitted and not currently in collab)
   if ("Notification" in window && Notification.permission === "granted"
-      && !(document.visibilityState === "visible" && currentTab === "collab")) {
+      && !(document.visibilityState === "visible" && R.currentTab === "collab")) {
     const reg = navigator.serviceWorker?.controller ? navigator.serviceWorker.ready : null;
     if (reg) {
       reg.then(r => {
@@ -9246,9 +9222,9 @@ function renderCollab() {
     <div class="songsPageTitle">Collab</div>
 
     <div class="collabPillBar">
-      <button class="collabPill${collabPill === "projects" ? " collabPillActive" : ""}" data-cpill="projects">Projects</button>
-      <button class="collabPill${collabPill === "friends" ? " collabPillActive" : ""}" data-cpill="friends">Friends${friendsBadgeHtml}</button>
-      <button class="collabPill${collabPill === "messages" ? " collabPillActive" : ""}" data-cpill="messages">Messages${msgBadgeHtml}</button>
+      <button class="collabPill${R.collabPill === "projects" ? " collabPillActive" : ""}" data-cpill="projects">Projects</button>
+      <button class="collabPill${R.collabPill === "friends" ? " collabPillActive" : ""}" data-cpill="friends">Friends${friendsBadgeHtml}</button>
+      <button class="collabPill${R.collabPill === "messages" ? " collabPillActive" : ""}" data-cpill="messages">Messages${msgBadgeHtml}</button>
     </div>
 
     <div class="collabPillBody" id="collabPillBody"></div>
@@ -9260,8 +9236,8 @@ function renderCollab() {
   activeScreenEl.querySelectorAll(".collabPill").forEach(btn => {
     btn.addEventListener("click", () => {
       const target = btn.getAttribute("data-cpill");
-      if (target === collabPill) return;
-      collabPill = target;
+      if (target === R.collabPill) return;
+      R.collabPill = target;
       activeScreenEl.querySelectorAll(".collabPill").forEach(p => p.classList.remove("collabPillActive"));
       btn.classList.add("collabPillActive");
       _renderCollabPillContent();
@@ -9307,9 +9283,9 @@ function renderCollab() {
 function _renderCollabPillContent() {
   const body = document.getElementById("collabPillBody");
   if (!body) return;
-  if (collabPill === "projects") _renderCollabProjects(body);
-  else if (collabPill === "friends") _renderCollabFriends(body);
-  else if (collabPill === "messages") _renderCollabMessages(body);
+  if (R.collabPill === "projects") _renderCollabProjects(body);
+  else if (R.collabPill === "friends") _renderCollabFriends(body);
+  else if (R.collabPill === "messages") _renderCollabMessages(body);
   _updateCollabFab();
 }
 
@@ -9322,15 +9298,15 @@ function _updateCollabFab() {
   fresh.id = "collabFab";
   fresh.className = "sdFab";
 
-  if (collabPill === "projects") {
+  if (R.collabPill === "projects") {
     fresh.setAttribute("aria-label", "Share");
     fresh.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="24" height="24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>`;
     fresh.addEventListener("click", () => _openShareFabMenu());
-  } else if (collabPill === "friends") {
+  } else if (R.collabPill === "friends") {
     fresh.setAttribute("aria-label", "Add");
     fresh.innerHTML = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`;
     fresh.addEventListener("click", () => _openFriendsFabMenu());
-  } else if (collabPill === "messages") {
+  } else if (R.collabPill === "messages") {
     fresh.setAttribute("aria-label", "New Message");
     fresh.innerHTML = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>`;
     fresh.addEventListener("click", () => _openNewMessagePicker());
@@ -9475,8 +9451,8 @@ function _renderCollabProjects(body) {
     card.addEventListener("click", () => {
       const name = card.getAttribute("data-collab-proj");
       navigateForward(() => {
-        collabMode = true;
-        projectDetailScreen = name;
+        R.collabMode = true;
+        R.projectDetailScreen = name;
       });
     });
   });
@@ -9635,7 +9611,7 @@ function _renderCollabFriendsDOM(body, friends) {
       const fId = row.getAttribute("data-friend-id");
       const friend = friends.find(f => String(f.id) === fId);
       if (!friend) return;
-      navigateForward(() => { friendProfileId = friend.friendId; overlayView = "friendProfile"; });
+      navigateForward(() => { R.friendProfileId = friend.friendId; R.overlayView = "friendProfile"; });
     });
   });
   friendsBody.querySelectorAll(".friendMsgBtn").forEach(btn => {
@@ -9707,7 +9683,7 @@ function _loadCollabPendingRequests(body) {
       row.addEventListener("click", (e) => {
         if (e.target.closest("[data-cfl-accept]") || e.target.closest("[data-cfl-decline]")) return;
         const userId = row.getAttribute("data-req-profile");
-        if (userId) navigateForward(() => { friendProfileId = userId; overlayView = "friendProfile"; });
+        if (userId) navigateForward(() => { R.friendProfileId = userId; R.overlayView = "friendProfile"; });
       });
     });
   }).catch(() => {});
@@ -9884,7 +9860,7 @@ function _finishSidebarSwipe(commit) {
 // Hooked into existing document touchstart/move/end below
 function _sidebarTouchStart(t) {
   // Only on collab root (no drill-in, no overlay)
-  if (currentTab !== "collab" || projectDetailScreen || selectedSongId || overlayView) return false;
+  if (R.currentTab !== "collab" || R.projectDetailScreen || R.selectedSongId || R.overlayView) return false;
   const els = _getCollabEls();
   if (!els) return false;
 
@@ -10186,8 +10162,8 @@ function renderCollabContent() {
       const sp = sharedProjects.find(p => p.projectId === projId);
       if (!sp) return;
       navigateForward(() => {
-        collabMode = true;
-        projectDetailScreen = sp.projectName;
+        R.collabMode = true;
+        R.projectDetailScreen = sp.projectName;
       });
     });
   });
@@ -10204,8 +10180,8 @@ function renderCollabContent() {
         state._sharedSongsCache.push(ss.song);
       }
       navigateForward(() => {
-        collabMode = true;
-        selectedSongId = ss.song.id;
+        R.collabMode = true;
+        R.selectedSongId = ss.song.id;
       });
     });
   });
@@ -10230,10 +10206,10 @@ function renderCollabContent() {
     row.addEventListener("click", () => {
       const name = row.getAttribute("data-collab-name");
       if (!name) return;
-      currentTab = "songs";
-      songsView = "list";
-      selectedSongId = null;
-      drawerView = null;
+      R.currentTab = "songs";
+      R.songsView = "list";
+      R.selectedSongId = null;
+      R.drawerView = null;
       setHeader("Songs");
       syncTabs();
       render();
@@ -10298,7 +10274,7 @@ function _collapseSidebarInAce() {
 }
 
 function openFriendsRequests() {
-  navigateForward(() => { overlayView = "friendRequests"; });
+  navigateForward(() => { R.overlayView = "friendRequests"; });
   _collapseSidebarInAce();
 }
 
@@ -10378,7 +10354,7 @@ function renderFriendRequests() {
 
 // ── Friends List View ──
 function openFriendsList() {
-  navigateForward(() => { overlayView = "friendsList"; });
+  navigateForward(() => { R.overlayView = "friendsList"; });
   _collapseSidebarInAce();
 }
 
@@ -10464,8 +10440,8 @@ function renderFriendsList() {
           const userId = row.getAttribute("data-req-profile");
           if (userId) {
             navigateForward(() => {
-              friendProfileId = userId;
-              overlayView = "friendProfile";
+              R.friendProfileId = userId;
+              R.overlayView = "friendProfile";
             });
           }
         });
@@ -10528,8 +10504,8 @@ function renderFriendsList() {
         const friend = friends.find(f => String(f.id) === fId);
         if (!friend) return;
         navigateForward(() => {
-          friendProfileId = friend.friendId;
-          overlayView = "friendProfile";
+          R.friendProfileId = friend.friendId;
+          R.overlayView = "friendProfile";
         });
       });
     });
@@ -10862,17 +10838,17 @@ function _wireFpSongRows() {
         || sharedData.projects.flatMap(sp => sp.songs).find(s => s.id === songId);
       if (localSong) {
         navigateForward(() => {
-          selectedSongId = songId;
-          selectedVersionId = null;
+          R.selectedSongId = songId;
+          R.selectedVersionId = null;
         });
       } else if (sharedSong) {
         // Temporarily inject into state for viewing
         if (!state._sharedSongsCache) state._sharedSongsCache = {};
         state._sharedSongsCache[songId] = sharedSong;
         navigateForward(() => {
-          selectedSongId = songId;
-          selectedVersionId = null;
-          collabMode = true;
+          R.selectedSongId = songId;
+          R.selectedVersionId = null;
+          R.collabMode = true;
         });
       }
     });
@@ -10883,12 +10859,12 @@ function _wireFpSongRows() {
 
 function openMessages() {
   requestNotificationPermission();
-  navigateForward(() => { overlayView = "messages"; });
+  navigateForward(() => { R.overlayView = "messages"; });
   _collapseSidebarInAce();
 }
 
 function openChat(userId) {
-  navigateForward(() => { friendProfileId = userId; overlayView = "chat"; });
+  navigateForward(() => { R.friendProfileId = userId; R.overlayView = "chat"; });
 }
 
 let _msgPollTimer = null;
@@ -11014,7 +10990,7 @@ function renderChat(userId) {
   // Poll for new messages every 5s
   if (_msgPollTimer) clearInterval(_msgPollTimer);
   _msgPollTimer = setInterval(async () => {
-    if (overlayView !== "chat" || friendProfileId !== _chatUserId) {
+    if (R.overlayView !== "chat" || R.friendProfileId !== _chatUserId) {
       clearInterval(_msgPollTimer);
       _msgPollTimer = null;
       return;
@@ -11187,7 +11163,7 @@ async function openInviteShareScreen() {
 
 // ── Add Friend View ──
 function openAddFriend() {
-  navigateForward(() => { overlayView = "addFriend"; });
+  navigateForward(() => { R.overlayView = "addFriend"; });
   _collapseSidebarInAce();
 }
 
@@ -11838,7 +11814,7 @@ function openLoadedInviteBuilder(editInvite = null) {
         await deleteLoadedInvite(editInvite.id);
         toast("Invite deleted");
         close();
-        _refreshLoadedInvites().then(() => { if (currentTab === "collab") _renderCollabPillContent(); });
+        _refreshLoadedInvites().then(() => { if (R.currentTab === "collab") _renderCollabPillContent(); });
       } catch (e) {
         toast(e.message || "Failed to delete");
       }
@@ -11888,7 +11864,7 @@ function openLoadedInviteBuilder(editInvite = null) {
           });
           toast("Invite updated!");
           close();
-          _refreshLoadedInvites().then(() => { if (currentTab === "collab") _renderCollabPillContent(); });
+          _refreshLoadedInvites().then(() => { if (R.currentTab === "collab") _renderCollabPillContent(); });
         } else {
           const result = await createLoadedInvite({
             projectIds,
@@ -11913,7 +11889,7 @@ function openLoadedInviteBuilder(editInvite = null) {
           }
 
           close();
-          _refreshLoadedInvites().then(() => { if (currentTab === "collab") _renderCollabPillContent(); });
+          _refreshLoadedInvites().then(() => { if (R.currentTab === "collab") _renderCollabPillContent(); });
         }
       } catch (e) {
         console.error("Loaded invite error:", e);
@@ -12018,14 +11994,14 @@ function _showLoadedInviteWelcome(claimResult) {
   overlay.querySelector("#liWelcomeGo").addEventListener("click", () => {
     dismiss();
     // Navigate to Collab tab to see shared content
-    currentTab = "collab";
-    collabPill = "projects";
+    R.currentTab = "collab";
+    R.collabPill = "projects";
     render();
   });
 
   // Fetch shared data, then enrich the items list
   refreshSharedData().then(() => {
-    if (currentTab === "collab") render();
+    if (R.currentTab === "collab") render();
     const itemsEl = overlay.querySelector("#liWelcomeItems");
     if (!itemsEl) return;
 
@@ -12314,9 +12290,9 @@ function renderAlerts() {
       if (userId) {
         _pendingFriendAction = { friendshipId, notifId };
         navigateForward(() => {
-          drawerView = null; // clear so render() doesn't re-enter alerts
-          friendProfileId = userId;
-          overlayView = "friendProfile";
+          R.drawerView = null; // clear so render() doesn't re-enter alerts
+          R.friendProfileId = userId;
+          R.overlayView = "friendProfile";
         });
       }
     });
@@ -12394,8 +12370,8 @@ function renderGlobalSearch() {
   setTimeout(() => input?.focus(), 80);
 
   activeScreenEl.querySelector("#gsCancel").addEventListener("click", () => {
-    drawerView = null;
-    setHeader(TAB_TITLES[currentTab] || "RiffBank");
+    R.drawerView = null;
+    setHeader(TAB_TITLES[R.currentTab] || "RiffBank");
     render();
   });
 
@@ -12508,25 +12484,25 @@ function renderSearchResults(q, container) {
   container.querySelectorAll(".gsRow").forEach(btn => {
     btn.addEventListener("click", () => {
       const type = btn.dataset.type;
-      drawerView = null;
+      R.drawerView = null;
       if (type === "song") {
-        currentTab = "songs";
-        songsView = "list";
-        selectedSongId = btn.dataset.id;
-        selectedVersionId = null;
+        R.currentTab = "songs";
+        R.songsView = "list";
+        R.selectedSongId = btn.dataset.id;
+        R.selectedVersionId = null;
         setHeader("Song");
         syncTabs();
         render();
       } else if (type === "project") {
-        drawerView = "projects";
-        projectDetailScreen = btn.dataset.id;
+        R.drawerView = "projects";
+        R.projectDetailScreen = btn.dataset.id;
         setActiveScreen("projectDetail");
-        renderProjectSongs(projectDetailScreen);
+        renderProjectSongs(R.projectDetailScreen);
       } else if (type === "collab") {
         resetSongsFilters({ keepSort: true });
-        currentTab = "songs";
-        songsView = "list";
-        selectedSongId = null;
+        R.currentTab = "songs";
+        R.songsView = "list";
+        R.selectedSongId = null;
         setHeader("Songs");
         syncTabs();
         render();
@@ -12544,12 +12520,11 @@ function renderSearchResults(q, container) {
 
 // ── Lyrics view ──
 let lyricsQuery = "";
-let lyricsEditSongId = null; // when set, we show the edit view
 
 function renderLyricsScratch() {
-  if (lyricsEditSongId) return renderLyricsEdit(lyricsEditSongId);
+  if (R.lyricsEditSongId) return renderLyricsEdit(R.lyricsEditSongId);
 
-  overlayView = "lyrics";
+  R.overlayView = "lyrics";
   setHeader("Lyrics");
   const appEl = document.querySelector(".app");
   appEl?.classList.add("collapseTitle");
@@ -12614,7 +12589,7 @@ function renderLyricsScratch() {
     row.addEventListener("click", () => {
       const sid = row.getAttribute("data-lyrics-song");
       if (sid) {
-        lyricsEditSongId = sid;
+        R.lyricsEditSongId = sid;
         navigateForward(() => renderLyricsEdit(sid));
       }
     });
@@ -12686,7 +12661,7 @@ function openLyricsActionSheet(song) {
       const act = btn.getAttribute("data-act");
       if (act === "edit") {
         close();
-        lyricsEditSongId = song.id;
+        R.lyricsEditSongId = song.id;
         navigateForward(() => renderLyricsEdit(song.id));
       } else if (act === "clear") {
         close();
@@ -12708,12 +12683,12 @@ function openLyricsActionSheet(song) {
 function renderLyricsEdit(songId) {
   const song = getSong(songId);
   if (!song) {
-    lyricsEditSongId = null;
+    R.lyricsEditSongId = null;
     return renderLyricsScratch();
   }
 
-  overlayView = "lyrics";
-  lyricsEditSongId = songId;
+  R.overlayView = "lyrics";
+  R.lyricsEditSongId = songId;
   setHeader("Edit Lyrics");
 
   const cover = coverSvg(song, { lite: true });
@@ -12776,7 +12751,7 @@ function openLyricsSongPicker() {
       const sid = btn.getAttribute("data-pick-song");
       close();
       if (sid === "cancel") return;
-      lyricsEditSongId = sid;
+      R.lyricsEditSongId = sid;
       navigateForward(() => renderLyricsEdit(sid));
     });
   });
@@ -12786,7 +12761,7 @@ function openLyricsSongPicker() {
 }
 
 function renderNextActions() {
-  overlayView = "next";
+  R.overlayView = "next";
   setHeader("Next Actions");
   const songs = state.songs.filter((s) => (s.nextAction || "").trim());
   activeScreenEl.innerHTML = `
@@ -12810,16 +12785,16 @@ function renderNextActions() {
     </div>
   `;
   $("#closeNextActions")?.addEventListener("click", () => {
-    overlayView = null;
-    currentTab = "home";
+    R.overlayView = null;
+    R.currentTab = "home";
     setHeader("RiffBank");
     renderHome();
   });
   activeScreenEl.querySelectorAll("[data-open-song]").forEach((el) =>
     el.addEventListener("click", () => {
       navigateForward(() => {
-        currentTab = "songs";
-        selectedSongId = el.getAttribute("data-open-song");
+        R.currentTab = "songs";
+        R.selectedSongId = el.getAttribute("data-open-song");
       });
     })
   );
@@ -12892,8 +12867,8 @@ function renderSongsList() {
 
   activeScreenEl.innerHTML = `
     <div class="songsTitleRow">
-      <div class="songsPageTitle">${songsFromCollab ? "Shared Songs" : "Songs"}</div>
-      ${songsFromCollab ? "" : `<div class="ownerDropWrap">
+      <div class="songsPageTitle">${R.songsFromCollab ? "Shared Songs" : "Songs"}</div>
+      ${R.songsFromCollab ? "" : `<div class="ownerDropWrap">
         <button class="ownerDropBtn">${ownerLabels[ownerFilter]}${chevronDown}</button>
       </div>`}
     </div>
@@ -13044,9 +13019,9 @@ function renderSongsList() {
 
       el.addEventListener("click", () => {
         if (didLongPress) return;
-        songsListScrollTop = activeScreenEl.scrollTop;
+        R.songsListScrollTop = activeScreenEl.scrollTop;
         navigateForward(() => {
-          selectedSongId = el.getAttribute("data-id");
+          R.selectedSongId = el.getAttribute("data-id");
         });
       });
     });
@@ -13056,8 +13031,8 @@ function renderSongsList() {
         const artist = el.getAttribute("data-artist");
         if (!artist) return;
         navigateForward(() => {
-          drawerView = "projects";
-          projectDetailScreen = artist;
+          R.drawerView = "projects";
+          R.projectDetailScreen = artist;
         });
       });
     });
@@ -13083,7 +13058,7 @@ function renderSongsList() {
       item.addEventListener("click", () => {
         menu.remove();
         songsListState.ownerFilter = item.getAttribute("data-owner") || "all";
-        songsListScrollTop = 0;
+        R.songsListScrollTop = 0;
         renderSongsList();
       });
     });
@@ -13098,8 +13073,8 @@ function renderSongsList() {
   applyFilter();
 
   // Restore scroll position when returning from a song detail view
-  if (songsListScrollTop > 0) {
-    activeScreenEl.scrollTop = songsListScrollTop;
+  if (R.songsListScrollTop > 0) {
+    activeScreenEl.scrollTop = R.songsListScrollTop;
   }
 
   // Collapse title: fade small title in proportion to big title scrolling behind topbar
@@ -13175,8 +13150,8 @@ function songReleaseLabel(song) {
 function renderSongDetail(id) {
   const song = getSong(id);
   if (!song) {
-    selectedSongId = null;
-    selectedVersionId = null;
+    R.selectedSongId = null;
+    R.selectedVersionId = null;
     return render();
   }
 
@@ -13344,7 +13319,7 @@ function renderSongDetail(id) {
     const newV = createVersion(song);
     if (!newV) return toast("Couldn’t create version");
     navigateForward(() => {
-      selectedVersionId = newV.id;
+      R.selectedVersionId = newV.id;
     });
   });
 
@@ -13628,12 +13603,12 @@ function showEvoActionMenu(container, nodeEl, song, versionId) {
     } else if (action === "addVersion") {
       const newV = createVersion(song);
       if (!newV) return toast("Couldn't create version");
-      selectedVersionId = newV.id;
+      R.selectedVersionId = newV.id;
       render();
     } else if (action === "rename") {
-      navigateForward(() => { selectedVersionId = versionId; });
+      navigateForward(() => { R.selectedVersionId = versionId; });
     } else if (action === "notes") {
-      navigateForward(() => { selectedVersionId = versionId; });
+      navigateForward(() => { R.selectedVersionId = versionId; });
     }
   });
 }
@@ -13643,7 +13618,7 @@ function renderVersionDetail(songId, versionId) {
   const v = getVersion(song, versionId);
 
   if (!song || !v) {
-    selectedVersionId = null;
+    R.selectedVersionId = null;
     return render();
   }
 
@@ -13922,7 +13897,7 @@ function renderVersionDetail(songId, versionId) {
     saveState();
     toast("Deleted 🗑️");
 
-    selectedVersionId = null;
+    R.selectedVersionId = null;
     render();
   });
 }
@@ -13934,10 +13909,10 @@ function renderPlayer() {
   setHeader("");
 
   // Build playlist rows (one row per version where playerYes === true)
-  const allItems = playerItems(state); // uses playerFilter/playerSort globals
+  const allItems = playerItems(state); // uses R.playerFilter/R.playerSort globals
 
   // Apply search filter
-  const pq = playerQuery.toLowerCase();
+  const pq = R.playerQuery.toLowerCase();
   const items = pq
     ? allItems.filter(it => {
         const s = getSong(it.songId);
@@ -14029,11 +14004,11 @@ function renderPlayer() {
 
         if (act === "goto") {
           close();
-          currentTab = "songs";
-          drawerView = null;
-          overlayView = null;
-          selectedSongId = s.id;
-          selectedVersionId = null;
+          R.currentTab = "songs";
+          R.drawerView = null;
+          R.overlayView = null;
+          R.selectedSongId = s.id;
+          R.selectedVersionId = null;
           setHeader("Song");
           syncTabs();
           render();
@@ -14069,16 +14044,16 @@ function renderPlayer() {
         id="playerSearch"
         type="text"
         placeholder="Search player..."
-        value="${escapeHtml(playerQuery)}"
+        value="${escapeHtml(R.playerQuery)}"
       />
     </div>
 
     <div class="playerChipsSticky">
       <div class="chipsRow" aria-label="Player filters">
-        <button class="chip ${playerFilter === "all" ? "active" : ""}" data-pf="all">Riffs</button>
-        <button class="chip ${playerFilter === "playlists" ? "active" : ""}" data-pf="playlists">Playlists</button>
-        <button class="chip ${playerFilter === "projects" ? "active" : ""}" data-pf="projects">Projects</button>
-        <button class="chip ${playerFilter === "releases" ? "active" : ""}" data-pf="releases">Releases</button>
+        <button class="chip ${R.playerFilter === "all" ? "active" : ""}" data-pf="all">Riffs</button>
+        <button class="chip ${R.playerFilter === "playlists" ? "active" : ""}" data-pf="playlists">Playlists</button>
+        <button class="chip ${R.playerFilter === "projects" ? "active" : ""}" data-pf="projects">Projects</button>
+        <button class="chip ${R.playerFilter === "releases" ? "active" : ""}" data-pf="releases">Releases</button>
       </div>
     </div>
 
@@ -14126,7 +14101,7 @@ function renderPlayer() {
   const searchInput = $("#playerSearch");
   if (searchInput) {
     searchInput.addEventListener("input", () => {
-      playerQuery = searchInput.value;
+      R.playerQuery = searchInput.value;
       renderPlayer();
       // Re-focus and restore cursor position
       const el = $("#playerSearch");
@@ -14137,7 +14112,7 @@ function renderPlayer() {
   // Filter chips (single-select mode filters)
   activeScreenEl.querySelectorAll("[data-pf]").forEach(btn => {
     btn.addEventListener("click", () => {
-      playerFilter = btn.getAttribute("data-pf") || "all";
+      R.playerFilter = btn.getAttribute("data-pf") || "all";
       renderPlayer();
     });
   });
@@ -14238,7 +14213,7 @@ function renderPlayer() {
 function renderNowPlaying() {
   const now = state.player?.nowPlaying;
   if (!now) {
-    playerScreen = "list";
+    R.playerScreen = "list";
     return renderPlayer();
   }
 
@@ -14248,13 +14223,13 @@ function renderNowPlaying() {
   const song = getSong(now.songId);
   const v = song ? getVersion(song, now.versionId) : null;
   if (!song || !v) {
-    playerScreen = "list";
+    R.playerScreen = "list";
     return renderPlayer();
   }
 
   setHeader("Now Playing");
-  const isFirstOpen = !fullPlayerOpen;
-  fullPlayerOpen = true;
+  const isFirstOpen = !R.fullPlayerOpen;
+  R.fullPlayerOpen = true;
   setFullPlayerOpen(true);
 
   const title = song.title || "Untitled";
@@ -14481,15 +14456,15 @@ function renderNowPlaying() {
 
   const closeFullPlayer = () => {
     cleanup();
-    fullPlayerOpen = false;
+    R.fullPlayerOpen = false;
     setFullPlayerOpen(false);
-    playerScreen = "list";
-    if (prevTabBeforeFullPlayer) {
-      currentTab = prevTabBeforeFullPlayer;
-      selectedSongId = prevSelectedSongIdBeforeFullPlayer;
-      prevTabBeforeFullPlayer = null;
-      prevSelectedSongIdBeforeFullPlayer = null;
-      setHeader(currentTab === "songs" && selectedSongId ? "Song" : TAB_TITLES[currentTab] || "RiffBank");
+    R.playerScreen = "list";
+    if (R.prevTabBeforeFullPlayer) {
+      R.currentTab = R.prevTabBeforeFullPlayer;
+      R.selectedSongId = R.prevSelectedSongIdBeforeFullPlayer;
+      R.prevTabBeforeFullPlayer = null;
+      R.prevSelectedSongIdBeforeFullPlayer = null;
+      setHeader(R.currentTab === "songs" && R.selectedSongId ? "Song" : TAB_TITLES[R.currentTab] || "RiffBank");
     } else {
       setHeader("Player");
     }
@@ -14537,22 +14512,22 @@ function renderNowPlaying() {
     // First significant drag: lift player to body, render previous screen underneath
     if (!_peekReady && dy > 8) {
       _peekReady = true;
-      _savedPrevTab = prevTabBeforeFullPlayer;
-      _savedPrevSongId = prevSelectedSongIdBeforeFullPlayer;
+      _savedPrevTab = R.prevTabBeforeFullPlayer;
+      _savedPrevSongId = R.prevSelectedSongIdBeforeFullPlayer;
 
       // Move fp to body so it floats above everything
       document.body.appendChild(fp);
 
       // Restore previous screen underneath
-      fullPlayerOpen = false;
+      R.fullPlayerOpen = false;
       setFullPlayerOpen(false);
-      playerScreen = "list";
+      R.playerScreen = "list";
       if (_savedPrevTab) {
-        currentTab = _savedPrevTab;
-        selectedSongId = _savedPrevSongId;
-        prevTabBeforeFullPlayer = null;
-        prevSelectedSongIdBeforeFullPlayer = null;
-        setHeader(currentTab === "songs" && selectedSongId ? "Song" : TAB_TITLES[currentTab] || "RiffBank");
+        R.currentTab = _savedPrevTab;
+        R.selectedSongId = _savedPrevSongId;
+        R.prevTabBeforeFullPlayer = null;
+        R.prevSelectedSongIdBeforeFullPlayer = null;
+        setHeader(R.currentTab === "songs" && R.selectedSongId ? "Song" : TAB_TITLES[R.currentTab] || "RiffBank");
       } else {
         setHeader("Player");
       }
@@ -14578,12 +14553,12 @@ function renderNowPlaying() {
         fp.addEventListener("transitionend", () => fp.remove(), { once: true });
       } else {
         // Cancel: animate player back into place, restore state
-        fullPlayerOpen = true;
+        R.fullPlayerOpen = true;
         setFullPlayerOpen(true);
-        prevTabBeforeFullPlayer = _savedPrevTab;
-        prevSelectedSongIdBeforeFullPlayer = _savedPrevSongId;
-        currentTab = "player";
-        playerScreen = "now";
+        R.prevTabBeforeFullPlayer = _savedPrevTab;
+        R.prevSelectedSongIdBeforeFullPlayer = _savedPrevSongId;
+        R.currentTab = "player";
+        R.playerScreen = "now";
         syncTabs();
 
         // Slide fp back to origin, then move it back into #view
@@ -14666,12 +14641,12 @@ $("#npRepeat")?.addEventListener("click", () => {
   $("#npGoSong")?.addEventListener("click", () => {
     cleanup();
     setFullPlayerOpen(false);
-    currentTab = "songs";
-    selectedSongId = song.id;
-    selectedVersionId = null;
-    drawerView = null;
-    overlayView = null;
-    playerScreen = "list";
+    R.currentTab = "songs";
+    R.selectedSongId = song.id;
+    R.selectedVersionId = null;
+    R.drawerView = null;
+    R.overlayView = null;
+    R.playerScreen = "list";
     setHeader("Song");
     syncTabs();
     render();
@@ -14680,7 +14655,7 @@ $("#npRepeat")?.addEventListener("click", () => {
   $("#npGoList")?.addEventListener("click", () => {
     cleanup();
     setFullPlayerOpen(false);
-    playerScreen = "list";
+    R.playerScreen = "list";
     setHeader("Player");
     render();
   });
@@ -14786,7 +14761,7 @@ function _setCollapseTitle() {
 // Navigate into a settings sub-screen
 function _setNav(view, title) {
   navigateForward(() => {
-    settingsView = view;
+    R.settingsView = view;
     setHeader(title);
     syncTabs();
   });
@@ -15403,7 +15378,7 @@ function renderSettingsDanger() {
       if (statusEl) { statusEl.textContent = "Library cleared"; statusEl.style.color = "#4ade80"; }
       await new Promise(r => setTimeout(r, 800));
       overlay.remove();
-      settingsView = null;
+      R.settingsView = null;
       render();
     } catch (e) {
       console.error("[ClearLib] failed:", e);
@@ -15473,7 +15448,7 @@ function renderSettingsDanger() {
       if (statusEl) { statusEl.textContent = "Songs cleared"; statusEl.style.color = "#4ade80"; }
       await new Promise(r => setTimeout(r, 800));
       overlay.remove();
-      settingsView = null;
+      R.settingsView = null;
       render();
     } catch (e) {
       console.error("[ClearSongs] failed:", e);
@@ -15530,7 +15505,7 @@ function preventRubberBandScroll(container) {
       if (document.body.classList.contains("isHome")) return;
 
       // ✅ Allow native scrolling on Songs detail screens (Song + Version detail)
-      if (currentTab === "songs" && selectedSongId) return;
+      if (R.currentTab === "songs" && R.selectedSongId) return;
 
       const canScroll = container.scrollHeight > container.clientHeight + 1;
       if (!canScroll) return;
