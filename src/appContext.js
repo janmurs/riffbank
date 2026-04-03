@@ -10,13 +10,23 @@ export const ctx = {
   setHeader: null,
   syncTabs: null,
   getActiveScreenEl: null,
+  _updateNotifBadge: null,
+  resetSongsFilters: null,
+  getSongsListState: null,
+  getProjectsOwnerFilter: null,
+  setProjectsOwnerFilter: null,
 };
 
-export function initAppContext({ render, navigateForward, goBack, setHeader, syncTabs, getActiveScreenEl }) {
+export function initAppContext({ render, navigateForward, goBack, setHeader, syncTabs, getActiveScreenEl, _updateNotifBadge, resetSongsFilters, getSongsListState, getProjectsOwnerFilter, setProjectsOwnerFilter }) {
   ctx.render = render;
   ctx.navigateForward = navigateForward;
   ctx.goBack = goBack;
   ctx.setHeader = setHeader;
   ctx.syncTabs = syncTabs;
   ctx.getActiveScreenEl = getActiveScreenEl;
+  ctx._updateNotifBadge = _updateNotifBadge;
+  ctx.resetSongsFilters = resetSongsFilters;
+  ctx.getSongsListState = getSongsListState;
+  ctx.getProjectsOwnerFilter = getProjectsOwnerFilter;
+  ctx.setProjectsOwnerFilter = setProjectsOwnerFilter;
 }
