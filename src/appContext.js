@@ -30,10 +30,11 @@ export const ctx = {
   syncMiniPlayerUI: null,
   shareInviteSong: null,
   openVersionMenu: null,
+  nav: null,
 };
 
 export function initAppContext(opts) {
-  const { render, navigateForward, goBack, setHeader, syncTabs, getActiveScreenEl, _updateNotifBadge, resetSongsFilters, getSongsListState, getProjectsOwnerFilter, setProjectsOwnerFilter, openCreateOverlay, openSheet, openSongMenu, playVersion, addToQueue, createVersion, setActive, openSongFilters, pickAudioFile, getGlobalAudio, unlockAudioOnce, playNowPlaying, syncMiniPlayerUI, shareInviteSong, openVersionMenu } = opts;
+  const { render, navigateForward, goBack, setHeader, syncTabs, getActiveScreenEl, _updateNotifBadge, resetSongsFilters, getSongsListState, getProjectsOwnerFilter, setProjectsOwnerFilter, openCreateOverlay, openSheet, openSongMenu, playVersion, addToQueue, createVersion, setActive, openSongFilters, pickAudioFile, getGlobalAudio, unlockAudioOnce, playNowPlaying, syncMiniPlayerUI, shareInviteSong, openVersionMenu, nav } = opts;
   ctx.render = render;
   ctx.navigateForward = navigateForward;
   ctx.goBack = goBack;
@@ -60,4 +61,5 @@ export function initAppContext(opts) {
   ctx.syncMiniPlayerUI = syncMiniPlayerUI;
   ctx.shareInviteSong = shareInviteSong;
   ctx.openVersionMenu = openVersionMenu;
+  ctx.nav = nav;
 }
