@@ -31,10 +31,12 @@ export const ctx = {
   shareInviteSong: null,
   openVersionMenu: null,
   nav: null,
+  refreshSharedData: null,
+  syncMessageBadges: null,
 };
 
 export function initAppContext(opts) {
-  const { render, navigateForward, goBack, setHeader, syncTabs, getActiveScreenEl, _updateNotifBadge, resetSongsFilters, getSongsListState, getProjectsOwnerFilter, setProjectsOwnerFilter, openCreateOverlay, openSheet, openSongMenu, playVersion, addToQueue, createVersion, setActive, openSongFilters, pickAudioFile, getGlobalAudio, unlockAudioOnce, playNowPlaying, syncMiniPlayerUI, shareInviteSong, openVersionMenu, nav } = opts;
+  const { render, navigateForward, goBack, setHeader, syncTabs, getActiveScreenEl, _updateNotifBadge, resetSongsFilters, getSongsListState, getProjectsOwnerFilter, setProjectsOwnerFilter, openCreateOverlay, openSheet, openSongMenu, playVersion, addToQueue, createVersion, setActive, openSongFilters, pickAudioFile, getGlobalAudio, unlockAudioOnce, playNowPlaying, syncMiniPlayerUI, shareInviteSong, openVersionMenu, nav, refreshSharedData, syncMessageBadges } = opts;
   ctx.render = render;
   ctx.navigateForward = navigateForward;
   ctx.goBack = goBack;
@@ -62,4 +64,6 @@ export function initAppContext(opts) {
   ctx.shareInviteSong = shareInviteSong;
   ctx.openVersionMenu = openVersionMenu;
   ctx.nav = nav;
+  ctx.refreshSharedData = refreshSharedData;
+  ctx.syncMessageBadges = syncMessageBadges;
 }

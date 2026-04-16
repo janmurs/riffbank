@@ -45,6 +45,7 @@ const PRECACHE_URLS = [
   "/src/views/songsView.js",
   "/src/views/projectsView.js",
   "/src/views/releasesView.js",
+  "/src/views/collabView.js",
   "/src/splash/splash.js",
   "/manifest.json",
   "/icon-1024.png",
