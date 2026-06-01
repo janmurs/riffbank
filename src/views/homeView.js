@@ -1,6 +1,7 @@
 import { R } from "../router.js";
 import { ctx } from "../appContext.js";
 import { state } from "../state.js";
+import { renderGlobalSearch } from "./searchView.js";
 
 export function renderHome() {
   // Cleanup previous particle system if re-rendering
@@ -122,7 +123,7 @@ export function renderHome() {
   });
   ctx.getActiveScreenEl().querySelector("#htbSearch")?.addEventListener("click", () => {
     R.drawerView = "globalSearch";
-    setActiveScreen("drawer");
+    ctx.setActiveScreen("drawer");
     renderGlobalSearch();
   });
   ctx.getActiveScreenEl().querySelector("#htbSettings")?.addEventListener("click", () => {

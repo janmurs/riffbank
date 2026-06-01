@@ -9,6 +9,7 @@ export const ctx = {
   goBack: null,
   setHeader: null,
   syncTabs: null,
+  setActiveScreen: null,
   getActiveScreenEl: null,
   _updateNotifBadge: null,
   resetSongsFilters: null,
@@ -36,12 +37,13 @@ export const ctx = {
 };
 
 export function initAppContext(opts) {
-  const { render, navigateForward, goBack, setHeader, syncTabs, getActiveScreenEl, _updateNotifBadge, resetSongsFilters, getSongsListState, getProjectsOwnerFilter, setProjectsOwnerFilter, openCreateOverlay, openSheet, openSongMenu, playVersion, addToQueue, createVersion, setActive, openSongFilters, pickAudioFile, getGlobalAudio, unlockAudioOnce, playNowPlaying, syncMiniPlayerUI, shareInviteSong, openVersionMenu, nav, refreshSharedData, syncMessageBadges } = opts;
+  const { render, navigateForward, goBack, setHeader, syncTabs, setActiveScreen, getActiveScreenEl, _updateNotifBadge, resetSongsFilters, getSongsListState, getProjectsOwnerFilter, setProjectsOwnerFilter, openCreateOverlay, openSheet, openSongMenu, playVersion, addToQueue, createVersion, setActive, openSongFilters, pickAudioFile, getGlobalAudio, unlockAudioOnce, playNowPlaying, syncMiniPlayerUI, shareInviteSong, openVersionMenu, nav, refreshSharedData, syncMessageBadges } = opts;
   ctx.render = render;
   ctx.navigateForward = navigateForward;
   ctx.goBack = goBack;
   ctx.setHeader = setHeader;
   ctx.syncTabs = syncTabs;
+  ctx.setActiveScreen = setActiveScreen;
   ctx.getActiveScreenEl = getActiveScreenEl;
   ctx._updateNotifBadge = _updateNotifBadge;
   ctx.resetSongsFilters = resetSongsFilters;
