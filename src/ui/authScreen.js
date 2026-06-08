@@ -1,7 +1,7 @@
-import { signUp, signIn, verifyOtp, resendConfirmation } from "../supabase.js";
+import { signUp, signIn, verifyOtp, resendConfirmation, requestPasswordReset, updatePassword, clearPasswordRecovery } from "../supabase.js";
 import { salSvg } from "./onboarding.js";
 
-export function showAuthScreen() {
+export function showAuthScreen({ initialView } = {}) {
   return new Promise((resolve) => {
     const el = document.createElement("div");
     el.id = "authScreen";
@@ -24,6 +24,9 @@ export function showAuthScreen() {
             <div id="authError" class="authError"></div>
             <button id="authSubmit" type="submit" class="authSubmitBtn">Log In</button>
           </form>
+          <div class="authOtpLinks" id="authForgotWrap">
+            <button class="authLinkBtn" id="authForgotBtn">Forgot password?</button>
+          </div>
         </div>
       `;
       // Inject inputs after iOS autofill scan completes, then fade the screen in
@@ -76,6 +79,109 @@ export function showAuthScreen() {
       wireOtp(email);
     }
 
+    // Step 3: Forgot password — request reset email
+    function renderForgot(prefillEmail = "") {
+      el.innerHTML = `
+        <div class="authCard">
+          <div class="authSalWrap">${salSvg(80)}</div>
+          <div class="authLogo">Forgot Password</div>
+          <div class="authOtpHint">
+            Enter your email and we'll send you a link to reset your password.
+          </div>
+          <form id="forgotForm" autocomplete="off">
+            <input id="forgotEmail" type="text" inputmode="email" placeholder="Email" required autocomplete="off" value="${prefillEmail.replace(/"/g, "&quot;")}" />
+            <div id="authError" class="authError"></div>
+            <button id="forgotSubmit" type="submit" class="authSubmitBtn">Send reset link</button>
+          </form>
+          <div class="authOtpLinks">
+            <button class="authLinkBtn" id="forgotBack">Back to login</button>
+          </div>
+        </div>
+      `;
+      const errorEl = el.querySelector("#authError");
+      const submitBtn = el.querySelector("#forgotSubmit");
+      el.querySelector("#forgotForm").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const email = el.querySelector("#forgotEmail").value.trim();
+        if (!email) { errorEl.textContent = "Email required"; return; }
+        errorEl.style.color = "";
+        errorEl.textContent = "";
+        submitBtn.disabled = true;
+        submitBtn.textContent = "Sending...";
+        try {
+          await requestPasswordReset(email);
+          errorEl.style.color = "#22c55e";
+          errorEl.textContent = "Check your email for a reset link.";
+          submitBtn.textContent = "Sent ✓";
+        } catch (err) {
+          errorEl.style.color = "";
+          errorEl.textContent = err.message || "Couldn't send reset email";
+          submitBtn.disabled = false;
+          submitBtn.textContent = "Send reset link";
+        }
+      });
+      el.querySelector("#forgotBack").addEventListener("click", () => renderForm());
+    }
+
+    // Step 4: Set new password — shown after PASSWORD_RECOVERY event
+    function renderReset() {
+      el.innerHTML = `
+        <div class="authCard">
+          <div class="authSalWrap">${salSvg(80)}</div>
+          <div class="authLogo">Set New Password</div>
+          <div class="authOtpHint">
+            Choose a new password for your account.
+          </div>
+          <form id="resetForm" autocomplete="off">
+            <div class="authPassWrap">
+              <input id="resetPass" type="password" placeholder="New password" required autocomplete="off" minlength="6" />
+              <button type="button" class="authEyeBtn" id="resetEye" aria-label="Show password">
+                <svg class="authEyeOpen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                <svg class="authEyeClosed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+              </button>
+            </div>
+            <input id="resetPassConfirm" type="password" placeholder="Confirm new password" required autocomplete="off" minlength="6" />
+            <div id="authError" class="authError"></div>
+            <button id="resetSubmit" type="submit" class="authSubmitBtn">Update password</button>
+          </form>
+        </div>
+      `;
+      const errorEl = el.querySelector("#authError");
+      const submitBtn = el.querySelector("#resetSubmit");
+      const passInput = el.querySelector("#resetPass");
+      const eyeBtn = el.querySelector("#resetEye");
+
+      eyeBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const isHidden = passInput.type === "password";
+        passInput.type = isHidden ? "text" : "password";
+        eyeBtn.classList.toggle("showing", isHidden);
+      });
+
+      el.querySelector("#resetForm").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const pass = passInput.value;
+        const confirm = el.querySelector("#resetPassConfirm").value;
+        errorEl.style.color = "";
+        if (pass.length < 6) { errorEl.textContent = "Password must be at least 6 characters"; return; }
+        if (pass !== confirm) { errorEl.textContent = "Passwords don't match"; return; }
+        errorEl.textContent = "";
+        submitBtn.disabled = true;
+        submitBtn.textContent = "Updating...";
+        try {
+          await updatePassword(pass);
+          clearPasswordRecovery();
+          el.classList.add("authFadeOut");
+          setTimeout(() => { el.remove(); resolve(); }, 300);
+        } catch (err) {
+          errorEl.textContent = err.message || "Couldn't update password";
+          submitBtn.disabled = false;
+          submitBtn.textContent = "Update password";
+        }
+      });
+    }
+
     function wireForm() {
       let mode = "login";
       const toggleBtns = el.querySelectorAll(".authToggleBtn");
@@ -83,6 +189,8 @@ export function showAuthScreen() {
       const errorEl = el.querySelector("#authError");
       const passInput = el.querySelector("#authPass");
       const eyeBtn = el.querySelector("#authEye");
+      const forgotWrap = el.querySelector("#authForgotWrap");
+      const forgotBtn = el.querySelector("#authForgotBtn");
 
       // Password visibility toggle
       eyeBtn.addEventListener("click", (e) => {
@@ -99,7 +207,13 @@ export function showAuthScreen() {
           toggleBtns.forEach((b) => b.classList.toggle("active", b === btn));
           submitBtn.textContent = mode === "login" ? "Log In" : "Create Account";
           errorEl.textContent = "";
+          if (forgotWrap) forgotWrap.style.display = mode === "login" ? "" : "none";
         });
+      });
+
+      forgotBtn?.addEventListener("click", () => {
+        const prefill = el.querySelector("#authEmail")?.value.trim() || "";
+        renderForgot(prefill);
       });
 
       el.querySelector("#authForm").addEventListener("submit", async (e) => {
@@ -237,9 +351,17 @@ export function showAuthScreen() {
 
     // Render form content BEFORE appending to DOM so there's no empty flash.
     // The card starts hidden and fades in once inputs are injected (500ms iOS autofill workaround).
-    renderForm();
+    if (initialView === "reset") {
+      renderReset();
+    } else {
+      renderForm();
+    }
     el.style.opacity = "0";
     document.body.appendChild(el);
+    // For views that don't go through the 500ms autofill delay, fade in now
+    if (initialView === "reset") {
+      requestAnimationFrame(() => { el.style.opacity = ""; });
+    }
 
     // Prevent iOS from scrolling behind the auth overlay on any input focus
     el.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });

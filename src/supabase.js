@@ -82,6 +82,28 @@ export async function resendConfirmation(email) {
   if (error) throw error;
 }
 
+export async function requestPasswordReset(email) {
+  const { error } = await supabase.auth.resetPasswordForEmail(email, {
+    redirectTo: window.location.origin,
+  });
+  if (error) throw error;
+}
+
+export async function updatePassword(newPassword) {
+  const { error } = await supabase.auth.updateUser({ password: newPassword });
+  if (error) throw error;
+}
+
+// Detect Supabase's PASSWORD_RECOVERY event (fires when user lands via a
+// password reset email link). The session is real but temporary — the user
+// must set a new password before continuing.
+let _isPasswordRecovery = false;
+supabase.auth.onAuthStateChange((event) => {
+  if (event === "PASSWORD_RECOVERY") _isPasswordRecovery = true;
+});
+export function isPasswordRecovery() { return _isPasswordRecovery; }
+export function clearPasswordRecovery() { _isPasswordRecovery = false; }
+
 // ── Internal helpers ──────────────────────────────────
 
 async function getUserId() {

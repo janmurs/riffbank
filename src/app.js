@@ -372,6 +372,7 @@ import { R } from "./router.js";
 import {
   SUPABASE_URL, SUPABASE_ANON_KEY,
   supabase, signUp, signIn, signOut, getSession, onAuthChange, verifyOtp, resendConfirmation,
+  isPasswordRecovery,
   supabaseSyncStateSoon, supabasePushState, supabasePullState, supabasePullStateSilent,
   supabaseUploadAudio, supabaseFetchAudioBlob, supabaseDeleteAudio, supabaseDiscoverAudioPaths,
   supabaseUploadCover, supabaseFetchCoverBlob, supabaseCountUserSongs,
@@ -6351,6 +6352,10 @@ async function init() {
   }
   if (!authed) {
     await showAuthScreen();
+  } else if (isPasswordRecovery()) {
+    // User arrived via password reset email — force them to set a new password
+    // before continuing into the app.
+    await showAuthScreen({ initialView: "reset" });
   }
 
   // ── Boot overlay: show immediately after auth so there's no black screen ──

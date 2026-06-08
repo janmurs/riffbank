@@ -2,13 +2,14 @@ import { R } from "../router.js";
 import { ctx } from "../appContext.js";
 import { state, saveState } from "../state.js";
 import { toast } from "./toast.js";
-import { escapeHtml } from "./dom.js";
+import { $, escapeHtml } from "./dom.js";
 import { coverCache, generatingArtSongs } from "./coverArt.js";
 import { startBulkGenArt, bulkArtState } from "./coverArtOps.js";
 import { cacheAllCloudAudio, backupAllAudioToCloud } from "../audio/cloudSync.js";
 import {
   supabase, signOut, supabasePushState, supabasePullState,
   supabaseUploadAudio, supabaseDiscoverAudioPaths, supabaseFetchCoverBlob,
+  updatePassword,
 } from "../supabase.js";
 
 // recoverAndUploadAudio is passed via initSettingsView since it's still in app.js
@@ -160,6 +161,16 @@ export function renderSettingsAccount() {
           </div>
         </div>
         <div class="setSection">
+          <div class="setSectionLabel">Password</div>
+          <div class="setGroup" style="padding:14px;display:flex;flex-direction:column;gap:10px">
+            <input id="setNewPass" type="password" placeholder="New password" autocomplete="new-password" minlength="6" style="width:100%;padding:12px;background:var(--panel);border:1px solid var(--line);border-radius:10px;color:var(--text);font-family:'Montserrat',sans-serif;font-size:14px" />
+            <input id="setNewPassConfirm" type="password" placeholder="Confirm new password" autocomplete="new-password" minlength="6" style="width:100%;padding:12px;background:var(--panel);border:1px solid var(--line);border-radius:10px;color:var(--text);font-family:'Montserrat',sans-serif;font-size:14px" />
+            <div id="setPassMsg" style="font-size:13px;min-height:16px;font-family:'Montserrat',sans-serif"></div>
+            <button class="setBtn" id="setChangePass">Update password</button>
+          </div>
+          <div class="setDesc">Choose a new password. Use this to set one if you signed in via a reset link.</div>
+        </div>
+        <div class="setSection">
           <button class="setBtn setBtnRed" id="setSignOut">Sign Out</button>
           <div class="setDesc">Your local data stays on this device after signing out.</div>
         </div>
@@ -171,6 +182,29 @@ export function renderSettingsAccount() {
     if (!confirm("Sign out? Your local data stays on this device.")) return;
     await signOut();
     window.location.reload();
+  });
+
+  $("#setChangePass")?.addEventListener("click", async () => {
+    const pass = $("#setNewPass").value;
+    const confirmPass = $("#setNewPassConfirm").value;
+    const msg = $("#setPassMsg");
+    msg.style.color = "#f87171";
+    if (!pass || pass.length < 6) { msg.textContent = "Password must be at least 6 characters"; return; }
+    if (pass !== confirmPass) { msg.textContent = "Passwords don't match"; return; }
+    const btn = $("#setChangePass");
+    btn.disabled = true;
+    btn.textContent = "Updating...";
+    try {
+      await updatePassword(pass);
+      msg.style.color = "#22c55e";
+      msg.textContent = "Password updated.";
+      $("#setNewPass").value = "";
+      $("#setNewPassConfirm").value = "";
+    } catch (err) {
+      msg.textContent = err.message || "Couldn't update password";
+    }
+    btn.disabled = false;
+    btn.textContent = "Update password";
   });
 
   _setCollapseTitle();
